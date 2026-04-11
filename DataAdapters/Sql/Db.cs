@@ -11,9 +11,15 @@ namespace Dmart.DataAdapters.Sql;
 // (useful for tests, smoke checks, and graceful degradation). The connection-string
 // requirement is enforced at OpenAsync time and surfaces as a clean exception in the
 // failing handler rather than a DI resolution failure at startup.
+//
+// If Dmart:PostgresConnection isn't set explicitly, we assemble it from the
+// individual DATABASE_HOST / DATABASE_PORT / DATABASE_USERNAME / DATABASE_PASSWORD /
+// DATABASE_NAME / DATABASE_POOL_SIZE components — matching how dmart Python builds
+// its SQLAlchemy URL from separate settings. This lets a plain config.env from a
+// Python deployment drop in unchanged.
 public sealed class Db(IOptions<DmartSettings> settings)
 {
-    private readonly string? _conn = settings.Value.PostgresConnection;
+    private readonly string? _conn = BuildConnectionString(settings.Value);
 
     public bool IsConfigured => !string.IsNullOrEmpty(_conn);
 
@@ -24,5 +30,40 @@ public sealed class Db(IOptions<DmartSettings> settings)
         var c = new NpgsqlConnection(_conn);
         await c.OpenAsync(ct);
         return c;
+    }
+
+    // Assemble order: explicit PostgresConnection always wins (lets ops override
+    // any individual tuning knob via a raw Npgsql connection string). Otherwise
+    // we build from the components. If none of the DATABASE_* fields have been
+    // set, we still emit a localhost-ish string with empty password so Npgsql
+    // can surface a clearer error than "connection string is null".
+    private static string? BuildConnectionString(DmartSettings s)
+    {
+        if (!string.IsNullOrEmpty(s.PostgresConnection))
+            return s.PostgresConnection;
+
+        // Mirror Python's behavior: if every component is still at its default,
+        // treat the DB as "not configured" so IsConfigured stays false and
+        // smoke/test hosts can boot without Postgres.
+        var hasExplicitDbConfig =
+            !string.IsNullOrEmpty(s.DatabasePassword)
+            || s.DatabaseUsername != "dmart"
+            || s.DatabaseName != "dmart"
+            || s.DatabaseHost != "localhost"
+            || s.DatabasePort != 5432;
+        if (!hasExplicitDbConfig) return null;
+
+        var csb = new NpgsqlConnectionStringBuilder
+        {
+            Host = s.DatabaseHost,
+            Port = s.DatabasePort,
+            Username = s.DatabaseUsername,
+            Password = s.DatabasePassword,
+            Database = s.DatabaseName,
+            MaxPoolSize = s.DatabasePoolSize + s.DatabaseMaxOverflow,
+            Timeout = s.DatabasePoolTimeout,
+            ConnectionIdleLifetime = s.DatabasePoolRecycle,
+        };
+        return csb.ConnectionString;
     }
 }

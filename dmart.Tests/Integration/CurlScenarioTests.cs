@@ -81,9 +81,12 @@ public class CurlScenarioTests : IClassFixture<DmartFactory>
 
         // ---------------------------------------------------------------------
         // 6. Query spaces
+        // dmart Python restricts type=spaces to space_name == management, so
+        // we query management/ to list every space the actor can see — which
+        // will include the itest_scenario space we just created.
         // ---------------------------------------------------------------------
         (await PostJsonAsResponse(client, "/managed/query",
-            """{"space_name":"itest_scenario","type":"spaces","subpath":"/"}"""))
+            """{"space_name":"management","type":"spaces","subpath":"/"}"""))
             .Status.ShouldBe(Status.Success);
 
         // ---------------------------------------------------------------------

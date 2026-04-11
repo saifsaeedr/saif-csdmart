@@ -28,6 +28,22 @@ builder.Services.ConfigureHttpJsonOptions(o =>
     o.SerializerOptions.PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.SnakeCaseLower;
 });
 
+// dmart-Python-style config.env support. We look for config.env in the order
+// Python's utils/settings.py uses ($BACKEND_ENV → ./config.env → ~/.dmart/config.env)
+// and merge the loaded key=value pairs into IConfiguration under the Dmart:
+// section. Loaded BEFORE EnvironmentVariables so actual env vars still override
+// dotenv entries — matching pydantic-settings' resolution order.
+{
+    var (envPath, values) = DotEnv.Load();
+    if (envPath is not null && values.Count > 0)
+    {
+        // Insert after the built-in providers (appsettings.json, chained config)
+        // but before we re-add EnvironmentVariables so env overrides still win.
+        builder.Configuration.AddInMemoryCollection(values);
+        builder.Configuration.AddEnvironmentVariables();
+    }
+}
+
 // Config
 builder.Services.Configure<DmartSettings>(builder.Configuration.GetSection("Dmart"));
 builder.Services.Configure<SpacesOptions>(builder.Configuration.GetSection("Spaces"));
@@ -115,6 +131,12 @@ app.Use(async (ctx, next) =>
         }
     }
 });
+
+// Dynamic CORS + security headers + OPTIONS preflight handling. Mirrors dmart
+// Python's set_middleware_response_headers. Must run after the exception
+// handler (so error responses still carry CORS + cache headers) but before
+// authentication so OPTIONS preflight short-circuits don't require a JWT.
+app.UseDmartResponseHeaders();
 
 app.UseAuthentication();
 app.UseAuthorization();

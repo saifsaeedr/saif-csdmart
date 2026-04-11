@@ -268,9 +268,12 @@ expect_success "Create test space ($SPACE):" "$RESP"
 
 # ============================================================================
 # 5. Query spaces
+# dmart Python only accepts type=spaces when space_name == management_space
+# and subpath == "/". The response lists every space the user has the `query`
+# action on, so we should see the scratch space we just created.
 # ============================================================================
 RESP=$(curl -s -H "$AUTH_HEADER" -H "$CT" \
-    -d "{\"space_name\":\"$SPACE\",\"type\":\"spaces\",\"subpath\":\"/\"}" \
+    -d "{\"space_name\":\"management\",\"type\":\"spaces\",\"subpath\":\"/\"}" \
     "$API_URL/managed/query")
 expect_success "Query spaces:" "$RESP"
 
