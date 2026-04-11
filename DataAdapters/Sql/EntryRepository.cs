@@ -153,8 +153,51 @@ public sealed class EntryRepository(Db db)
 
     public async Task<List<Entry>> QueryAsync(Query q, CancellationToken ct = default)
     {
-        var sql = new System.Text.StringBuilder($"{SelectAllColumns} WHERE space_name = $1 ");
-        var args = new List<NpgsqlParameter> { new() { Value = q.SpaceName } };
+        var args = new List<NpgsqlParameter>();
+        var where = BuildWhereClause(q, args);
+
+        // dmart's Query has both `sort_by` (field name) and `sort_type` (asc/desc).
+        // For now we honor sort_type only and always sort by updated_at — proper
+        // sort_by translation requires whitelisting safe column names.
+        var sql = new System.Text.StringBuilder($"{SelectAllColumns} {where} ORDER BY updated_at ");
+        sql.Append(q.SortType == Models.Enums.SortType.Ascending ? "ASC " : "DESC ");
+        args.Add(new() { Value = Math.Max(1, q.Limit) });
+        sql.Append($"LIMIT ${args.Count} ");
+        args.Add(new() { Value = Math.Max(0, q.Offset) });
+        sql.Append($"OFFSET ${args.Count}");
+
+        await using var conn = await db.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql.ToString(), conn);
+        foreach (var p in args) cmd.Parameters.Add(p);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        var results = new List<Entry>();
+        while (await reader.ReadAsync(ct)) results.Add(Hydrate(reader));
+        return results;
+    }
+
+    // Counts the rows matching the same filters QueryAsync applies, WITHOUT
+    // LIMIT/OFFSET. Used by QueryService to populate the Python-parity
+    // `attributes.total` field on a query response (total matching rows),
+    // which differs from the page count that `records` carries.
+    public async Task<long> CountQueryAsync(Query q, CancellationToken ct = default)
+    {
+        var args = new List<NpgsqlParameter>();
+        var where = BuildWhereClause(q, args);
+        var sql = $"SELECT COUNT(*) FROM entries {where}";
+        await using var conn = await db.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        foreach (var p in args) cmd.Parameters.Add(p);
+        return (long)(await cmd.ExecuteScalarAsync(ct) ?? 0L);
+    }
+
+    // Assembles the WHERE clause used by both QueryAsync and CountQueryAsync
+    // so they apply identical filters. Appends parameter values to `args`
+    // and returns the `WHERE ... ` SQL fragment (or `WHERE space_name = $1 `
+    // at a minimum — space_name is always required by the call sites).
+    private static string BuildWhereClause(Query q, List<NpgsqlParameter> args)
+    {
+        var sql = new System.Text.StringBuilder("WHERE space_name = $1 ");
+        args.Add(new() { Value = q.SpaceName });
 
         if (!string.IsNullOrEmpty(q.Subpath) && q.Subpath != "/")
         {
@@ -184,13 +227,23 @@ public sealed class EntryRepository(Db db)
 
         if (q.FilterSchemaNames is { Count: > 0 })
         {
-            // dmart stores schema_shortname inside payload jsonb.
-            args.Add(new()
+            // Python: "meta" is a sentinel in filter_schema_names meaning "don't
+            // filter at all" — Python's adapter explicitly removes it and only
+            // applies the filter if the remaining list is non-empty. Mirroring
+            // that here so the default `filter_schema_names=["meta"]` behaves as
+            // "no schema filter" instead of restricting to entries whose
+            // schema_shortname is literally "meta" (which matches nothing).
+            var effective = q.FilterSchemaNames.Where(n => n != "meta").ToArray();
+            if (effective.Length > 0)
             {
-                Value = q.FilterSchemaNames.ToArray(),
-                NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text,
-            });
-            sql.Append($"AND (payload->>'schema_shortname') = ANY(${args.Count}) ");
+                // dmart stores schema_shortname inside payload jsonb.
+                args.Add(new()
+                {
+                    Value = effective,
+                    NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text,
+                });
+                sql.Append($"AND (payload->>'schema_shortname') = ANY(${args.Count}) ");
+            }
         }
 
         if (q.FilterTags is { Count: > 0 })
@@ -212,23 +265,7 @@ public sealed class EntryRepository(Db db)
             sql.Append($"AND (payload::text ILIKE ${args.Count} OR displayname::text ILIKE ${args.Count} OR description::text ILIKE ${args.Count}) ");
         }
 
-        // dmart's Query has both `sort_by` (field name) and `sort_type` (asc/desc).
-        // For now we honor sort_type only and always sort by updated_at — proper
-        // sort_by translation requires whitelisting safe column names.
-        sql.Append("ORDER BY updated_at ");
-        sql.Append(q.SortType == Models.Enums.SortType.Ascending ? "ASC " : "DESC ");
-        args.Add(new() { Value = Math.Max(1, q.Limit) });
-        sql.Append($"LIMIT ${args.Count} ");
-        args.Add(new() { Value = Math.Max(0, q.Offset) });
-        sql.Append($"OFFSET ${args.Count}");
-
-        await using var conn = await db.OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand(sql.ToString(), conn);
-        foreach (var p in args) cmd.Parameters.Add(p);
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        var results = new List<Entry>();
-        while (await reader.ReadAsync(ct)) results.Add(Hydrate(reader));
-        return results;
+        return sql.ToString();
     }
 
     public async Task<long> CountAsync(string spaceName, string subpath, CancellationToken ct = default)

@@ -34,7 +34,12 @@ public sealed record Query
     public SortType? SortType { get; init; }
     public bool RetrieveJsonPayload { get; init; }
     public bool RetrieveAttachments { get; init; }
-    public bool RetrieveTotal { get; init; } = true;
+    // Nullable on purpose: System.Text.Json source-gen does NOT apply C# property
+    // initializers when a key is missing from the incoming JSON, so `= true`
+    // would flip to false on any request that omits the field. Python defaults
+    // retrieve_total to true, so missing → null → interpreted as true by
+    // QueryService. Only an explicit `retrieve_total: false` skips the count.
+    public bool? RetrieveTotal { get; init; }
     public bool ValidateSchema { get; init; } = true;
     public bool RetrieveLockStatus { get; init; }
     public string? JqFilter { get; init; }

@@ -26,6 +26,14 @@ builder.Services.ConfigureHttpJsonOptions(o =>
 {
     o.SerializerOptions.TypeInfoResolver = DmartJsonContext.Default;
     o.SerializerOptions.PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.SnakeCaseLower;
+    // dmart Python uses response_model_exclude_none=True on every endpoint, so
+    // null fields (error on success, attachments when absent, etc.) must not
+    // appear on the wire. We have to set this on the runtime SerializerOptions
+    // in addition to the attribute on DmartJsonContext — the attribute drives
+    // the generated TypeInfo, but the framework pipes requests through a new
+    // SerializerOptions instance where the default is "always emit nulls".
+    o.SerializerOptions.DefaultIgnoreCondition =
+        System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull;
 });
 
 // dmart-Python-style config.env support. We look for config.env in the order

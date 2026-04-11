@@ -84,7 +84,11 @@ public class QuerySpacesTests : IClassFixture<DmartFactory>
         management!.Attributes.ShouldNotBeNull();
         management.Attributes!.ShouldContainKey("languages");
         management.Attributes.ShouldContainKey("indexing_enabled");
-        management.Attributes.ShouldContainKey("query_policies");
+        // space_name is emitted by Python's to_record and by our SpaceMapper.
+        management.Attributes.ShouldContainKey("space_name");
+        // query_policies is explicitly stripped in _set_query_final_results —
+        // it's an internal gating field that mustn't leak to clients.
+        management.Attributes.ShouldNotContainKey("query_policies");
     }
 
     [Fact]

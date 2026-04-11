@@ -7,6 +7,23 @@ using Microsoft.Extensions.Options;
 
 namespace Dmart.Services;
 
+// /managed/query service.
+//
+// Python dmart's query response envelope is:
+//   {
+//     "status": "success",
+//     "records": [...],
+//     "attributes": { "total": <pre-limit total>, "returned": <this-page count> }
+//   }
+//
+// Two things are important:
+//   1. `total` is the number of rows that match the filters IGNORING limit/
+//      offset — clients rely on this to page.
+//   2. `returned` is the count of records on this page. It equals len(records).
+//
+// The record shape itself is built by the mappers below — see the notes on
+// each mapper for which fields are included and how they compare to Python's
+// `to_record` output.
 public sealed class QueryService(
     EntryRepository entries,
     SpaceRepository spaces,
@@ -30,8 +47,8 @@ public sealed class QueryService(
     }
 
     // Python only accepts type=spaces when space_name == management_space and
-    // subpath == "/". Everything else falls through to the entries path — we
-    // match that so clients get the same error behavior as dmart Python.
+    // subpath == "/". Everything else returns bad_query — we match that so
+    // clients get the same error behavior as dmart Python.
     private async Task<Response> QuerySpacesAsync(Query q, string? actor, CancellationToken ct)
     {
         var managementSpace = settings.Value.ManagementSpace;
@@ -63,7 +80,12 @@ public sealed class QueryService(
         var total = visible.Count;
         var page = visible.Skip(Math.Max(0, q.Offset)).Take(Math.Max(1, q.Limit)).ToList();
         var records = page.Select(SpaceMapper.ToRecord).ToList();
-        return Response.Ok(records, new() { ["total"] = total });
+        return Response.Ok(records, new()
+        {
+            // Python: attributes={"total": total, "returned": len(records)}
+            ["total"] = total,
+            ["returned"] = records.Count,
+        });
     }
 
     private async Task<Response> QueryEntriesAsync(Query q, string? actor, CancellationToken ct)
@@ -74,69 +96,141 @@ public sealed class QueryService(
         if (!await perms.CanReadAsync(actor, probe, ct))
             return Response.Fail("forbidden", "no read access for subpath");
 
-        var hits = await entries.QueryAsync(q, ct);
-        var records = hits.Select(EntryMapper.ToRecord).ToList();
-        return Response.Ok(records, new() { ["total"] = records.Count });
+        // Fetch the page + the total in parallel. Python runs two SQL statements
+        // (the main SELECT and a separate COUNT) — we match that so clients can
+        // page through arbitrary-sized result sets.
+        //
+        // Python's retrieve_total defaults to True; only explicit false skips
+        // the count query. Source-gen JSON doesn't apply C# property
+        // initializers for missing JSON keys, so the Query.RetrieveTotal field
+        // is nullable and we treat null == true here.
+        var pageTask = entries.QueryAsync(q, ct);
+        var totalTask = q.RetrieveTotal == false
+            ? Task.FromResult(-1L)
+            : entries.CountQueryAsync(q, ct);
+        await Task.WhenAll(pageTask, totalTask);
+        var hits = pageTask.Result;
+        // Narrow to int so the source-gen JSON context can serialize it without
+        // a JsonTypeInfo<long> registration. Record totals never realistically
+        // exceed 2^31 in dmart deployments.
+        var total = (int)totalTask.Result;
+
+        var records = hits.Select(e => EntryMapper.ToRecord(e, q.SpaceName)).ToList();
+        return Response.Ok(records, new()
+        {
+            ["total"] = total,
+            ["returned"] = records.Count,
+        });
     }
 }
 
+// Projects an Entry row into a Record for the /managed/query response.
+//
+// Python's data_adapters/sql/create_tables.py::to_record builds attributes by
+// dumping every SQLModel column except the "local props" (uuid, resource_type,
+// shortname, subpath). Emits null and empty-list values explicitly because
+// Pydantic's exclude_none operates on the top-level Record model, not on dict
+// contents.
+//
+// Python then post-processes in _set_query_final_results (adapter.py:2883):
+//   * delete rec.attributes["query_policies"]
+//   * delete rec.attributes["password"] for user records
+//   * optionally strip payload.body if retrieve_json_payload is false
+//
+// We replicate all of that here.
 internal static class EntryMapper
 {
-    public static Record ToRecord(Entry e) => new()
+    public static Record ToRecord(Entry e, string spaceName)
     {
-        ResourceType = e.ResourceType,
-        Subpath = e.Subpath,
-        Shortname = e.Shortname,
-        Uuid = e.Uuid,
-        Attributes = new()
+        var attrs = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
+            // Metas base (matches the fields Python's to_record emits from the
+            // SQLModel __dict__).
             ["is_active"] = e.IsActive,
-            ["displayname"] = e.Displayname ?? (object)"",
-            ["tags"] = e.Tags ?? (object)Array.Empty<string>(),
-            ["payload"] = e.Payload ?? (object)new Dictionary<string, object>(),
-        },
-    };
+            ["slug"] = e.Slug,
+            ["displayname"] = e.Displayname,
+            ["description"] = e.Description,
+            ["tags"] = e.Tags,
+            ["created_at"] = e.CreatedAt,
+            ["updated_at"] = e.UpdatedAt,
+            ["owner_shortname"] = e.OwnerShortname,
+            ["owner_group_shortname"] = e.OwnerGroupShortname,
+            ["acl"] = e.Acl,
+            ["payload"] = e.Payload,
+            ["relationships"] = e.Relationships,
+            ["last_checksum_history"] = e.LastChecksumHistory,
+            // Entries-specific (ticket fields)
+            ["state"] = e.State,
+            ["is_open"] = e.IsOpen,
+            ["reporter"] = e.Reporter,
+            ["workflow_shortname"] = e.WorkflowShortname,
+            ["collaborators"] = e.Collaborators,
+            ["resolution_reason"] = e.ResolutionReason,
+            // space_name is included in Python's to_record output (it's a
+            // column on the Metas table). Clients use it to identify which
+            // space a cross-space query result came from.
+            ["space_name"] = spaceName,
+        };
+
+        // Python deletes query_policies unconditionally — it's an internal
+        // gating field that shouldn't leak to clients.
+        attrs.Remove("query_policies");
+
+        return new Record
+        {
+            ResourceType = e.ResourceType,
+            Subpath = e.Subpath,
+            Shortname = e.Shortname,
+            Uuid = e.Uuid,
+            Attributes = attrs!,
+        };
+    }
 }
 
-// Projects a Space row into a Record for the /managed/query response. Mirrors
-// the field set Python's SQLModel serializer dumps for a Spaces row — the
-// Spaces-specific columns (indexing_enabled, languages, hide_space, ...)
-// appear alongside the standard Metas base fields in attributes. We drop
-// null/empty values to keep the wire form compact, matching Python's
-// model_dump(exclude_none=True) behavior.
+// Projects a Space row into a Record for the /managed/query response. Python's
+// to_record emits ALL Space SQLModel columns (nulls included) minus the local
+// props. We match the key set — see the inline comment on each group.
 internal static class SpaceMapper
 {
     public static Record ToRecord(Space s)
     {
-        var attrs = new Dictionary<string, object>(StringComparer.Ordinal)
+        var attrs = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
+            // Metas base — always present in Python's dump, including nulls.
             ["is_active"] = s.IsActive,
+            ["slug"] = s.Slug,
+            ["displayname"] = s.Displayname,
+            ["description"] = s.Description,
             ["tags"] = s.Tags,
             ["created_at"] = s.CreatedAt,
             ["updated_at"] = s.UpdatedAt,
             ["owner_shortname"] = s.OwnerShortname,
+            ["owner_group_shortname"] = s.OwnerGroupShortname,
+            ["acl"] = s.Acl,
+            ["payload"] = s.Payload,
+            ["relationships"] = s.Relationships,
+            ["last_checksum_history"] = s.LastChecksumHistory,
+            // Space-specific columns
+            ["root_registration_signature"] = s.RootRegistrationSignature,
+            ["primary_website"] = s.PrimaryWebsite,
             ["indexing_enabled"] = s.IndexingEnabled,
             ["capture_misses"] = s.CaptureMisses,
             ["check_health"] = s.CheckHealth,
             ["languages"] = s.Languages,
-            ["query_policies"] = s.QueryPolicies,
+            ["icon"] = s.Icon,
+            ["mirrors"] = s.Mirrors,
+            ["hide_folders"] = s.HideFolders,
+            ["hide_space"] = s.HideSpace,
+            ["active_plugins"] = s.ActivePlugins,
+            ["ordinal"] = s.Ordinal,
+            // space_name is a real column on the spaces table and appears in
+            // Python's dump — for the self-referential spaces rows it equals
+            // the shortname.
+            ["space_name"] = s.SpaceName,
         };
-        if (!string.IsNullOrEmpty(s.Slug)) attrs["slug"] = s.Slug;
-        if (s.Displayname is not null) attrs["displayname"] = s.Displayname;
-        if (s.Description is not null) attrs["description"] = s.Description;
-        if (!string.IsNullOrEmpty(s.OwnerGroupShortname)) attrs["owner_group_shortname"] = s.OwnerGroupShortname;
-        if (s.Acl is not null) attrs["acl"] = s.Acl;
-        if (s.Payload is not null) attrs["payload"] = s.Payload;
-        if (s.Relationships is not null) attrs["relationships"] = s.Relationships;
-        if (!string.IsNullOrEmpty(s.LastChecksumHistory)) attrs["last_checksum_history"] = s.LastChecksumHistory;
-        if (!string.IsNullOrEmpty(s.RootRegistrationSignature)) attrs["root_registration_signature"] = s.RootRegistrationSignature;
-        if (!string.IsNullOrEmpty(s.PrimaryWebsite)) attrs["primary_website"] = s.PrimaryWebsite;
-        if (!string.IsNullOrEmpty(s.Icon)) attrs["icon"] = s.Icon;
-        if (s.Mirrors is not null) attrs["mirrors"] = s.Mirrors;
-        if (s.HideFolders is not null) attrs["hide_folders"] = s.HideFolders;
-        if (s.HideSpace is not null) attrs["hide_space"] = s.HideSpace.Value;
-        if (s.ActivePlugins is not null) attrs["active_plugins"] = s.ActivePlugins;
-        if (s.Ordinal is not null) attrs["ordinal"] = s.Ordinal.Value;
+
+        // Python deletes query_policies before returning — match that.
+        attrs.Remove("query_policies");
 
         return new Record
         {
@@ -144,7 +238,7 @@ internal static class SpaceMapper
             Subpath = s.Subpath,
             Shortname = s.Shortname,
             Uuid = s.Uuid,
-            Attributes = attrs,
+            Attributes = attrs!,
         };
     }
 }
