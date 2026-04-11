@@ -61,3 +61,6 @@ public sealed class PublicSubmitResourceTypeJsonConverter: EnumMemberConverterBa
 public sealed class ContentTypeJsonConverter             : EnumMemberConverterBase<ContentType> { }
 public sealed class UserTypeJsonConverter                : EnumMemberConverterBase<UserType> { }
 public sealed class LanguageJsonConverter                : EnumMemberConverterBase<Language> { }
+public sealed class ActionTypeJsonConverter             : EnumMemberConverterBase<ActionType> { }
+public sealed class PluginTypeJsonConverter             : EnumMemberConverterBase<PluginType> { }
+public sealed class EventListenTimeJsonConverter        : EnumMemberConverterBase<EventListenTime> { }

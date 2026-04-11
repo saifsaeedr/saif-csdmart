@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 using Dmart.Models.Api;
 using Dmart.Models.Core;
 using Dmart.Models.Enums;
+using Dmart.Plugins.BuiltIn;
 
 namespace Dmart.Models.Json;
 
@@ -51,6 +52,13 @@ namespace Dmart.Models.Json;
 [JsonSerializable(typeof(ContentType))]
 [JsonSerializable(typeof(UserType))]
 [JsonSerializable(typeof(Language))]
+[JsonSerializable(typeof(ActionType))]
+[JsonSerializable(typeof(PluginType))]
+[JsonSerializable(typeof(EventListenTime))]
+[JsonSerializable(typeof(PluginWrapper))]
+[JsonSerializable(typeof(EventFilter))]
+[JsonSerializable(typeof(RealtimeBroadcastBody))]
+[JsonSerializable(typeof(RealtimeMessageBody))]
 [JsonSerializable(typeof(List<Record>))]
 [JsonSerializable(typeof(List<Entry>))]
 [JsonSerializable(typeof(List<User>))]

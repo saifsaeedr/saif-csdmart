@@ -9,6 +9,7 @@ using Dmart.DataAdapters.Sql;
 using Dmart.Middleware;
 using Dmart.Models.Json;
 using Dmart.Plugins;
+using Dmart.Plugins.BuiltIn;
 using Dmart.Services;
 
 // dmart Python uses `timestamp without time zone` columns. Npgsql 6+ rejects
@@ -60,8 +61,7 @@ builder.Services.AddSingleton<QueryService>();
 builder.Services.AddSingleton<UserService>();
 builder.Services.AddSingleton<WorkflowEngine>();
 builder.Services.AddSingleton<WorkflowService>();
-builder.Services.AddSingleton<EventBus>();
-builder.Services.AddSingleton<PluginHost>();
+builder.Services.AddSingleton<PluginManager>();
 builder.Services.AddSingleton<LockService>();
 builder.Services.AddSingleton<ShortLinkService>();
 builder.Services.AddSingleton<CsvService>();
@@ -77,8 +77,21 @@ builder.Services.AddSingleton<Dmart.Auth.OAuth.FacebookProvider>();
 builder.Services.AddSingleton<Dmart.Auth.OAuth.AppleProvider>();
 builder.Services.AddDmartAuth(builder.Configuration);
 
-// Plugins
-builder.Services.AddDmartPlugins();
+// Plugins. Every built-in plugin registers itself under its interface so
+// PluginManager can match shortnames from config.json to concrete instances.
+// Hook plugins (IHookPlugin) get before/after dispatch; API plugins (IApiPlugin)
+// mount their own route group at /{shortname}. Users can disable individual
+// plugins by flipping is_active in plugins/<name>/config.json — there's no need
+// to recompile to remove one from the pipeline.
+builder.Services.AddHttpClient();
+builder.Services.AddSingleton<IHookPlugin, ResourceFoldersCreationPlugin>();
+builder.Services.AddSingleton<IHookPlugin, RealtimeUpdatesNotifierPlugin>();
+builder.Services.AddSingleton<IHookPlugin, AuditPlugin>();
+builder.Services.AddSingleton<IHookPlugin, AdminNotificationSenderPlugin>();
+builder.Services.AddSingleton<IHookPlugin, SystemNotificationSenderPlugin>();
+builder.Services.AddSingleton<IHookPlugin, LocalNotificationPlugin>();
+builder.Services.AddSingleton<IHookPlugin, LdapManagerPlugin>();
+builder.Services.AddSingleton<IApiPlugin, DbSizeInfoPlugin>();
 
 // Per-request context
 builder.Services.AddScoped<RequestContext>();
@@ -113,6 +126,22 @@ app.MapGroup("/public").MapPublic();
 app.MapGroup("/user").MapUser();
 app.MapGroup("/info").RequireAuthorization().MapInfo();
 app.MapGroup("/qr").MapQr();
+
+// Load plugin configs from {BaseDir}/plugins/<name>/config.json and mount API
+// plugin routes under /{shortname}. Done after the builtin route groups so
+// plugin routes can't accidentally shadow a core endpoint, and before app.Run()
+// because routing registration has to be complete before the request pipeline
+// starts. API plugin routes get RequireAuthorization() to match the Python
+// router's capture_body + auth posture.
+{
+    var pluginManager = app.Services.GetRequiredService<PluginManager>();
+    await pluginManager.LoadAsync();
+    foreach (var apiPlugin in pluginManager.ActiveApiPlugins)
+    {
+        var group = app.MapGroup($"/{apiPlugin.Shortname}").RequireAuthorization();
+        apiPlugin.MapRoutes(group);
+    }
+}
 
 app.Run();
 

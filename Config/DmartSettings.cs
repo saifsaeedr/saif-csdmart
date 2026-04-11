@@ -22,4 +22,10 @@ public sealed class DmartSettings
     // count_history snapshot cadence (in minutes). Set to a large value to disable
     // periodic recording — the snapshotter still writes one row on startup.
     public int CountHistoryIntervalMinutes { get; set; } = 360;
+
+    // Optional websocket bridge URL. When set, the realtime_updates_notifier plugin
+    // posts broadcast messages to {WebsocketUrl}/broadcast-to-channels after CRUD
+    // events. Leave null to disable realtime broadcasting without unloading the
+    // plugin.
+    public string? WebsocketUrl { get; set; }
 }

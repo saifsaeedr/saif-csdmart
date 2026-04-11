@@ -4,6 +4,7 @@ using Dmart.Models.Api;
 using Dmart.Models.Core;
 using Dmart.Models.Enums;
 using Dmart.Models.Json;
+using Dmart.Plugins;
 using Dmart.Utils;
 
 namespace Dmart.Services;
@@ -13,7 +14,7 @@ public sealed class EntryService(
     AttachmentRepository attachments,
     HistoryRepository history,
     PermissionService perms,
-    EventBus events,
+    PluginManager plugins,
     SchemaValidator schemas)
 {
     public async Task<Entry?> GetAsync(Locator l, string? actor, CancellationToken ct = default)
@@ -60,6 +61,17 @@ public sealed class EntryService(
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow,
         };
+
+        // Fire the BEFORE hook before the DB write. A plugin throwing here should
+        // abort the create — we translate the exception into a Result.Fail so the
+        // caller can surface a structured error without leaking the stack.
+        var beforeEvent = BuildEvent(toSave, ActionType.Create, actor);
+        try { await plugins.BeforeActionAsync(beforeEvent, ct); }
+        catch (Exception ex)
+        {
+            return Result<Entry>.Fail("bad_request", $"plugin rejected create: {ex.Message}");
+        }
+
         await entries.UpsertAsync(toSave, ct);
 
         // If we just wrote a schema entry, invalidate the validator's cache so the
@@ -68,7 +80,7 @@ public sealed class EntryService(
 
         await history.AppendAsync(toSave.SpaceName, toSave.Subpath, toSave.Shortname, actor, null,
             new() { ["action"] = "create" }, ct);
-        await events.PublishCreatedAsync(locator, toSave, ct);
+        await plugins.AfterActionAsync(BuildEvent(toSave, ActionType.Create, actor), ct);
         return Result<Entry>.Ok(toSave);
     }
 
@@ -98,10 +110,18 @@ public sealed class EntryService(
         if (validationError is not null) return Result<Entry>.Fail("invalid_data", validationError);
 
         var merged = ApplyPatch(existing, patch);
+
+        var beforeEvent = BuildEvent(merged, ActionType.Update, actor);
+        try { await plugins.BeforeActionAsync(beforeEvent, ct); }
+        catch (Exception ex)
+        {
+            return Result<Entry>.Fail("bad_request", $"plugin rejected update: {ex.Message}");
+        }
+
         await entries.UpsertAsync(merged, ct);
         await history.AppendAsync(locator.SpaceName, locator.Subpath, locator.Shortname, actor, null,
             new() { ["action"] = "update", ["patch"] = patch }, ct);
-        await events.PublishUpdatedAsync(locator, merged, ct);
+        await plugins.AfterActionAsync(BuildEvent(merged, ActionType.Update, actor), ct);
         return Result<Entry>.Ok(merged);
     }
 
@@ -117,12 +137,32 @@ public sealed class EntryService(
         if (!await perms.CanDeleteAsync(actor, locator, ctx, ct))
             return Result<bool>.Fail("forbidden", "no delete access");
 
+        // Build a delete Event from whatever we know (prefer the loaded entry so
+        // plugin filters on resource_type/schema_shortname see real values).
+        var deleteEvent = existing is not null
+            ? BuildEvent(existing, ActionType.Delete, actor)
+            : new Event
+            {
+                SpaceName = locator.SpaceName,
+                Subpath = locator.Subpath,
+                Shortname = locator.Shortname,
+                ActionType = ActionType.Delete,
+                ResourceType = locator.Type,
+                UserShortname = actor ?? "anonymous",
+            };
+
+        try { await plugins.BeforeActionAsync(deleteEvent, ct); }
+        catch (Exception ex)
+        {
+            return Result<bool>.Fail("bad_request", $"plugin rejected delete: {ex.Message}");
+        }
+
         var ok = await entries.DeleteAsync(locator.SpaceName, locator.Subpath, locator.Shortname, locator.Type, ct);
         if (ok)
         {
             await history.AppendAsync(locator.SpaceName, locator.Subpath, locator.Shortname, actor, null,
                 new() { ["action"] = "delete" }, ct);
-            await events.PublishDeletedAsync(locator, ct);
+            await plugins.AfterActionAsync(deleteEvent, ct);
         }
         return Result<bool>.Ok(ok);
     }
@@ -137,15 +177,58 @@ public sealed class EntryService(
         if (!await perms.CanUpdateAsync(actor, from, srcCtx, null, ct) ||
             !await perms.CanCreateAsync(actor, to, EntryToAttributesDict(srcEntry), ct))
             return Result<Entry>.Fail("forbidden", "no move access");
+        // Python fires a single "move" event keyed on the destination subpath and
+        // passes the source shortname as an attribute. Mirror that so a hook like
+        // ldap_manager can see both the old and new names.
+        var moveEvent = new Event
+        {
+            SpaceName = to.SpaceName,
+            Subpath = to.Subpath,
+            Shortname = to.Shortname,
+            ActionType = ActionType.Move,
+            ResourceType = srcEntry.ResourceType,
+            SchemaShortname = srcEntry.Payload?.SchemaShortname,
+            UserShortname = actor ?? "anonymous",
+            Attributes = new() { ["src_shortname"] = from.Shortname, ["src_subpath"] = from.Subpath },
+        };
+        try { await plugins.BeforeActionAsync(moveEvent, ct); }
+        catch (Exception ex)
+        {
+            return Result<Entry>.Fail("bad_request", $"plugin rejected move: {ex.Message}");
+        }
+
         await entries.MoveAsync(from, to, ct);
         await history.AppendAsync(to.SpaceName, to.Subpath, to.Shortname, actor, null,
             new() { ["action"] = "move", ["from"] = $"{from.SpaceName}/{from.Subpath}/{from.Shortname}" }, ct);
+        await plugins.AfterActionAsync(moveEvent, ct);
         var moved = await entries.GetAsync(to.SpaceName, to.Subpath, to.Shortname, to.Type, ct);
         return moved is null ? Result<Entry>.Fail("not_found", "moved entry missing") : Result<Entry>.Ok(moved);
     }
 
     public Task<List<Attachment>> ListAttachmentsAsync(Locator parent, CancellationToken ct = default)
         => attachments.ListForParentAsync(parent.SpaceName, parent.Subpath, parent.Shortname, ct);
+
+    // Builds a plugin-dispatchable Event from an Entry. Mirrors the dict Python
+    // assembles at the router level — keeping the attributes key minimal (just
+    // state, since that's what the realtime notifier uses) because anything
+    // else forces the Event object into a heavier allocation and there's no
+    // caller that needs more.
+    private static Event BuildEvent(Entry entry, ActionType action, string? actor)
+    {
+        var attrs = new Dictionary<string, object>(StringComparer.Ordinal);
+        if (entry.State is not null) attrs["state"] = entry.State;
+        return new Event
+        {
+            SpaceName = entry.SpaceName,
+            Subpath = entry.Subpath,
+            Shortname = entry.Shortname,
+            ActionType = action,
+            ResourceType = entry.ResourceType,
+            SchemaShortname = entry.Payload?.SchemaShortname,
+            UserShortname = actor ?? "anonymous",
+            Attributes = attrs,
+        };
+    }
 
     // Synthesizes a flat-ish attributes dict from an Entry's typed fields, used by
     // PermissionService for restricted_fields/allowed_fields_values gating on create.
