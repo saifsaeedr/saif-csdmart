@@ -5,7 +5,7 @@ COPY . .
 RUN dotnet publish dmart.csproj -r linux-musl-x64 -p:PublishAot=true -c Release -o /out
 
 FROM alpine:latest
-RUN apk add --no-cache icu-libs
+RUN apk add --no-cache icu-libs krb5-libs
 COPY --from=build /out /app
 WORKDIR /app
 ENTRYPOINT ["./dmart"]
