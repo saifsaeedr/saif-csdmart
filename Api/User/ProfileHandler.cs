@@ -12,12 +12,18 @@ public static class ProfileHandler
     {
         // GET /user/profile — Python returns records: [Record] with user
         // attributes. The tsdmart SDK reads data.records[0].attributes.
-        g.MapGet("/profile", async (HttpContext http, UserService svc, CancellationToken ct) =>
+        g.MapGet("/profile", async (HttpContext http, UserService svc,
+            DataAdapters.Sql.AccessRepository access, CancellationToken ct) =>
         {
             var actor = http.User.Identity?.Name;
             if (actor is null) return Response.Fail("unauthorized", "login required");
             var user = await svc.GetByShortnameAsync(actor, ct);
             if (user is null) return Response.Fail("not_found", "user missing");
+
+            // Python: attributes["permissions"] = await db.get_user_permissions(shortname)
+            // Resolves user → roles → permissions into a dict keyed by
+            // "space:subpath:resource_type" with allowed_actions, conditions, etc.
+            var permissions = await access.GenerateUserPermissionsAsync(actor, ct);
 
             var profileRecord = new Record
             {
@@ -38,10 +44,7 @@ public static class ProfileHandler
                     ["is_msisdn_verified"] = user.IsMsisdnVerified,
                     ["force_password_change"] = user.ForcePasswordChange,
                     ["payload"] = user.Payload ?? (object)new Dictionary<string, object>(),
-                    // Python includes permissions (resolved from roles).
-                    // For now we include an empty dict; full resolution requires
-                    // the same generate_user_permissions pipeline Python uses.
-                    ["permissions"] = new Dictionary<string, object>(),
+                    ["permissions"] = permissions,
                 },
             };
             return Response.Ok(new[] { profileRecord });

@@ -210,6 +210,68 @@ public sealed class AccessRepository(Db db, AuthzCacheRefresher refresher)
     public Task<int> CountPermissionsQueryAsync(Models.Api.Query q, CancellationToken ct = default)
         => QueryHelper.RunCountAsync(db, "permissions", q, ct);
 
+    // Reads the cached permissions dict from userpermissionscache.
+    // Returns null if not cached — caller should generate + cache.
+    public async Task<Dictionary<string, object>?> GetCachedUserPermissionsAsync(string userShortname, CancellationToken ct = default)
+    {
+        await using var conn = await db.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(
+            "SELECT permissions FROM userpermissionscache WHERE user_shortname = $1", conn);
+        cmd.Parameters.Add(new() { Value = userShortname });
+        var json = (string?)await cmd.ExecuteScalarAsync(ct);
+        return json is not null ? JsonbHelpers.FromDictStringObject(json) : null;
+    }
+
+    // Generates the Python-parity permissions dict by walking
+    // user → roles → permissions and building:
+    //   { "space:subpath:resource_type": { allowed_actions, conditions, ... } }
+    // Then caches it in userpermissionscache for subsequent calls.
+    public async Task<Dictionary<string, object>> GenerateUserPermissionsAsync(
+        string userShortname, CancellationToken ct = default)
+    {
+        // Check cache first.
+        var cached = await GetCachedUserPermissionsAsync(userShortname, ct);
+        if (cached is not null) return cached;
+
+        // Walk: user.roles → role.permissions → permission rows.
+        var user = await new UserRepository(db, refresher).GetByShortnameAsync(userShortname, ct);
+        if (user is null) return new();
+
+        var roles = user.Roles.Count > 0 ? await GetRolesAsync(user.Roles, ct) : new();
+        var permNames = roles.SelectMany(r => r.Permissions).Distinct().ToArray();
+        var perms = permNames.Length > 0 ? await GetPermissionsAsync(permNames, ct) : new();
+
+        // Build the dict matching Python's generate_user_permissions output.
+        var result = new Dictionary<string, object>(StringComparer.Ordinal);
+        foreach (var perm in perms)
+        {
+            foreach (var (spaceName, subpaths) in perm.Subpaths)
+            {
+                var subpathList = subpaths.Count > 0 ? subpaths : new List<string> { "/" };
+                foreach (var subpath in subpathList)
+                {
+                    foreach (var rt in perm.ResourceTypes)
+                    {
+                        var key = $"{spaceName}:{subpath}:{rt}";
+                        var entry = new Dictionary<string, object>
+                        {
+                            ["allowed_actions"] = perm.Actions,
+                            ["conditions"] = perm.Conditions,
+                            ["restricted_fields"] = perm.RestrictedFields ?? (object)new List<string>(),
+                            ["allowed_fields_values"] = perm.AllowedFieldsValues ?? (object)new Dictionary<string, object>(),
+                            ["filter_fields_values"] = perm.FilterFieldsValues ?? (object)"",
+                        };
+                        result[key] = entry;
+                    }
+                }
+            }
+        }
+
+        // Cache for next time.
+        await CacheUserPermissionsAsync(userShortname, result, ct);
+        return result;
+    }
+
     public async Task CacheUserPermissionsAsync(string userShortname, Dictionary<string, object> resolved, CancellationToken ct = default)
     {
         var json = JsonbHelpers.ToJsonb(resolved);
