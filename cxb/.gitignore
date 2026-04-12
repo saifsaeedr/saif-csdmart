@@ -25,5 +25,3 @@ dist-ssr
 .routify
 .vscode
 yarn.lock
-
-public/config.json
