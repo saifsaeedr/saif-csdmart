@@ -13,12 +13,75 @@ using Dmart.Plugins.BuiltIn;
 using Dmart.Services;
 using Microsoft.Extensions.Options;
 
+// ============================================================================
+// dmart CLI — mirrors Python's dmart.py multi-subcommand entry point.
+//
+// Usage:
+//   dmart serve       Start the HTTP server (default if no subcommand)
+//   dmart version     Print version info
+//   dmart help        Print available subcommands
+// ============================================================================
+
+// Parse subcommand from args (first non-flag argument).
+var subcommand = "serve";
+var serverArgs = args;
+if (args.Length > 0 && !args[0].StartsWith('-'))
+{
+    subcommand = args[0].ToLowerInvariant();
+    serverArgs = args[1..];
+}
+
+switch (subcommand)
+{
+    case "version":
+        Console.WriteLine("dmart-csharp 0.1.0 (AOT)");
+        return;
+
+    case "help":
+    case "--help":
+    case "-h":
+        Console.WriteLine("""
+            dmart — Structured CMS/IMS (C# port)
+
+            Usage: dmart [subcommand] [options]
+
+            Subcommands:
+              serve          Start the HTTP server (default)
+              version        Print version info
+              help           Print this help
+
+            Server options (via config.env or env vars):
+              LISTENING_HOST     Listen address (default: 0.0.0.0)
+              LISTENING_PORT     Listen port (default: 8282)
+              DATABASE_HOST      PostgreSQL host
+              DATABASE_PASSWORD  PostgreSQL password
+              JWT_SECRET         JWT signing secret
+
+            Config file lookup: $BACKEND_ENV → ./config.env → ~/.dmart/config.env
+            """);
+        return;
+
+    case "serve":
+    case "hyper":
+        break; // fall through to server startup below
+
+    default:
+        Console.Error.WriteLine($"Unknown subcommand: {subcommand}");
+        Console.Error.WriteLine("Run 'dmart help' for available subcommands.");
+        Environment.ExitCode = 1;
+        return;
+}
+
+// ============================================================================
+// SERVER STARTUP (subcommand: serve / hyper)
+// ============================================================================
+
 // dmart Python uses `timestamp without time zone` columns. Npgsql 6+ rejects
 // DateTime values with Kind=Utc against those columns unless this switch is set.
 // This MUST run before any Npgsql operation, so it lives at the very top.
 AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
 
-var builder = WebApplication.CreateSlimBuilder(args);
+var builder = WebApplication.CreateSlimBuilder(serverArgs);
 
 // AOT-friendly JSON: source-generated context. We REPLACE the default resolver
 // (instead of inserting at position 0) so the framework's camelCase default policy
@@ -27,21 +90,11 @@ builder.Services.ConfigureHttpJsonOptions(o =>
 {
     o.SerializerOptions.TypeInfoResolver = DmartJsonContext.Default;
     o.SerializerOptions.PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.SnakeCaseLower;
-    // dmart Python uses response_model_exclude_none=True on every endpoint, so
-    // null fields (error on success, attachments when absent, etc.) must not
-    // appear on the wire. We have to set this on the runtime SerializerOptions
-    // in addition to the attribute on DmartJsonContext — the attribute drives
-    // the generated TypeInfo, but the framework pipes requests through a new
-    // SerializerOptions instance where the default is "always emit nulls".
     o.SerializerOptions.DefaultIgnoreCondition =
         System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull;
 });
 
-// dmart-Python-style config.env support. We look for config.env in the order
-// Python's utils/settings.py uses ($BACKEND_ENV → ./config.env → ~/.dmart/config.env)
-// and merge the loaded key=value pairs into IConfiguration under the Dmart:
-// section. Loaded BEFORE EnvironmentVariables so actual env vars still override
-// dotenv entries — matching pydantic-settings' resolution order.
+// dmart-Python-style config.env support.
 {
     var (envPath, values) = DotEnv.Load();
     if (envPath is not null && values.Count > 0)
@@ -50,10 +103,7 @@ builder.Services.ConfigureHttpJsonOptions(o =>
         builder.Configuration.AddEnvironmentVariables();
     }
 
-    // Wire LISTENING_HOST/LISTENING_PORT from config.env into Kestrel's
-    // actual binding, so the binary listens on the configured port without
-    // requiring a separate ASPNETCORE_URLS env var. Only applied when
-    // ASPNETCORE_URLS isn't already set (explicit env var wins).
+    // Wire LISTENING_HOST/LISTENING_PORT from config.env into Kestrel.
     if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("ASPNETCORE_URLS")))
     {
         var dmartSection = builder.Configuration.GetSection("Dmart");
@@ -112,12 +162,7 @@ builder.Services.AddSingleton<Dmart.Auth.OAuth.FacebookProvider>();
 builder.Services.AddSingleton<Dmart.Auth.OAuth.AppleProvider>();
 builder.Services.AddDmartAuth(builder.Configuration);
 
-// Plugins. Every built-in plugin registers itself under its interface so
-// PluginManager can match shortnames from config.json to concrete instances.
-// Hook plugins (IHookPlugin) get before/after dispatch; API plugins (IApiPlugin)
-// mount their own route group at /{shortname}. Users can disable individual
-// plugins by flipping is_active in plugins/<name>/config.json — there's no need
-// to recompile to remove one from the pipeline.
+// Plugins
 builder.Services.AddHttpClient();
 builder.Services.AddSingleton<IHookPlugin, ResourceFoldersCreationPlugin>();
 builder.Services.AddSingleton<IHookPlugin, RealtimeUpdatesNotifierPlugin>();
@@ -131,17 +176,12 @@ builder.Services.AddSingleton<IApiPlugin, DbSizeInfoPlugin>();
 // Per-request context
 builder.Services.AddScoped<RequestContext>();
 
-// GZip compression — mirrors Python's GZipMiddleware(minimum_size=10000).
-builder.Services.AddResponseCompression(o =>
-{
-    o.EnableForHttps = true;
-});
+// GZip compression
+builder.Services.AddResponseCompression(o => { o.EnableForHttps = true; });
 
 var app = builder.Build();
 
-// Catches unhandled exceptions from any handler and maps them to a Response.Fail 500.
-// Inline so we don't depend on UseMiddleware<T> reflection (AOT-friendly). Must be
-// first in the pipeline so it covers auth + endpoint exceptions.
+// Exception handler
 app.Use(async (ctx, next) =>
 {
     try { await next(); }
@@ -157,11 +197,10 @@ app.Use(async (ctx, next) =>
     }
 });
 
-// GZip response compression (matches Python's GZipMiddleware).
+// GZip
 app.UseResponseCompression();
 
-// Correlation ID header — mirrors Python's CorrelationIdMiddleware.
-// If the request has X-Correlation-ID, pass it through; otherwise generate one.
+// Correlation ID
 app.Use(async (ctx, next) =>
 {
     if (!ctx.Request.Headers.ContainsKey("X-Correlation-ID"))
@@ -171,25 +210,21 @@ app.Use(async (ctx, next) =>
     await next();
 });
 
-// Request timeout — mirrors Python's asyncio.wait_for(request_timeout).
+// Request timeout
 app.Use(async (ctx, next) =>
 {
-    var settings = ctx.RequestServices.GetRequiredService<IOptions<DmartSettings>>().Value;
-    var timeout = settings.RequestTimeout > 0 ? settings.RequestTimeout : 35;
+    var s = ctx.RequestServices.GetRequiredService<IOptions<DmartSettings>>().Value;
+    var timeout = s.RequestTimeout > 0 ? s.RequestTimeout : 35;
     using var cts = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted);
     cts.CancelAfter(TimeSpan.FromSeconds(timeout));
     ctx.RequestAborted = cts.Token;
     await next();
 });
 
-// Dynamic CORS + security headers + OPTIONS preflight handling. Mirrors dmart
-// Python's set_middleware_response_headers. Must run after the exception
-// handler (so error responses still carry CORS + cache headers) but before
-// authentication so OPTIONS preflight short-circuits don't require a JWT.
+// CORS + security headers + OPTIONS preflight
 app.UseDmartResponseHeaders();
 
-// CXB Svelte frontend — served from embedded resources at /cxb.
-// Must come before auth so static assets don't require JWT.
+// CXB Svelte frontend (embedded resources at /cxb)
 app.UseCxb();
 
 app.UseAuthentication();
@@ -203,12 +238,7 @@ app.MapGroup("/user").MapUser();
 app.MapGroup("/info").RequireAuthorization().MapInfo();
 app.MapGroup("/qr").MapQr();
 
-// Load plugin configs from {BaseDir}/plugins/<name>/config.json and mount API
-// plugin routes under /{shortname}. Done after the builtin route groups so
-// plugin routes can't accidentally shadow a core endpoint, and before app.Run()
-// because routing registration has to be complete before the request pipeline
-// starts. API plugin routes get RequireAuthorization() to match the Python
-// router's capture_body + auth posture.
+// Load plugins + mount API plugin routes
 {
     var pluginManager = app.Services.GetRequiredService<PluginManager>();
     await pluginManager.LoadAsync();
