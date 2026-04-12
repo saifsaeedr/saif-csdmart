@@ -18,6 +18,7 @@ namespace Dmart.DataAdapters.Sql;
 // Designed to be safe to leave in production: if the admin shortname is unset, the
 // admin-creation step is a no-op but #2 and #3 still run.
 public sealed class AdminBootstrap(
+    Db db,
     IOptions<DmartSettings> settings,
     UserRepository users,
     AccessRepository access,
@@ -30,6 +31,7 @@ public sealed class AdminBootstrap(
 
     public async Task StartAsync(CancellationToken ct)
     {
+        if (!db.IsConfigured) return; // no DB → nothing to bootstrap
         await BootstrapAdminAsync(ct);
         await RefreshAuthzAsync(ct);
         await SnapshotCountHistoryAsync(ct);

@@ -8,6 +8,11 @@ public sealed class SchemaInitializer(Db db, ILogger<SchemaInitializer> log) : I
 {
     public async Task StartAsync(CancellationToken ct)
     {
+        if (!db.IsConfigured)
+        {
+            log.LogInformation("database not configured — skipping schema initialization");
+            return;
+        }
         try
         {
             await using var conn = await db.OpenAsync(ct);
