@@ -46,10 +46,20 @@ builder.Services.ConfigureHttpJsonOptions(o =>
     var (envPath, values) = DotEnv.Load();
     if (envPath is not null && values.Count > 0)
     {
-        // Insert after the built-in providers (appsettings.json, chained config)
-        // but before we re-add EnvironmentVariables so env overrides still win.
         builder.Configuration.AddInMemoryCollection(values);
         builder.Configuration.AddEnvironmentVariables();
+    }
+
+    // Wire LISTENING_HOST/LISTENING_PORT from config.env into Kestrel's
+    // actual binding, so the binary listens on the configured port without
+    // requiring a separate ASPNETCORE_URLS env var. Only applied when
+    // ASPNETCORE_URLS isn't already set (explicit env var wins).
+    if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("ASPNETCORE_URLS")))
+    {
+        var dmartSection = builder.Configuration.GetSection("Dmart");
+        var host = dmartSection["ListeningHost"] ?? "0.0.0.0";
+        var port = dmartSection["ListeningPort"] ?? "8282";
+        builder.WebHost.UseUrls($"http://{host}:{port}");
     }
 }
 
