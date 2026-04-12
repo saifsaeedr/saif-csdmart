@@ -5,6 +5,9 @@ WORKDIR /cxb
 COPY cxb/package.json cxb/yarn.lock* cxb/package-lock.json* ./
 RUN yarn install || npm install
 COPY cxb/ .
+# Vite/Routify plugins run git commands during build; init a stub repo
+# so they don't fail (the .git dir isn't copied into the container).
+RUN git init && git add -A && git commit -m "docker build" --allow-empty
 RUN yarn build || npm run build
 
 # Stage 2: Build C# AOT binary with embedded CXB
