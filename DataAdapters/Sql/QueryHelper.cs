@@ -156,9 +156,11 @@ public static class QueryHelper
             else
             {
                 // Plain text search — substring match across common text fields.
+                // Python's RediSearch indexes all fields; we match by searching
+                // shortname + displayname + description + tags + payload text.
                 args.Add(new() { Value = $"%{raw}%" });
                 andClauses.Add(
-                    $"(payload::text ILIKE ${args.Count} OR displayname::text ILIKE ${args.Count} OR description::text ILIKE ${args.Count})");
+                    $"(shortname ILIKE ${args.Count} OR payload::text ILIKE ${args.Count} OR displayname::text ILIKE ${args.Count} OR description::text ILIKE ${args.Count} OR tags::text ILIKE ${args.Count})");
             }
         }
 
