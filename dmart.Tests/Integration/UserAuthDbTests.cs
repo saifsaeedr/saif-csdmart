@@ -88,8 +88,9 @@ public class UserAuthDbTests : IClassFixture<DmartFactory>
         var body = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
         // Response.Attributes is Dictionary<string, object>; source-gen JSON deserializes
         // values as JsonElement. Compare via the JsonElement's value kind.
-        var exists = (JsonElement)body!.Attributes!["exists"]!;
-        exists.GetBoolean().ShouldBeTrue();
+        // Python-parity: per-field {shortname: bool, email: bool, msisdn: bool}.
+        var snExists = (JsonElement)body!.Attributes!["shortname"]!;
+        snExists.GetBoolean().ShouldBeTrue();
     }
 
     private async Task<string?> LoginAdminAndGetTokenAsync(HttpClient client)

@@ -81,6 +81,8 @@ public sealed class DmartSettings
     public string MockOtpCode { get; set; } = "123456";
     public bool MockSmtpApi { get; set; }
     public bool MockSmppApi { get; set; }
+    public bool LogoutOnPwdChange { get; set; } = true;
+    public int RequestTimeout { get; set; } = 35;
 
     // CORS allowlist — mirrors Python's utils/settings.py::allowed_cors_origins.
     // When non-empty, the response-headers middleware reflects matching Origin

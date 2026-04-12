@@ -28,6 +28,7 @@ public static class RequestHandler
             async Task<Response> (Request req, EntryService entries, UserRepository users,
                                   AccessRepository access, SpaceRepository spaces,
                                   AttachmentRepository attachments, PasswordHasher hasher,
+                                  Plugins.PluginManager plugins,
                                   HttpContext http, CancellationToken ct) =>
             {
                 var actor = http.User.Identity?.Name ?? "anonymous";
@@ -48,6 +49,12 @@ public static class RequestHandler
                                 entries, users, access, spaces, attachments, ct),
                         RequestType.Move =>
                             await DispatchMoveAsync(rec, req.SpaceName, actor, entries, ct),
+                        // Python: Assign sets collaborators on an entry.
+                        RequestType.Assign =>
+                            await DispatchAssignAsync(rec, req.SpaceName, actor, entries, ct),
+                        // Python: UpdateAcl sets the per-entry ACL.
+                        RequestType.UpdateAcl =>
+                            await DispatchUpdateAclAsync(rec, req.SpaceName, actor, entries, ct),
                         _ =>
                             ((Response Response, Record UpdatedRecord))(Response.Fail(InternalErrorCode.NOT_SUPPORTED_TYPE,
                                 $"{req.RequestType} not supported", "request"),
@@ -56,6 +63,42 @@ public static class RequestHandler
 
                     if (result.Response.Status != Status.Success) return result.Response;
                     responses.Add(result.UpdatedRecord);
+
+                    // Fire after-action plugin hooks for non-entry CRUD types.
+                    // EntryService already fires hooks for entry creates/updates/deletes,
+                    // but User/Role/Permission/Space go through their own repositories
+                    // and bypass EntryService. Python fires plugins for all of these.
+                    if (rec.ResourceType is ResourceType.User or ResourceType.Role
+                        or ResourceType.Permission or ResourceType.Space)
+                    {
+                        var actionType = req.RequestType switch
+                        {
+                            RequestType.Create => ActionType.Create,
+                            RequestType.Update or RequestType.Patch => ActionType.Update,
+                            RequestType.Delete => ActionType.Delete,
+                            RequestType.Move => ActionType.Move,
+                            _ => (ActionType?)null,
+                        };
+                        if (actionType is not null)
+                        {
+                            _ = Task.Run(async () =>
+                            {
+                                try
+                                {
+                                    await plugins.AfterActionAsync(new Models.Core.Event
+                                    {
+                                        SpaceName = req.SpaceName,
+                                        Subpath = rec.Subpath,
+                                        Shortname = rec.Shortname,
+                                        ActionType = actionType.Value,
+                                        ResourceType = rec.ResourceType,
+                                        UserShortname = actor,
+                                    });
+                                }
+                                catch { /* plugin errors don't fail the request */ }
+                            }, CancellationToken.None);
+                        }
+                    }
                 }
                 return Response.Ok(responses);
             });
@@ -361,17 +404,55 @@ public static class RequestHandler
         Record rec, string space, string actor, EntryService entries, CancellationToken ct)
     {
         var attrs = rec.Attributes ?? new();
-        if (attrs is null
-            || !TryGetString(attrs, "dest_subpath", out var destSubpath)
+        if (!TryGetString(attrs, "dest_subpath", out var destSubpath)
             || !TryGetString(attrs, "dest_shortname", out var destShortname))
             return (Response.Fail(InternalErrorCode.MISSING_DESTINATION_OR_SHORTNAME,
                 "move requires dest_subpath and dest_shortname", "request"), rec);
 
-        var locator = new Locator(rec.ResourceType, space, rec.Subpath, rec.Shortname);
-        var to = new Locator(rec.ResourceType, space, destSubpath!, destShortname!);
+        // Python supports cross-space move via src_space_name / dest_space_name.
+        var srcSpace = TryGetString(attrs, "src_space_name", out var ss) && ss is not null ? ss : space;
+        var destSpace = TryGetString(attrs, "dest_space_name", out var ds) && ds is not null ? ds : space;
+
+        var locator = new Locator(rec.ResourceType, srcSpace, rec.Subpath, rec.Shortname);
+        var to = new Locator(rec.ResourceType, destSpace, destSubpath!, destShortname!);
         var result = await entries.MoveAsync(locator, to, actor, ct);
         return result.IsOk
             ? (Response.Ok(), rec with { Subpath = to.Subpath, Shortname = to.Shortname })
+            : (Response.Fail(result.ErrorCode!, result.ErrorMessage!, "request"), rec);
+    }
+
+    // ============================================================================
+    // ASSIGN (sets collaborators on an entry — Python: RequestType.assign)
+    // ============================================================================
+
+    private static async Task<(Response Response, Record UpdatedRecord)> DispatchAssignAsync(
+        Record rec, string space, string actor, EntryService entries, CancellationToken ct)
+    {
+        var attrs = rec.Attributes ?? new();
+        var collaborators = ExtractStringDict(attrs, "collaborators");
+        var patch = new Dictionary<string, object>(StringComparer.Ordinal);
+        if (collaborators is not null) patch["collaborators"] = collaborators;
+        var locator = new Locator(rec.ResourceType, space, rec.Subpath, rec.Shortname);
+        var result = await entries.UpdateAsync(locator, patch, actor, ct);
+        return result.IsOk
+            ? (Response.Ok(), rec with { Uuid = result.Value!.Uuid })
+            : (Response.Fail(result.ErrorCode!, result.ErrorMessage!, "request"), rec);
+    }
+
+    // ============================================================================
+    // UPDATE_ACL (sets per-entry ACL — Python: RequestType.update_acl)
+    // ============================================================================
+
+    private static async Task<(Response Response, Record UpdatedRecord)> DispatchUpdateAclAsync(
+        Record rec, string space, string actor, EntryService entries, CancellationToken ct)
+    {
+        var attrs = rec.Attributes ?? new();
+        var patch = new Dictionary<string, object>(StringComparer.Ordinal);
+        if (attrs.TryGetValue("acl", out var aclRaw)) patch["acl"] = aclRaw;
+        var locator = new Locator(rec.ResourceType, space, rec.Subpath, rec.Shortname);
+        var result = await entries.UpdateAsync(locator, patch, actor, ct);
+        return result.IsOk
+            ? (Response.Ok(), rec with { Uuid = result.Value!.Uuid })
             : (Response.Fail(result.ErrorCode!, result.ErrorMessage!, "request"), rec);
     }
 
@@ -406,15 +487,51 @@ public static class RequestHandler
             Subpath = "/" + rec.Subpath.TrimStart('/'),
             ResourceType = rec.ResourceType,
             OwnerShortname = actor,
+            OwnerGroupShortname = attrs.TryGetValue("owner_group_shortname", out var ogs) ? ConvertToString(ogs) : null,
             Slug = attrs.TryGetValue("slug", out var s) ? ConvertToString(s) : null,
             Displayname = attrs.TryGetValue("displayname", out var dn) ? ParseTranslation(dn) : null,
             Description = attrs.TryGetValue("description", out var de) ? ParseTranslation(de) : null,
             Tags = ExtractStringList(attrs, "tags") ?? new(),
             IsActive = !attrs.TryGetValue("is_active", out var ia) || !IsExplicitlyFalse(ia),
+            // Ticket-specific fields — Python reads these from record.attributes
+            // via Meta.from_record → Ticket.__init__. C# was dropping them.
             State = attrs.TryGetValue("state", out var st) ? ConvertToString(st) : null,
             WorkflowShortname = attrs.TryGetValue("workflow_shortname", out var wf) ? ConvertToString(wf) : null,
+            ResolutionReason = attrs.TryGetValue("resolution_reason", out var rr) ? ConvertToString(rr) : null,
+            Collaborators = ExtractStringDict(attrs, "collaborators"),
+            Reporter = ParseReporter(attrs),
             Payload = payload,
         };
+    }
+
+    private static Dictionary<string, string>? ExtractStringDict(Dictionary<string, object> attrs, string key)
+    {
+        if (!attrs.TryGetValue(key, out var raw) || raw is null) return null;
+        if (raw is JsonElement el && el.ValueKind == JsonValueKind.Object)
+        {
+            var dict = new Dictionary<string, string>();
+            foreach (var prop in el.EnumerateObject())
+                if (prop.Value.ValueKind == JsonValueKind.String)
+                    dict[prop.Name] = prop.Value.GetString()!;
+            return dict.Count > 0 ? dict : null;
+        }
+        return null;
+    }
+
+    private static Reporter? ParseReporter(Dictionary<string, object> attrs)
+    {
+        if (!attrs.TryGetValue("reporter", out var raw) || raw is null) return null;
+        if (raw is JsonElement el && el.ValueKind == JsonValueKind.Object)
+        {
+            return new Reporter
+            {
+                Type = el.TryGetProperty("type", out var t) ? t.GetString() : null,
+                Name = el.TryGetProperty("name", out var n) ? n.GetString() : null,
+                Channel = el.TryGetProperty("channel", out var c) ? c.GetString() : null,
+                Msisdn = el.TryGetProperty("msisdn", out var m) ? m.GetString() : null,
+            };
+        }
+        return null;
     }
 
     private static ContentType ParseContentType(string? value)

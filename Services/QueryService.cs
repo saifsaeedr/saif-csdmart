@@ -1,54 +1,80 @@
+using System.Text.Json;
 using Dmart.Config;
 using Dmart.DataAdapters.Sql;
 using Dmart.Models.Api;
 using Dmart.Models.Core;
 using Dmart.Models.Enums;
 using Microsoft.Extensions.Options;
+using Npgsql;
+using NpgsqlTypes;
 
 namespace Dmart.Services;
 
-// /managed/query service.
+// /managed/query service. Mirrors Python's adapter.query() dispatch logic:
 //
-// Python dmart's query response envelope is:
-//   {
-//     "status": "success",
-//     "records": [...],
-//     "attributes": { "total": <pre-limit total>, "returned": <this-page count> }
-//   }
+//   QueryType.Spaces        → spaces table (management/ only)
+//   QueryType.History        → histories table
+//   QueryType.Attachments    → attachments table
+//   QueryType.Tags           → entries table, SQL aggregation
+//   management/users         → users table
+//   management/roles         → roles table
+//   management/permissions   → permissions table
+//   everything else          → entries table
 //
-// Two things are important:
-//   1. `total` is the number of rows that match the filters IGNORING limit/
-//      offset — clients rely on this to page.
-//   2. `returned` is the count of records on this page. It equals len(records).
-//
-// The record shape itself is built by the mappers below — see the notes on
-// each mapper for which fields are included and how they compare to Python's
-// `to_record` output.
+// Response envelope: { status, records, attributes: { total, returned } }
 public sealed class QueryService(
     EntryRepository entries,
     SpaceRepository spaces,
+    UserRepository users,
+    AccessRepository access,
+    AttachmentRepository attachments,
+    HistoryRepository history,
     PermissionService perms,
+    Db db,
     IOptions<DmartSettings> settings)
 {
     public async Task<Response> ExecuteAsync(Query q, string? actor, CancellationToken ct = default)
     {
-        // Bounds check
         if (string.IsNullOrEmpty(q.SpaceName))
             return Response.Fail("bad_query", "space_name is required");
 
-        // Dispatch by query type. Most types fall through to the entries path;
-        // "spaces" hits the spaces table instead (mirrors dmart Python's
-        // data_adapters/sql/adapter.py special case at line 1518).
         return q.Type switch
         {
             QueryType.Spaces => await QuerySpacesAsync(q, actor, ct),
-            _ => await QueryEntriesAsync(q, actor, ct),
+            QueryType.History => await QueryHistoryAsync(q, actor, ct),
+            QueryType.Attachments => await QueryAttachmentsAsync(q, actor, ct),
+            QueryType.Tags => await QueryTagsAsync(q, actor, ct),
+            _ => await DispatchTableQuery(q, actor, ct),
         };
     }
 
-    // Python only accepts type=spaces when space_name == management_space and
-    // subpath == "/". Everything else returns bad_query — we match that so
-    // clients get the same error behavior as dmart Python.
+    // ====================================================================
+    // TABLE DISPATCH (mirrors Python's set_table_for_query)
+    // ====================================================================
+
+    private async Task<Response> DispatchTableQuery(Query q, string? actor, CancellationToken ct)
+    {
+        var mgmt = settings.Value.ManagementSpace;
+
+        // Python: when space == management, route /users → Users table, etc.
+        if (string.Equals(q.SpaceName, mgmt, StringComparison.Ordinal))
+        {
+            var sub = q.Subpath.TrimStart('/');
+            if (sub == "users" || sub.StartsWith("users/", StringComparison.Ordinal))
+                return await QueryUsersAsync(q, actor, ct);
+            if (sub == "roles" || sub.StartsWith("roles/", StringComparison.Ordinal))
+                return await QueryRolesAsync(q, actor, ct);
+            if (sub == "permissions" || sub.StartsWith("permissions/", StringComparison.Ordinal))
+                return await QueryPermissionsAsync(q, actor, ct);
+        }
+
+        return await QueryEntriesAsync(q, actor, ct);
+    }
+
+    // ====================================================================
+    // SPACES
+    // ====================================================================
+
     private async Task<Response> QuerySpacesAsync(Query q, string? actor, CancellationToken ct)
     {
         var managementSpace = settings.Value.ManagementSpace;
@@ -57,15 +83,7 @@ public sealed class QueryService(
             return Response.Fail("bad_query",
                 $"spaces query requires space_name=\"{managementSpace}\" and subpath=\"/\"");
 
-        // SELECT * FROM spaces — no permission filtering at the SQL layer; the
-        // filter runs per-row below. Matches Python which skips
-        // apply_acl_and_query_policies for QueryType.spaces.
         var all = await spaces.ListAsync(ct);
-
-        // Per-space ACL check. Python uses action_type=query against each space
-        // individually — a user who has the query action on space "foo" but not
-        // on space "bar" sees only "foo". PermissionService.CanAsync("query", ...)
-        // walks roles + permissions the same way.
         var visible = new List<Space>(all.Count);
         foreach (var space in all)
         {
@@ -75,77 +93,231 @@ public sealed class QueryService(
                 visible.Add(space);
         }
 
-        // Python clamps with limit/offset AFTER the permission filter so
-        // invisible rows don't count toward the page window. We match that.
         var total = visible.Count;
         var page = visible.Skip(Math.Max(0, q.Offset)).Take(Math.Max(1, q.Limit)).ToList();
         var records = page.Select(SpaceMapper.ToRecord).ToList();
-        return Response.Ok(records, new()
-        {
-            // Python: attributes={"total": total, "returned": len(records)}
-            ["total"] = total,
-            ["returned"] = records.Count,
-        });
+        return Response.Ok(records, new() { ["total"] = total, ["returned"] = records.Count });
     }
 
-    private async Task<Response> QueryEntriesAsync(Query q, string? actor, CancellationToken ct)
+    // ====================================================================
+    // USERS (management/users)
+    // ====================================================================
+
+    private async Task<Response> QueryUsersAsync(Query q, string? actor, CancellationToken ct)
     {
-        // Permission gate at subpath level (cheap, single check; result-level
-        // filtering is handled below).
+        var probe = new Locator(ResourceType.User, q.SpaceName, q.Subpath ?? "/", "*");
+        if (!await perms.CanReadAsync(actor, probe, ct))
+            return Response.Fail("forbidden", "no read access for subpath");
+
+        var pageTask = users.QueryAsync(q, ct);
+        var totalTask = q.RetrieveTotal == false
+            ? Task.FromResult(-1)
+            : users.CountQueryAsync(q, ct);
+        await Task.WhenAll(pageTask, totalTask);
+
+        var records = pageTask.Result.Select(UserMapper.ToRecord).ToList();
+        return Response.Ok(records, new() { ["total"] = totalTask.Result, ["returned"] = records.Count });
+    }
+
+    // ====================================================================
+    // ROLES (management/roles)
+    // ====================================================================
+
+    private async Task<Response> QueryRolesAsync(Query q, string? actor, CancellationToken ct)
+    {
+        var probe = new Locator(ResourceType.Role, q.SpaceName, q.Subpath ?? "/", "*");
+        if (!await perms.CanReadAsync(actor, probe, ct))
+            return Response.Fail("forbidden", "no read access for subpath");
+
+        var pageTask = access.QueryRolesAsync(q, ct);
+        var totalTask = q.RetrieveTotal == false
+            ? Task.FromResult(-1)
+            : access.CountRolesQueryAsync(q, ct);
+        await Task.WhenAll(pageTask, totalTask);
+
+        var records = pageTask.Result.Select(RoleMapper.ToRecord).ToList();
+        return Response.Ok(records, new() { ["total"] = totalTask.Result, ["returned"] = records.Count });
+    }
+
+    // ====================================================================
+    // PERMISSIONS (management/permissions)
+    // ====================================================================
+
+    private async Task<Response> QueryPermissionsAsync(Query q, string? actor, CancellationToken ct)
+    {
+        var probe = new Locator(ResourceType.Permission, q.SpaceName, q.Subpath ?? "/", "*");
+        if (!await perms.CanReadAsync(actor, probe, ct))
+            return Response.Fail("forbidden", "no read access for subpath");
+
+        var pageTask = access.QueryPermissionsAsync(q, ct);
+        var totalTask = q.RetrieveTotal == false
+            ? Task.FromResult(-1)
+            : access.CountPermissionsQueryAsync(q, ct);
+        await Task.WhenAll(pageTask, totalTask);
+
+        var records = pageTask.Result.Select(PermissionMapper.ToRecord).ToList();
+        return Response.Ok(records, new() { ["total"] = totalTask.Result, ["returned"] = records.Count });
+    }
+
+    // ====================================================================
+    // ATTACHMENTS
+    // ====================================================================
+
+    private async Task<Response> QueryAttachmentsAsync(Query q, string? actor, CancellationToken ct)
+    {
         var probe = new Locator(ResourceType.Content, q.SpaceName, q.Subpath ?? "/", "*");
         if (!await perms.CanReadAsync(actor, probe, ct))
             return Response.Fail("forbidden", "no read access for subpath");
 
-        // Fetch the page + the total in parallel. Python runs two SQL statements
-        // (the main SELECT and a separate COUNT) — we match that so clients can
-        // page through arbitrary-sized result sets.
-        //
-        // Python's retrieve_total defaults to True; only explicit false skips
-        // the count query. Source-gen JSON doesn't apply C# property
-        // initializers for missing JSON keys, so the Query.RetrieveTotal field
-        // is nullable and we treat null == true here.
+        var pageTask = attachments.QueryAsync(q, ct);
+        var totalTask = q.RetrieveTotal == false
+            ? Task.FromResult(-1)
+            : attachments.CountQueryAsync(q, ct);
+        await Task.WhenAll(pageTask, totalTask);
+
+        var records = pageTask.Result.Select(AttachmentMapper.ToRecord).ToList();
+        return Response.Ok(records, new() { ["total"] = totalTask.Result, ["returned"] = records.Count });
+    }
+
+    // ====================================================================
+    // HISTORY
+    // ====================================================================
+
+    private async Task<Response> QueryHistoryAsync(Query q, string? actor, CancellationToken ct)
+    {
+        // Python blocks anonymous users for history queries.
+        if (actor is null)
+            return Response.Fail("unauthorized", "history queries require authentication");
+
+        var probe = new Locator(ResourceType.Content, q.SpaceName, q.Subpath ?? "/", "*");
+        if (!await perms.CanReadAsync(actor, probe, ct))
+            return Response.Fail("forbidden", "no read access for subpath");
+
+        var pageTask = history.QueryHistoryAsync(q, ct);
+        var totalTask = q.RetrieveTotal == false
+            ? Task.FromResult(-1)
+            : history.CountHistoryQueryAsync(q, ct);
+        await Task.WhenAll(pageTask, totalTask);
+
+        var records = pageTask.Result.Select(HistoryMapper.ToRecord).ToList();
+        return Response.Ok(records, new() { ["total"] = totalTask.Result, ["returned"] = records.Count });
+    }
+
+    // ====================================================================
+    // TAGS (SQL aggregation)
+    // ====================================================================
+
+    private async Task<Response> QueryTagsAsync(Query q, string? actor, CancellationToken ct)
+    {
+        var probe = new Locator(ResourceType.Content, q.SpaceName, q.Subpath ?? "/", "*");
+        if (!await perms.CanReadAsync(actor, probe, ct))
+            return Response.Fail("forbidden", "no read access for subpath");
+
+        // SQL: unnest tags jsonb array, group by tag, count.
+        var args = new List<NpgsqlParameter>();
+        var where = QueryHelper.BuildWhereClause(q, args);
+        var sql = new System.Text.StringBuilder($"""
+            SELECT tag, COUNT(*) AS cnt
+            FROM entries, jsonb_array_elements_text(tags) AS tag
+            WHERE {where}
+            GROUP BY tag ORDER BY cnt DESC
+            """);
+        // Apply limit/offset on the aggregated result.
+        args.Add(new() { Value = Math.Max(1, q.Limit) });
+        sql.Append($" LIMIT ${args.Count}");
+        args.Add(new() { Value = Math.Max(0, q.Offset) });
+        sql.Append($" OFFSET ${args.Count}");
+
+        await using var conn = await db.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql.ToString(), conn);
+        foreach (var p in args) cmd.Parameters.Add(p);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+
+        var tags = new List<string>();
+        var tagCounts = new Dictionary<string, object>();
+        while (await reader.ReadAsync(ct))
+        {
+            var tag = reader.GetString(0);
+            var count = reader.GetInt64(1);
+            tags.Add(tag);
+            tagCounts[tag] = (int)count;
+        }
+
+        // Python returns a single Record with the aggregated data in attributes.
+        var record = new Record
+        {
+            ResourceType = ResourceType.Content,
+            Shortname = "tags",
+            Subpath = q.Subpath ?? "/",
+            Attributes = new Dictionary<string, object>
+            {
+                ["tags"] = tags,
+                ["tag_counts"] = tagCounts,
+            },
+        };
+        return Response.Ok(new[] { record }, new() { ["total"] = tags.Count, ["returned"] = tags.Count });
+    }
+
+    // ====================================================================
+    // ENTRIES (default path)
+    // ====================================================================
+
+    private async Task<Response> QueryEntriesAsync(Query q, string? actor, CancellationToken ct)
+    {
+        var probe = new Locator(ResourceType.Content, q.SpaceName, q.Subpath ?? "/", "*");
+        if (!await perms.CanReadAsync(actor, probe, ct))
+            return Response.Fail("forbidden", "no read access for subpath");
+
         var pageTask = entries.QueryAsync(q, ct);
         var totalTask = q.RetrieveTotal == false
-            ? Task.FromResult(-1L)
+            ? Task.FromResult(-1)
             : entries.CountQueryAsync(q, ct);
         await Task.WhenAll(pageTask, totalTask);
-        var hits = pageTask.Result;
-        // Narrow to int so the source-gen JSON context can serialize it without
-        // a JsonTypeInfo<long> registration. Record totals never realistically
-        // exceed 2^31 in dmart deployments.
-        var total = (int)totalTask.Result;
 
-        var records = hits.Select(e => EntryMapper.ToRecord(e, q.SpaceName)).ToList();
-        return Response.Ok(records, new()
+        var records = pageTask.Result
+            .Select(e => EntryMapper.ToRecord(e, q.SpaceName, q.RetrieveJsonPayload))
+            .ToList();
+
+        // If retrieve_attachments, fetch and attach for each record.
+        if (q.RetrieveAttachments && records.Count > 0)
         {
-            ["total"] = total,
-            ["returned"] = records.Count,
-        });
+            var tasks = records.Select((rec, _) =>
+                attachments.ListForParentAsync(q.SpaceName, rec.Subpath, rec.Shortname, ct)
+            ).ToArray();
+            var allAttachments = await Task.WhenAll(tasks);
+            for (var i = 0; i < records.Count; i++)
+            {
+                if (allAttachments[i].Count > 0)
+                {
+                    records[i] = records[i] with
+                    {
+                        Attachments = allAttachments[i]
+                            .GroupBy(a => a.ResourceType.ToString())
+                            .ToDictionary(
+                                g => g.Key,
+                                g => g.Select(a => AttachmentMapper.ToRecord(a)).ToList())
+                    };
+                }
+            }
+        }
+
+        return Response.Ok(records, new() { ["total"] = totalTask.Result, ["returned"] = records.Count });
     }
 }
 
-// Projects an Entry row into a Record for the /managed/query response.
-//
-// Python's data_adapters/sql/create_tables.py::to_record builds attributes by
-// dumping every SQLModel column except the "local props" (uuid, resource_type,
-// shortname, subpath). Emits null and empty-list values explicitly because
-// Pydantic's exclude_none operates on the top-level Record model, not on dict
-// contents.
-//
-// Python then post-processes in _set_query_final_results (adapter.py:2883):
-//   * delete rec.attributes["query_policies"]
-//   * delete rec.attributes["password"] for user records
-//   * optionally strip payload.body if retrieve_json_payload is false
-//
-// We replicate all of that here.
+// ========================================================================
+// MAPPERS — project DB models → Record for the wire
+// ========================================================================
+// Python's to_record() dumps every __dict__ key minus the "local props"
+// (uuid, resource_type, shortname, subpath). Then _set_query_final_results
+// deletes password (for users) and query_policies (for all). We mirror that.
+
 internal static class EntryMapper
 {
-    public static Record ToRecord(Entry e, string spaceName)
+    public static Record ToRecord(Entry e, string spaceName, bool includePayloadBody = true)
     {
         var attrs = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
-            // Metas base (matches the fields Python's to_record emits from the
-            // SQLModel __dict__).
             ["is_active"] = e.IsActive,
             ["slug"] = e.Slug,
             ["displayname"] = e.Displayname,
@@ -156,26 +328,17 @@ internal static class EntryMapper
             ["owner_shortname"] = e.OwnerShortname,
             ["owner_group_shortname"] = e.OwnerGroupShortname,
             ["acl"] = e.Acl,
-            ["payload"] = e.Payload,
+            ["payload"] = includePayloadBody ? e.Payload : StripPayloadBody(e.Payload),
             ["relationships"] = e.Relationships,
             ["last_checksum_history"] = e.LastChecksumHistory,
-            // Entries-specific (ticket fields)
             ["state"] = e.State,
             ["is_open"] = e.IsOpen,
             ["reporter"] = e.Reporter,
             ["workflow_shortname"] = e.WorkflowShortname,
             ["collaborators"] = e.Collaborators,
             ["resolution_reason"] = e.ResolutionReason,
-            // space_name is included in Python's to_record output (it's a
-            // column on the Metas table). Clients use it to identify which
-            // space a cross-space query result came from.
             ["space_name"] = spaceName,
         };
-
-        // Python deletes query_policies unconditionally — it's an internal
-        // gating field that shouldn't leak to clients.
-        attrs.Remove("query_policies");
-
         return new Record
         {
             ResourceType = e.ResourceType,
@@ -185,18 +348,20 @@ internal static class EntryMapper
             Attributes = attrs!,
         };
     }
+
+    private static Payload? StripPayloadBody(Payload? p)
+    {
+        if (p is null) return null;
+        return p with { Body = null };
+    }
 }
 
-// Projects a Space row into a Record for the /managed/query response. Python's
-// to_record emits ALL Space SQLModel columns (nulls included) minus the local
-// props. We match the key set — see the inline comment on each group.
 internal static class SpaceMapper
 {
     public static Record ToRecord(Space s)
     {
         var attrs = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
-            // Metas base — always present in Python's dump, including nulls.
             ["is_active"] = s.IsActive,
             ["slug"] = s.Slug,
             ["displayname"] = s.Displayname,
@@ -210,7 +375,6 @@ internal static class SpaceMapper
             ["payload"] = s.Payload,
             ["relationships"] = s.Relationships,
             ["last_checksum_history"] = s.LastChecksumHistory,
-            // Space-specific columns
             ["root_registration_signature"] = s.RootRegistrationSignature,
             ["primary_website"] = s.PrimaryWebsite,
             ["indexing_enabled"] = s.IndexingEnabled,
@@ -223,21 +387,198 @@ internal static class SpaceMapper
             ["hide_space"] = s.HideSpace,
             ["active_plugins"] = s.ActivePlugins,
             ["ordinal"] = s.Ordinal,
-            // space_name is a real column on the spaces table and appears in
-            // Python's dump — for the self-referential spaces rows it equals
-            // the shortname.
             ["space_name"] = s.SpaceName,
         };
-
-        // Python deletes query_policies before returning — match that.
-        attrs.Remove("query_policies");
-
         return new Record
         {
             ResourceType = ResourceType.Space,
             Subpath = s.Subpath,
             Shortname = s.Shortname,
             Uuid = s.Uuid,
+            Attributes = attrs!,
+        };
+    }
+}
+
+internal static class UserMapper
+{
+    public static Record ToRecord(User u)
+    {
+        var attrs = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["is_active"] = u.IsActive,
+            ["slug"] = u.Slug,
+            ["displayname"] = u.Displayname,
+            ["description"] = u.Description,
+            ["tags"] = u.Tags,
+            ["created_at"] = u.CreatedAt,
+            ["updated_at"] = u.UpdatedAt,
+            ["owner_shortname"] = u.OwnerShortname,
+            ["owner_group_shortname"] = u.OwnerGroupShortname,
+            ["acl"] = u.Acl,
+            ["payload"] = u.Payload,
+            ["relationships"] = u.Relationships,
+            ["last_checksum_history"] = u.LastChecksumHistory,
+            // User-specific (password deliberately excluded — Python strips it)
+            ["roles"] = u.Roles,
+            ["groups"] = u.Groups,
+            ["type"] = JsonbHelpers.EnumMember(u.Type),
+            ["language"] = JsonbHelpers.EnumMember(u.Language),
+            ["email"] = u.Email,
+            ["msisdn"] = u.Msisdn,
+            ["locked_to_device"] = u.LockedToDevice,
+            ["is_email_verified"] = u.IsEmailVerified,
+            ["is_msisdn_verified"] = u.IsMsisdnVerified,
+            ["force_password_change"] = u.ForcePasswordChange,
+            ["device_id"] = u.DeviceId,
+            ["google_id"] = u.GoogleId,
+            ["facebook_id"] = u.FacebookId,
+            ["social_avatar_url"] = u.SocialAvatarUrl,
+            ["notes"] = u.Notes,
+            ["space_name"] = u.SpaceName,
+        };
+        return new Record
+        {
+            ResourceType = ResourceType.User,
+            Subpath = u.Subpath,
+            Shortname = u.Shortname,
+            Uuid = u.Uuid,
+            Attributes = attrs!,
+        };
+    }
+}
+
+internal static class RoleMapper
+{
+    public static Record ToRecord(Role r)
+    {
+        var attrs = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["is_active"] = r.IsActive,
+            ["slug"] = r.Slug,
+            ["displayname"] = r.Displayname,
+            ["description"] = r.Description,
+            ["tags"] = r.Tags,
+            ["created_at"] = r.CreatedAt,
+            ["updated_at"] = r.UpdatedAt,
+            ["owner_shortname"] = r.OwnerShortname,
+            ["owner_group_shortname"] = r.OwnerGroupShortname,
+            ["acl"] = r.Acl,
+            ["payload"] = r.Payload,
+            ["relationships"] = r.Relationships,
+            ["last_checksum_history"] = r.LastChecksumHistory,
+            ["permissions"] = r.Permissions,
+            ["space_name"] = r.SpaceName,
+        };
+        return new Record
+        {
+            ResourceType = ResourceType.Role,
+            Subpath = r.Subpath,
+            Shortname = r.Shortname,
+            Uuid = r.Uuid,
+            Attributes = attrs!,
+        };
+    }
+}
+
+internal static class PermissionMapper
+{
+    public static Record ToRecord(Permission p)
+    {
+        var attrs = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["is_active"] = p.IsActive,
+            ["slug"] = p.Slug,
+            ["displayname"] = p.Displayname,
+            ["description"] = p.Description,
+            ["tags"] = p.Tags,
+            ["created_at"] = p.CreatedAt,
+            ["updated_at"] = p.UpdatedAt,
+            ["owner_shortname"] = p.OwnerShortname,
+            ["owner_group_shortname"] = p.OwnerGroupShortname,
+            ["acl"] = p.Acl,
+            ["payload"] = p.Payload,
+            ["relationships"] = p.Relationships,
+            ["last_checksum_history"] = p.LastChecksumHistory,
+            ["subpaths"] = p.Subpaths,
+            ["resource_types"] = p.ResourceTypes,
+            ["actions"] = p.Actions,
+            ["conditions"] = p.Conditions,
+            ["restricted_fields"] = p.RestrictedFields,
+            ["allowed_fields_values"] = p.AllowedFieldsValues,
+            ["filter_fields_values"] = p.FilterFieldsValues,
+            ["space_name"] = p.SpaceName,
+        };
+        return new Record
+        {
+            ResourceType = ResourceType.Permission,
+            Subpath = p.Subpath,
+            Shortname = p.Shortname,
+            Uuid = p.Uuid,
+            Attributes = attrs!,
+        };
+    }
+}
+
+internal static class AttachmentMapper
+{
+    public static Record ToRecord(Attachment a)
+    {
+        var attrs = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["is_active"] = a.IsActive,
+            ["slug"] = a.Slug,
+            ["displayname"] = a.Displayname,
+            ["description"] = a.Description,
+            ["tags"] = a.Tags,
+            ["created_at"] = a.CreatedAt,
+            ["updated_at"] = a.UpdatedAt,
+            ["owner_shortname"] = a.OwnerShortname,
+            ["owner_group_shortname"] = a.OwnerGroupShortname,
+            ["acl"] = a.Acl,
+            ["payload"] = a.Payload,
+            ["relationships"] = a.Relationships,
+            ["last_checksum_history"] = a.LastChecksumHistory,
+            ["body"] = a.Body,
+            ["state"] = a.State,
+            ["space_name"] = a.SpaceName,
+        };
+        return new Record
+        {
+            ResourceType = a.ResourceType,
+            Subpath = a.Subpath,
+            Shortname = a.Shortname,
+            Uuid = a.Uuid,
+            Attributes = attrs!,
+        };
+    }
+}
+
+internal static class HistoryMapper
+{
+    public static Record ToRecord(HistoryRecord h)
+    {
+        // Python strips request_headers and masks passwords in diff.
+        var diff = h.Diff;
+        if (diff is not null && diff.Contains("password", StringComparison.OrdinalIgnoreCase))
+            diff = System.Text.RegularExpressions.Regex.Replace(
+                diff, @"""password""\s*:\s*""[^""]*""", @"""password"":""********""");
+
+        var attrs = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["owner_shortname"] = h.OwnerShortname,
+            ["timestamp"] = h.Timestamp,
+            // Deserialize diff JSON string into a JsonElement so it round-trips
+            // through the source-gen context without triggering AOT warnings.
+            ["diff"] = diff is not null ? JsonDocument.Parse(diff).RootElement.Clone() : null,
+            ["space_name"] = h.SpaceName,
+        };
+        return new Record
+        {
+            ResourceType = ResourceType.History,
+            Shortname = h.Shortname,
+            Subpath = h.Subpath,
+            Uuid = h.Uuid.ToString(),
             Attributes = attrs!,
         };
     }

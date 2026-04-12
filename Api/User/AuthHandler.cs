@@ -17,7 +17,21 @@ public static class AuthHandler
             IOptions<DmartSettings> settings,
             CancellationToken ct) =>
         {
-            var result = await svc.LoginAsync(req, ct);
+            // Build stripped request headers for last_login tracking (Python removes
+            // authorization and cookie headers before persisting).
+            var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var h in http.Request.Headers)
+            {
+                if (string.Equals(h.Key, "authorization", StringComparison.OrdinalIgnoreCase)) continue;
+                if (string.Equals(h.Key, "cookie", StringComparison.OrdinalIgnoreCase)) continue;
+                headers[h.Key] = h.Value.ToString();
+            }
+
+            // Route to OTP or password login based on whether otp field is present.
+            var result = !string.IsNullOrEmpty(req.Otp)
+                ? await svc.LoginWithOtpAsync(req, headers, ct)
+                : await svc.LoginAsync(req, headers, ct);
+
             if (!result.IsOk)
                 return Results.Json(Response.Fail(result.ErrorCode!, result.ErrorMessage!, type: "auth"),
                     DmartJsonContext.Default.Response, statusCode: 401);
@@ -46,9 +60,13 @@ public static class AuthHandler
             }), DmartJsonContext.Default.Response);
         });
 
-        g.MapPost("/logout", (HttpContext http) =>
+        g.MapPost("/logout", async Task<Response> (HttpContext http, UserService svc, CancellationToken ct) =>
         {
-            // Mirrors dmart Python: clear the cookie by setting an empty value with max_age=0.
+            // Python: db.remove_user_session() — delete the session row.
+            var token = http.Request.Cookies["auth_token"];
+            await svc.LogoutAsync(token, ct);
+
+            // Clear the cookie by setting an empty value with max_age=0.
             http.Response.Cookies.Append("auth_token", "", new CookieOptions
             {
                 HttpOnly = true,

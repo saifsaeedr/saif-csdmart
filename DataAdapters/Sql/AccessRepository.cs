@@ -196,6 +196,20 @@ public sealed class AccessRepository(Db db, AuthzCacheRefresher refresher)
         await InvalidateAllCachesAsync(ct);
     }
 
+    // ----- query support (used by QueryService for management/roles and management/permissions) -----
+
+    public Task<List<Role>> QueryRolesAsync(Models.Api.Query q, CancellationToken ct = default)
+        => QueryHelper.RunQueryAsync(db, SelectRoleColumns, q, HydrateRole, ct);
+
+    public Task<int> CountRolesQueryAsync(Models.Api.Query q, CancellationToken ct = default)
+        => QueryHelper.RunCountAsync(db, "roles", q, ct);
+
+    public Task<List<Permission>> QueryPermissionsAsync(Models.Api.Query q, CancellationToken ct = default)
+        => QueryHelper.RunQueryAsync(db, SelectPermissionColumns, q, HydratePermission, ct);
+
+    public Task<int> CountPermissionsQueryAsync(Models.Api.Query q, CancellationToken ct = default)
+        => QueryHelper.RunCountAsync(db, "permissions", q, ct);
+
     public async Task CacheUserPermissionsAsync(string userShortname, Dictionary<string, object> resolved, CancellationToken ct = default)
     {
         var json = JsonbHelpers.ToJsonb(resolved);

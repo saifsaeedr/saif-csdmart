@@ -217,6 +217,22 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher)
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    // ----- query support (used by QueryService for management/users) -----
+
+    public Task<List<User>> QueryAsync(Models.Api.Query q, CancellationToken ct = default)
+        => QueryHelper.RunQueryAsync(db, SelectAllColumns, q, Hydrate, ct);
+
+    public Task<int> CountQueryAsync(Models.Api.Query q, CancellationToken ct = default)
+        => QueryHelper.RunCountAsync(db, "users", q, ct);
+
+    public async Task DeleteAllSessionsAsync(string shortname, CancellationToken ct = default)
+    {
+        await using var conn = await db.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand("DELETE FROM sessions WHERE shortname = $1", conn);
+        cmd.Parameters.Add(new() { Value = shortname });
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     private static void AddJsonb(NpgsqlCommand cmd, string? json)
     {
         cmd.Parameters.Add(new()

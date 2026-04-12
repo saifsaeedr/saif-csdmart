@@ -1,5 +1,4 @@
 using System.Text.Json;
-using Dmart.DataAdapters.Sql;
 using Dmart.Models.Api;
 using Dmart.Models.Json;
 using Dmart.Services;
@@ -10,13 +9,6 @@ public static class RegistrationHandler
 {
     public static void Map(RouteGroupBuilder g)
     {
-        g.MapGet("/check-existing", async (string? shortname, string? email, string? msisdn,
-                                            UserRepository users, CancellationToken ct) =>
-        {
-            var exists = await users.ExistsAsync(shortname, email, msisdn, ct);
-            return Response.Ok(attributes: new() { ["exists"] = exists });
-        });
-
         g.MapPost("/create", async (HttpRequest req, UserService svc, CancellationToken ct) =>
         {
             var body = await JsonSerializer.DeserializeAsync(req.Body, DmartJsonContext.Default.DictionaryStringObject, ct);
@@ -30,14 +22,6 @@ public static class RegistrationHandler
             return result.IsOk
                 ? Response.Ok(attributes: new() { ["uuid"] = result.Value!.Uuid, ["shortname"] = result.Value.Shortname })
                 : Response.Fail(result.ErrorCode!, result.ErrorMessage!);
-        });
-
-        g.MapPost("/validate_password", async (HttpRequest req) =>
-        {
-            var body = await JsonSerializer.DeserializeAsync(req.Body, DmartJsonContext.Default.DictionaryStringObject);
-            var password = body?.TryGetValue("password", out var p) == true ? p?.ToString() ?? "" : "";
-            var valid = password.Length >= 8;
-            return Response.Ok(attributes: new() { ["valid"] = valid, ["min_length"] = 8 });
         });
     }
 }

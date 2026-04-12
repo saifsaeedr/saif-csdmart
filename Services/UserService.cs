@@ -1,13 +1,21 @@
+using System.Text.Json;
 using Dmart.Auth;
+using Dmart.Config;
 using Dmart.DataAdapters.Sql;
 using Dmart.Models.Api;
 using Dmart.Models.Core;
 using Dmart.Models.Enums;
 using Dmart.Utils;
+using Microsoft.Extensions.Options;
 
 namespace Dmart.Services;
 
-public sealed class UserService(UserRepository users, PasswordHasher hasher, JwtIssuer jwt)
+public sealed class UserService(
+    UserRepository users,
+    OtpRepository otp,
+    PasswordHasher hasher,
+    JwtIssuer jwt,
+    IOptions<DmartSettings> settings)
 {
     private const string MgmtSpace = "management";
 
@@ -16,6 +24,10 @@ public sealed class UserService(UserRepository users, PasswordHasher hasher, Jwt
 
     public async Task<Result<User>> CreateAsync(string shortname, string? email, string? msisdn, string? password, string? language, CancellationToken ct = default)
     {
+        // Python: check is_registrable setting before allowing self-registration.
+        if (!settings.Value.IsRegistrable)
+            return Result<User>.Fail("forbidden", "registration is disabled");
+
         if (string.IsNullOrWhiteSpace(shortname))
             return Result<User>.Fail("invalid_shortname", "shortname required");
         if (await users.ExistsAsync(shortname, email, msisdn, ct))
@@ -41,16 +53,21 @@ public sealed class UserService(UserRepository users, PasswordHasher hasher, Jwt
         return Result<User>.Ok(user);
     }
 
-    public async Task<Result<(string Access, string Refresh, User User)>> LoginAsync(UserLoginRequest req, CancellationToken ct = default)
+    // Standard password-based login. Mirrors Python's login() PATH C (password).
+    public async Task<Result<(string Access, string Refresh, User User)>> LoginAsync(
+        UserLoginRequest req, Dictionary<string, string>? requestHeaders = null, CancellationToken ct = default)
     {
-        var user = req.Shortname is not null ? await users.GetByShortnameAsync(req.Shortname, ct)
-                 : req.Email is not null     ? await users.GetByEmailAsync(req.Email, ct)
-                 : req.Msisdn is not null    ? await users.GetByMsisdnAsync(req.Msisdn, ct)
-                 : null;
+        var user = await ResolveUserAsync(req, ct);
         if (user is null)
             return Result<(string, string, User)>.Fail("not_found", "user not found");
         if (!user.IsActive)
             return Result<(string, string, User)>.Fail("inactive", "user is inactive");
+
+        // Account lockout after max_failed_login_attempts (Python: handle_failed_login_attempt).
+        var maxAttempts = settings.Value.MaxFailedLoginAttempts;
+        if (maxAttempts > 0 && user.AttemptCount is not null && user.AttemptCount >= maxAttempts)
+            return Result<(string, string, User)>.Fail("inactive", "account locked due to too many failed attempts");
+
         if (string.IsNullOrEmpty(user.Password) || req.Password is null
             || !hasher.Verify(req.Password, user.Password))
         {
@@ -58,10 +75,7 @@ public sealed class UserService(UserRepository users, PasswordHasher hasher, Jwt
             return Result<(string, string, User)>.Fail("invalid_credentials", "incorrect password");
         }
 
-        // Python-parity device_id check for mobile users: if the stored
-        // device_id differs from the one in the login body, either reject
-        // outright (account locked to a single device) or require OTP.
-        // See dmart Python api/user/router.py lines 460-482.
+        // Device lock check for mobile users.
         if (user.Type == UserType.Mobile
             && !string.IsNullOrEmpty(user.DeviceId)
             && (string.IsNullOrEmpty(req.DeviceId) || req.DeviceId != user.DeviceId))
@@ -71,48 +85,164 @@ public sealed class UserService(UserRepository users, PasswordHasher hasher, Jwt
             return Result<(string, string, User)>.Fail("invalid_otp", "new device detected, login with otp");
         }
 
-        await users.ResetAttemptsAsync(user.Shortname, ct);
+        return await ProcessLoginAsync(user, req, requestHeaders, ct);
+    }
 
-        // Python's process_user_login persists the new device_id onto the user
-        // row after a successful login (mirrors user_updates["device_id"] = device_id).
-        // Only write when the caller actually supplied one so we don't clobber.
-        if (!string.IsNullOrEmpty(req.DeviceId) && req.DeviceId != user.DeviceId)
+    // OTP-based login. Mirrors Python's login() PATH B (OTP).
+    public async Task<Result<(string Access, string Refresh, User User)>> LoginWithOtpAsync(
+        UserLoginRequest req, Dictionary<string, string>? requestHeaders = null, CancellationToken ct = default)
+    {
+        var user = await ResolveUserAsync(req, ct);
+        if (user is null)
+            return Result<(string, string, User)>.Fail("not_found", "user not found");
+        if (!user.IsActive)
+            return Result<(string, string, User)>.Fail("inactive", "user is inactive");
+
+        // Validate OTP code.
+        var dest = user.Msisdn ?? user.Email ?? user.Shortname;
+        if (string.IsNullOrEmpty(req.Otp) || !await otp.VerifyAndConsumeAsync(dest, req.Otp, ct))
+            return Result<(string, string, User)>.Fail("invalid_otp", "invalid or expired OTP");
+
+        // Python also optionally verifies password if provided alongside OTP.
+        if (!string.IsNullOrEmpty(req.Password)
+            && !string.IsNullOrEmpty(user.Password)
+            && !hasher.Verify(req.Password, user.Password))
         {
-            user = user with { DeviceId = req.DeviceId, UpdatedAt = DateTime.UtcNow };
-            await users.UpsertAsync(user, ct);
+            return Result<(string, string, User)>.Fail("invalid_credentials", "incorrect password");
         }
 
-        var access = jwt.IssueAccess(user.Shortname, user.Roles);
-        var refresh = jwt.IssueRefresh(user.Shortname);
-        return Result<(string, string, User)>.Ok((access, refresh, user));
+        return await ProcessLoginAsync(user, req, requestHeaders, ct);
+    }
+
+    // Shared post-authentication flow. Mirrors Python's process_user_login().
+    private async Task<Result<(string Access, string Refresh, User User)>> ProcessLoginAsync(
+        User user, UserLoginRequest req,
+        Dictionary<string, string>? requestHeaders, CancellationToken ct)
+    {
+        await users.ResetAttemptsAsync(user.Shortname, ct);
+
+        // Persist device_id if changed.
+        var updatedUser = user;
+        var needsUpdate = false;
+        if (!string.IsNullOrEmpty(req.DeviceId) && req.DeviceId != user.DeviceId)
+        {
+            updatedUser = updatedUser with { DeviceId = req.DeviceId };
+            needsUpdate = true;
+        }
+
+        // Python tracks last_login = {timestamp, headers} on every successful login.
+        if (requestHeaders is not null)
+        {
+            var loginInfo = new Dictionary<string, object>
+            {
+                // Cast to int so source-gen JSON can serialize it (no Int64 TypeInfo).
+                ["timestamp"] = (int)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                ["headers"] = requestHeaders,
+            };
+            updatedUser = updatedUser with { LastLogin = loginInfo };
+            needsUpdate = true;
+        }
+
+        if (needsUpdate)
+        {
+            updatedUser = updatedUser with { UpdatedAt = DateTime.UtcNow };
+            await users.UpsertAsync(updatedUser, ct);
+        }
+
+        var access = jwt.IssueAccess(updatedUser.Shortname, updatedUser.Roles);
+        var refresh = jwt.IssueRefresh(updatedUser.Shortname);
+
+        // Create session row (Python: db.set_user_session).
+        await users.CreateSessionAsync(updatedUser.Shortname, access, ct);
+
+        return Result<(string, string, User)>.Ok((access, refresh, updatedUser));
+    }
+
+    // Validate a password against the stored hash (Python: POST /validate_password).
+    public async Task<bool> ValidatePasswordAsync(string shortname, string password, CancellationToken ct = default)
+    {
+        var user = await users.GetByShortnameAsync(shortname, ct);
+        if (user is null || string.IsNullOrEmpty(user.Password)) return false;
+        return hasher.Verify(password, user.Password);
     }
 
     public async Task<Result<User>> UpdateProfileAsync(string shortname, Dictionary<string, object> patch, CancellationToken ct = default)
     {
         var user = await users.GetByShortnameAsync(shortname, ct);
         if (user is null) return Result<User>.Fail("not_found", "user missing");
+
+        // Password change: Python requires old_password unless force_password_change.
+        string? newPasswordHash = null;
+        if (patch.TryGetValue("password", out var pwObj) && pwObj is not null)
+        {
+            var newPw = pwObj.ToString();
+            if (!user.ForcePasswordChange)
+            {
+                if (!patch.TryGetValue("old_password", out var oldPwObj) || oldPwObj is null)
+                    return Result<User>.Fail("bad_request", "old_password required to change password");
+                if (string.IsNullOrEmpty(user.Password) || !hasher.Verify(oldPwObj.ToString()!, user.Password))
+                    return Result<User>.Fail("invalid_credentials", "old password is incorrect");
+            }
+            newPasswordHash = string.IsNullOrEmpty(newPw) ? null : hasher.Hash(newPw!);
+        }
+
+        static string? Str(Dictionary<string, object> d, string k, string? fallback)
+            => d.TryGetValue(k, out var v) ? v?.ToString() : fallback;
+
         var updated = user with
         {
-            Email = patch.TryGetValue("email", out var e) ? e?.ToString() : user.Email,
-            Msisdn = patch.TryGetValue("msisdn", out var m) ? m?.ToString() : user.Msisdn,
+            Email = Str(patch, "email", user.Email),
+            Msisdn = Str(patch, "msisdn", user.Msisdn),
             Language = patch.TryGetValue("language", out var l) && l is not null
                 ? ParseLanguage(l.ToString())
                 : user.Language,
             Displayname = patch.TryGetValue("displayname", out var dn) && dn is not null
                 ? new Translation(En: dn.ToString())
                 : user.Displayname,
-            // Python's POST /user/profile accepts device_id in the patch and
-            // writes it through. Mirror that so the device-gated login check
-            // picks up the updated value on the next sign-in.
-            DeviceId = patch.TryGetValue("device_id", out var did) ? did?.ToString() : user.DeviceId,
+            Description = patch.TryGetValue("description", out var desc) && desc is not null
+                ? new Translation(En: desc.ToString())
+                : user.Description,
+            DeviceId = Str(patch, "device_id", user.DeviceId),
+            ForcePasswordChange = patch.TryGetValue("force_password_change", out var fpc)
+                ? fpc is true || (fpc is bool b && b)
+                : user.ForcePasswordChange,
+            Password = newPasswordHash ?? user.Password,
             UpdatedAt = DateTime.UtcNow,
         };
         await users.UpsertAsync(updated, ct);
+
+        // Python: if password changed and logout_on_pwd_change, delete all sessions.
+        if (newPasswordHash is not null && settings.Value.LogoutOnPwdChange)
+            await users.DeleteAllSessionsAsync(shortname, ct);
+
+        // Python: if is_active set to false, delete all sessions.
+        if (patch.TryGetValue("is_active", out var ia) && ia is false)
+            await users.DeleteAllSessionsAsync(shortname, ct);
+
         return Result<User>.Ok(updated);
     }
 
-    public Task DeleteAsync(string shortname, CancellationToken ct = default)
-        => users.DeleteAsync(shortname, ct);
+    public async Task DeleteAsync(string shortname, CancellationToken ct = default)
+    {
+        // Python: remove all sessions before deleting user.
+        await users.DeleteAllSessionsAsync(shortname, ct);
+        await users.DeleteAsync(shortname, ct);
+    }
+
+    public async Task LogoutAsync(string? token, CancellationToken ct = default)
+    {
+        // Python: db.remove_user_session() — delete the specific session row.
+        if (!string.IsNullOrEmpty(token))
+            await users.DeleteSessionAsync(token, ct);
+    }
+
+    private async Task<User?> ResolveUserAsync(UserLoginRequest req, CancellationToken ct)
+    {
+        return req.Shortname is not null ? await users.GetByShortnameAsync(req.Shortname, ct)
+             : req.Email is not null     ? await users.GetByEmailAsync(req.Email, ct)
+             : req.Msisdn is not null    ? await users.GetByMsisdnAsync(req.Msisdn, ct)
+             : null;
+    }
 
     private static Language ParseLanguage(string? code) => code?.ToLowerInvariant() switch
     {

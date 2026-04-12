@@ -10,23 +10,33 @@ public static class ProfileHandler
 {
     public static void Map(RouteGroupBuilder g)
     {
+        // GET /user/profile — Python returns comprehensive user data.
         g.MapGet("/profile", async (HttpContext http, UserService svc, CancellationToken ct) =>
         {
             var actor = http.User.Identity?.Name;
             if (actor is null) return Response.Fail("unauthorized", "login required");
             var user = await svc.GetByShortnameAsync(actor, ct);
-            return user is null
-                ? Response.Fail("not_found", "user missing")
-                : Response.Ok(attributes: new()
-                {
-                    ["shortname"] = user.Shortname,
-                    ["email"] = user.Email ?? (object)"",
-                    ["msisdn"] = user.Msisdn ?? (object)"",
-                    ["language"] = user.Language,
-                    ["roles"] = user.Roles,
-                    ["is_email_verified"] = user.IsEmailVerified,
-                    ["is_msisdn_verified"] = user.IsMsisdnVerified,
-                });
+            if (user is null) return Response.Fail("not_found", "user missing");
+
+            // Python returns: email, displayname, description, msisdn, payload,
+            // type, language, is_email_verified, is_msisdn_verified,
+            // force_password_change, permissions, roles, groups, avatar.
+            return Response.Ok(attributes: new()
+            {
+                ["shortname"] = user.Shortname,
+                ["email"] = user.Email ?? (object)"",
+                ["msisdn"] = user.Msisdn ?? (object)"",
+                ["displayname"] = user.Displayname ?? (object)"",
+                ["description"] = user.Description ?? (object)"",
+                ["language"] = user.Language,
+                ["type"] = user.Type.ToString().ToLowerInvariant(),
+                ["roles"] = user.Roles,
+                ["groups"] = user.Groups,
+                ["is_email_verified"] = user.IsEmailVerified,
+                ["is_msisdn_verified"] = user.IsMsisdnVerified,
+                ["force_password_change"] = user.ForcePasswordChange,
+                ["payload"] = user.Payload ?? (object)new Dictionary<string, object>(),
+            });
         });
 
         g.MapPost("/profile", async (HttpRequest req, HttpContext http, UserService svc, CancellationToken ct) =>
@@ -50,7 +60,6 @@ public static class ProfileHandler
         });
 
         // POST /user/reset — admin clears another user's failed-login attempt counter.
-        // Body: { "shortname": "<target user>" }. Mirrors dmart's "reset" endpoint.
         g.MapPost("/reset", async (HttpRequest req, HttpContext http, UserRepository users, CancellationToken ct) =>
         {
             var actor = http.User.Identity?.Name;
@@ -76,6 +85,51 @@ public static class ProfileHandler
 
             await users.ResetAttemptsAsync(target, ct);
             return Response.Ok(attributes: new() { ["shortname"] = target });
+        });
+
+        // POST /user/validate_password — Python verifies against stored hash,
+        // requires authentication. Returns {valid: bool}.
+        g.MapPost("/validate_password", async (HttpRequest req, HttpContext http, UserService svc, CancellationToken ct) =>
+        {
+            var actor = http.User.Identity?.Name;
+            if (actor is null)
+                return Response.Fail("unauthorized", "login required");
+
+            Dictionary<string, object>? body;
+            try
+            {
+                body = await JsonSerializer.DeserializeAsync(req.Body, DmartJsonContext.Default.DictionaryStringObject, ct);
+            }
+            catch (JsonException ex)
+            {
+                return Response.Fail(InternalErrorCode.INVALID_DATA, ex.Message, "request");
+            }
+            var password = body?.TryGetValue("password", out var pw) == true ? pw?.ToString() : null;
+            if (string.IsNullOrEmpty(password))
+                return Response.Fail("bad_request", "password required");
+
+            var valid = await svc.ValidatePasswordAsync(actor, password, ct);
+            return Response.Ok(attributes: new() { ["valid"] = valid });
+        });
+
+        // GET /user/check-existing — Python returns per-field {shortname, email, msisdn} booleans.
+        g.MapGet("/check-existing", async (
+            string? shortname, string? email, string? msisdn,
+            UserRepository users, CancellationToken ct) =>
+        {
+            var snExists = !string.IsNullOrEmpty(shortname)
+                && await users.GetByShortnameAsync(shortname, ct) is not null;
+            var emailExists = !string.IsNullOrEmpty(email)
+                && await users.GetByEmailAsync(email, ct) is not null;
+            var msisdnExists = !string.IsNullOrEmpty(msisdn)
+                && await users.GetByMsisdnAsync(msisdn, ct) is not null;
+
+            return Response.Ok(attributes: new()
+            {
+                ["shortname"] = snExists,
+                ["email"] = emailExists,
+                ["msisdn"] = msisdnExists,
+            });
         });
     }
 }

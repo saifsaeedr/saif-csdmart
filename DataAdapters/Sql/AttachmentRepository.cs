@@ -128,6 +128,14 @@ public sealed class AttachmentRepository(Db db)
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    // ----- query support (used by QueryService for type=attachments) -----
+
+    public Task<List<Attachment>> QueryAsync(Models.Api.Query q, CancellationToken ct = default)
+        => QueryHelper.RunQueryAsync(db, SelectAllColumns, q, Hydrate, ct);
+
+    public Task<int> CountQueryAsync(Models.Api.Query q, CancellationToken ct = default)
+        => QueryHelper.RunCountAsync(db, "attachments", q, ct);
+
     private static void AddJsonb(NpgsqlCommand cmd, string? json)
         => cmd.Parameters.Add(new() { Value = (object?)json ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Jsonb });
 

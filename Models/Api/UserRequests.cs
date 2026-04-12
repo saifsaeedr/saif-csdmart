@@ -6,9 +6,9 @@ public sealed record UserLoginRequest(
     string? Msisdn,
     string? Password,
     string? InvitationToken,
-    // Mirrors dmart Python's /user/login body — mobile clients send their
-    // device identifier so the server can (1) reject cross-device logins for
-    // locked accounts and (2) persist the latest device_id on the user row.
+    // OTP code — when non-null, LoginWithOtpAsync is used instead of password auth.
+    string? Otp = null,
+    // Mobile clients: device identifier + push token.
     string? DeviceId = null,
     string? FirebaseToken = null);
 

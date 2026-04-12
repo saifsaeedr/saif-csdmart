@@ -11,6 +11,7 @@ using Dmart.Models.Json;
 using Dmart.Plugins;
 using Dmart.Plugins.BuiltIn;
 using Dmart.Services;
+using Microsoft.Extensions.Options;
 
 // dmart Python uses `timestamp without time zone` columns. Npgsql 6+ rejects
 // DateTime values with Kind=Utc against those columns unless this switch is set.
@@ -120,6 +121,12 @@ builder.Services.AddSingleton<IApiPlugin, DbSizeInfoPlugin>();
 // Per-request context
 builder.Services.AddScoped<RequestContext>();
 
+// GZip compression — mirrors Python's GZipMiddleware(minimum_size=10000).
+builder.Services.AddResponseCompression(o =>
+{
+    o.EnableForHttps = true;
+});
+
 var app = builder.Build();
 
 // Catches unhandled exceptions from any handler and maps them to a Response.Fail 500.
@@ -138,6 +145,31 @@ app.Use(async (ctx, next) =>
             await ctx.Response.WriteAsJsonAsync(body, DmartJsonContext.Default.Response);
         }
     }
+});
+
+// GZip response compression (matches Python's GZipMiddleware).
+app.UseResponseCompression();
+
+// Correlation ID header — mirrors Python's CorrelationIdMiddleware.
+// If the request has X-Correlation-ID, pass it through; otherwise generate one.
+app.Use(async (ctx, next) =>
+{
+    if (!ctx.Request.Headers.ContainsKey("X-Correlation-ID"))
+        ctx.Response.Headers["X-Correlation-ID"] = Guid.NewGuid().ToString("N");
+    else
+        ctx.Response.Headers["X-Correlation-ID"] = ctx.Request.Headers["X-Correlation-ID"].ToString();
+    await next();
+});
+
+// Request timeout — mirrors Python's asyncio.wait_for(request_timeout).
+app.Use(async (ctx, next) =>
+{
+    var settings = ctx.RequestServices.GetRequiredService<IOptions<DmartSettings>>().Value;
+    var timeout = settings.RequestTimeout > 0 ? settings.RequestTimeout : 35;
+    using var cts = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted);
+    cts.CancelAfter(TimeSpan.FromSeconds(timeout));
+    ctx.RequestAborted = cts.Token;
+    await next();
 });
 
 // Dynamic CORS + security headers + OPTIONS preflight handling. Mirrors dmart

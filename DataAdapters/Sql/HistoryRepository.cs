@@ -61,6 +61,102 @@ public sealed class HistoryRepository(Db db)
         }
         return results;
     }
+    // ----- query support (used by QueryService for type=history) -----
+
+    private const string SelectAllColumns = """
+        SELECT uuid, request_headers, diff, timestamp, owner_shortname,
+               last_checksum_history, space_name, subpath, shortname
+        FROM histories
+        """;
+
+    public async Task<List<HistoryRecord>> QueryHistoryAsync(Models.Api.Query q, CancellationToken ct = default)
+    {
+        var args = new List<NpgsqlParameter>();
+        var sql = new System.Text.StringBuilder(
+            $"{SelectAllColumns} WHERE space_name = $1 ");
+        args.Add(new() { Value = q.SpaceName });
+
+        if (!string.IsNullOrEmpty(q.Subpath) && q.Subpath != "/")
+        {
+            args.Add(new() { Value = q.Subpath });
+            sql.Append($"AND (subpath = ${args.Count} OR subpath LIKE ${args.Count} || '/%') ");
+        }
+        if (q.FilterShortnames is { Count: > 0 })
+        {
+            args.Add(new() { Value = q.FilterShortnames.ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
+            sql.Append($"AND shortname = ANY(${args.Count}) ");
+        }
+        if (q.FromDate is not null)
+        {
+            args.Add(new() { Value = q.FromDate.Value });
+            sql.Append($"AND timestamp >= ${args.Count} ");
+        }
+        if (q.ToDate is not null)
+        {
+            args.Add(new() { Value = q.ToDate.Value });
+            sql.Append($"AND timestamp <= ${args.Count} ");
+        }
+
+        sql.Append("ORDER BY timestamp DESC ");
+        args.Add(new() { Value = Math.Max(1, q.Limit) });
+        sql.Append($"LIMIT ${args.Count} ");
+        args.Add(new() { Value = Math.Max(0, q.Offset) });
+        sql.Append($"OFFSET ${args.Count}");
+
+        await using var conn = await db.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql.ToString(), conn);
+        foreach (var p in args) cmd.Parameters.Add(p);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        var results = new List<HistoryRecord>();
+        while (await reader.ReadAsync(ct))
+        {
+            results.Add(new HistoryRecord(
+                Uuid: reader.GetGuid(0),
+                RequestHeaders: reader.IsDBNull(1) ? null : reader.GetString(1),
+                Diff: reader.IsDBNull(2) ? null : reader.GetString(2),
+                Timestamp: reader.GetDateTime(3),
+                OwnerShortname: reader.IsDBNull(4) ? null : reader.GetString(4),
+                SpaceName: reader.GetString(6),
+                Subpath: reader.GetString(7),
+                Shortname: reader.GetString(8)));
+        }
+        return results;
+    }
+
+    public async Task<int> CountHistoryQueryAsync(Models.Api.Query q, CancellationToken ct = default)
+    {
+        var args = new List<NpgsqlParameter>();
+        var sql = new System.Text.StringBuilder("SELECT COUNT(*) FROM histories WHERE space_name = $1 ");
+        args.Add(new() { Value = q.SpaceName });
+        if (!string.IsNullOrEmpty(q.Subpath) && q.Subpath != "/")
+        {
+            args.Add(new() { Value = q.Subpath });
+            sql.Append($"AND (subpath = ${args.Count} OR subpath LIKE ${args.Count} || '/%') ");
+        }
+        if (q.FilterShortnames is { Count: > 0 })
+        {
+            args.Add(new() { Value = q.FilterShortnames.ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
+            sql.Append($"AND shortname = ANY(${args.Count}) ");
+        }
+        if (q.FromDate is not null)
+        {
+            args.Add(new() { Value = q.FromDate.Value });
+            sql.Append($"AND timestamp >= ${args.Count} ");
+        }
+        if (q.ToDate is not null)
+        {
+            args.Add(new() { Value = q.ToDate.Value });
+            sql.Append($"AND timestamp <= ${args.Count} ");
+        }
+        await using var conn = await db.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql.ToString(), conn);
+        foreach (var p in args) cmd.Parameters.Add(p);
+        return (int)(long)(await cmd.ExecuteScalarAsync(ct) ?? 0L);
+    }
 }
 
 public sealed record HistoryEntry(Guid Uuid, string? Actor, string? Diff, DateTime Timestamp);
+
+public sealed record HistoryRecord(
+    Guid Uuid, string? RequestHeaders, string? Diff, DateTime Timestamp,
+    string? OwnerShortname, string SpaceName, string Subpath, string Shortname);
