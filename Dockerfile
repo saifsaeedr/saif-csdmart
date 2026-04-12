@@ -25,4 +25,6 @@ FROM alpine:latest
 RUN apk add --no-cache icu-libs krb5-libs
 COPY --from=build /out /app
 WORKDIR /app
+# Make all files world-readable so rootless Podman with UID remapping works.
+RUN chmod -R a+rX /app
 ENTRYPOINT ["./dmart"]
