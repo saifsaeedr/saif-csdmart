@@ -1,4 +1,4 @@
 #!/bin/bash
-dotnet clean
+dotnet clean dmart.csproj
 rm -rf bin obj
-dotnet publish -r linux-x64 -p:PublishAot=true -c Release
+dotnet publish dmart.csproj -r linux-x64 -p:PublishAot=true -c Release
