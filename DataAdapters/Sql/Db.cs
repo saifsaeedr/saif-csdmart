@@ -44,14 +44,18 @@ public sealed class Db(IOptions<DmartSettings> settings)
 
         // Mirror Python's behavior: if every component is still at its default,
         // treat the DB as "not configured" so IsConfigured stays false and
-        // smoke/test hosts can boot without Postgres.
+        // smoke/test hosts can boot without Postgres. Null values (from test
+        // overrides that explicitly clear a field) are treated as "not set".
         var hasExplicitDbConfig =
             !string.IsNullOrEmpty(s.DatabasePassword)
-            || s.DatabaseUsername != "dmart"
-            || s.DatabaseName != "dmart"
-            || s.DatabaseHost != "localhost"
+            || (!string.IsNullOrEmpty(s.DatabaseUsername) && s.DatabaseUsername != "dmart")
+            || (!string.IsNullOrEmpty(s.DatabaseName) && s.DatabaseName != "dmart")
+            || (!string.IsNullOrEmpty(s.DatabaseHost) && s.DatabaseHost != "localhost")
             || s.DatabasePort != 5432;
         if (!hasExplicitDbConfig) return null;
+
+        // Guard: Host is required by Npgsql — if it's null/empty we can't connect.
+        if (string.IsNullOrEmpty(s.DatabaseHost)) return null;
 
         var csb = new NpgsqlConnectionStringBuilder
         {
