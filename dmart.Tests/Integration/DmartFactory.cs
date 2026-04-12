@@ -22,11 +22,23 @@ public sealed class DmartFactory : WebApplicationFactory<Program>
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Testing");
+        // Suppress dotenv loading by setting BACKEND_ENV to a nonexistent path
+        // BEFORE the host builds. This prevents Program.cs's DotEnv.Load() from
+        // picking up ~/.dmart/config.env (which may have stale DB paths like a
+        // SQLite path) that would override the test's explicit PostgresConnection.
+        Environment.SetEnvironmentVariable("BACKEND_ENV", "/dev/null");
+
         builder.ConfigureAppConfiguration((_, cfg) =>
         {
+            // The test's PostgresConnection is authoritative. Also null out the
+            // individual DATABASE_* components so Db.BuildConnectionString doesn't
+            // assemble a stale connection from dotenv leftovers.
             cfg.AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["Dmart:PostgresConnection"] = PgConn,
+                ["Dmart:DatabaseHost"] = null,
+                ["Dmart:DatabasePassword"] = null,
+                ["Dmart:DatabaseName"] = null,
                 ["Dmart:JwtSecret"] = "test-secret-test-secret-test-secret-32-bytes",
                 ["Dmart:JwtIssuer"] = "dmart",
                 ["Dmart:JwtAudience"] = "dmart",
