@@ -33,10 +33,10 @@ const loadConfig = async (): Promise<WebsiteConfig> => {
       short_name: "dmart",
       display_name: "dmart",
       description: "dmart unified data platform",
-      default_language: "ar",
+      default_language: "en",
       languages: { ar: "العربية", en: "English" },
-      backend: "http://localhost:8282",
-      websocket: "ws://localhost:8484/ws",
+      backend: "",
+      websocket: "",
       backend_timeout: 30000,
       delay_total_count: false
     };
@@ -49,10 +49,10 @@ export let website: WebsiteConfig = {
   short_name: "dmart",
   display_name: "dmart",
   description: "dmart unified data platform",
-  default_language: "ar",
+  default_language: "en",
   languages: { ar: "العربية", en: "English" },
-  backend: "http://localhost:8282",
-  websocket: "ws://localhost:8484/ws",
+  backend: "",
+  websocket: "",
   backend_timeout: 30000,
   delay_total_count: false
 };

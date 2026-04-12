@@ -15,8 +15,11 @@
 
     $goto
 
+    // When backend is empty (CXB embedded in the same binary), use the
+    // current origin so API calls go to / not relative to /cxb/...
+    const backendUrl = website.backend || window.location.origin;
     const dmartAxios = axios.create({
-        baseURL: website.backend,
+        baseURL: backendUrl,
         withCredentials: true,
         timeout: website.backend_timeout,
     });
