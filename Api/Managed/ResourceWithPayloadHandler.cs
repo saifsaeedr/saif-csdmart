@@ -93,6 +93,9 @@ public static class ResourceWithPayloadHandler
         if (record is null)
             return Response.Fail(InternalErrorCode.INVALID_DATA, "request_record is empty", "request");
 
+        // Python: shortname "auto" → generate from UUID first 8 chars.
+        record = RequestHandler.ResolveAutoShortname(record);
+
         // Read full bytes (acceptable here — dmart also reads the whole file at once
         // because it computes a sha256 over the entire payload before storing).
         byte[] fileBytes;

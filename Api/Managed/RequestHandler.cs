@@ -107,12 +107,25 @@ public static class RequestHandler
     // CREATE
     // ============================================================================
 
+    // Python: settings.auto_uuid_rule = "auto". When shortname == "auto",
+    // generate a UUID and use the first 8 chars as the shortname.
+    private const string AutoShortname = "auto";
+
+    internal static Record ResolveAutoShortname(Record rec)
+    {
+        if (!string.Equals(rec.Shortname, AutoShortname, StringComparison.OrdinalIgnoreCase))
+            return rec;
+        var uuid = Guid.NewGuid();
+        return rec with { Shortname = uuid.ToString("N")[..8], Uuid = uuid.ToString() };
+    }
+
     private static async Task<(Response Response, Record UpdatedRecord)> DispatchCreateAsync(
         Record rec, string space, string actor,
         EntryService entries, UserRepository users, AccessRepository access,
         SpaceRepository spaces, AttachmentRepository attachments, PasswordHasher hasher,
         CancellationToken ct)
     {
+        rec = ResolveAutoShortname(rec);
         switch (rec.ResourceType)
         {
             case ResourceType.User:
