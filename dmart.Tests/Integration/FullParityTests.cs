@@ -315,11 +315,12 @@ public class FullParityTests : IClassFixture<DmartFactory>
         var resp = await client.GetAsync($"/user/check-existing?shortname={_factory.AdminShortname}&email=nonexistent@example.com");
         var body = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
         body!.Status.ShouldBe(Status.Success);
+        body.Attributes.ShouldNotBeNull();
         body.Attributes!.ShouldContainKey("shortname");
-        body.Attributes.ShouldContainKey("email");
-        body.Attributes.ShouldContainKey("msisdn");
-        ((JsonElement)body.Attributes["shortname"]!).GetBoolean().ShouldBeTrue();
-        ((JsonElement)body.Attributes["email"]!).GetBoolean().ShouldBeFalse();
+        body.Attributes!.ShouldContainKey("email");
+        body.Attributes!.ShouldContainKey("msisdn");
+        ((JsonElement)body.Attributes!["shortname"]!).GetBoolean().ShouldBeTrue();
+        ((JsonElement)body.Attributes!["email"]!).GetBoolean().ShouldBeFalse();
     }
 
     // ==================== Correlation ID header ====================

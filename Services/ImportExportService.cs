@@ -23,7 +23,6 @@ namespace Dmart.Services;
 // and reproduce. dmart Python tolerates this layout via its file-walker.
 public sealed class ImportExportService(
     EntryRepository entries,
-    AttachmentRepository attachments,
     EntryService entryService,
     ILogger<ImportExportService> log)
 {
