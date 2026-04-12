@@ -5,65 +5,53 @@ using Microsoft.Extensions.Options;
 
 namespace Dmart.Middleware;
 
-// Serves the CXB Svelte SPA from embedded resources at /cxb.
+// Serves the CXB Svelte SPA at /cxb from either:
+//   1. Embedded resources (native binary on host — ManifestEmbeddedFileProvider)
+//   2. Filesystem at {BaseDir}/cxb/ (Docker — native AOT on musl doesn't
+//      support ManifestEmbeddedFileProvider reliably)
 //
-// Mirrors Python's dmart/main.py SPAStaticFiles mount:
-//   1. Embedded files are served at /cxb/* with correct MIME types
-//   2. Paths without a file extension that return 404 fall back to
-//      index.html (SPA client-side routing)
-//   3. /cxb/config.json is served dynamically from the settings
-//      fallback chain: $DMART_CXB_CONFIG → ./config.json →
-//      {spaces_folder}/config.json → ~/.dmart/config.json → embedded
-//   4. Static assets get Cache-Control: public, max-age=86400
-//
-// The ManifestEmbeddedFileProvider reads the embedded resource manifest
-// that GenerateEmbeddedFilesManifest=true produces at build time.
-// Each file in cxb-dist/ is linked under "cxb/" via LinkBase="cxb"
-// in the .csproj, so the provider sees them at paths like "cxb/index.html".
+// SPA fallback: /cxb/* paths without file extensions → index.html.
+// Dynamic config.json with Python-parity fallback chain.
 public static class CxbMiddleware
 {
     public static IApplicationBuilder UseCxb(this IApplicationBuilder app)
     {
-        var assembly = Assembly.GetExecutingAssembly();
-        ManifestEmbeddedFileProvider? subProvider;
+        IFileProvider? fileProvider = null;
+
+        // Strategy 1: Embedded resources (works on glibc/host builds).
         try
         {
-            // Try the sub-provider directly first (more resilient to AOT quirks).
-            subProvider = new ManifestEmbeddedFileProvider(assembly, "cxb/dist/client");
+            var assembly = Assembly.GetExecutingAssembly();
+            var embedded = new ManifestEmbeddedFileProvider(assembly, "cxb/dist/client");
+            if (embedded.GetFileInfo("index.html").Exists)
+                fileProvider = embedded;
         }
-        catch
+        catch { /* native AOT on musl — fall through */ }
+
+        // Strategy 2: Filesystem at {BaseDir}/cxb/ (Docker).
+        if (fileProvider is null)
         {
-            try
-            {
-                // Fallback: root provider — some AOT runtimes need this path.
-                var rootProvider = new ManifestEmbeddedFileProvider(assembly);
-                var check = rootProvider.GetFileInfo("cxb/dist/client/index.html");
-                if (!check.Exists) return app;
-                subProvider = new ManifestEmbeddedFileProvider(assembly, "cxb/dist/client");
-            }
-            catch
-            {
-                // No embedded manifest at all — CXB not built/embedded.
-                return app;
-            }
+            var fsPath = Path.Combine(AppContext.BaseDirectory, "cxb");
+            if (File.Exists(Path.Combine(fsPath, "index.html")))
+                fileProvider = new PhysicalFileProvider(fsPath);
         }
 
-        // Verify CXB files exist in the provider.
-        var indexFile = subProvider.GetFileInfo("index.html");
-        if (!indexFile.Exists) return app;
+        // No CXB available — skip silently (dev builds without build-cxb.sh).
+        if (fileProvider is null) return app;
+
+        // Serve static files at /cxb.
         app.UseStaticFiles(new StaticFileOptions
         {
-            FileProvider = subProvider,
+            FileProvider = fileProvider,
             RequestPath = "/cxb",
         });
 
-        // Dynamic config.json endpoint — mirrors Python's fallback chain.
+        // Dynamic config.json with fallback chain.
         app.Use(async (ctx, next) =>
         {
-            var settings = ctx.RequestServices.GetRequiredService<IOptions<DmartSettings>>().Value;
             if (ctx.Request.Path.StartsWithSegments("/cxb/config.json"))
             {
-                // Fallback chain: env path → ./config.json → spaces/config.json → ~/.dmart/config.json → embedded
+                var settings = ctx.RequestServices.GetRequiredService<IOptions<DmartSettings>>().Value;
                 var paths = new[]
                 {
                     Environment.GetEnvironmentVariable("DMART_CXB_CONFIG"),
@@ -83,14 +71,12 @@ public static class CxbMiddleware
                         return;
                     }
                 }
-                // Fall through to the embedded config.json (served by StaticFiles above)
+                // Fall through to the embedded/filesystem config.json.
             }
             await next();
         });
 
-        // SPA fallback — any /cxb/* path that didn't match a static file
-        // and doesn't have a file extension gets index.html. This enables
-        // client-side routing (Routify/SvelteKit).
+        // SPA fallback — /cxb/* without file extension → index.html.
         app.Use(async (ctx, next) =>
         {
             await next();
@@ -101,7 +87,7 @@ public static class CxbMiddleware
             {
                 ctx.Response.StatusCode = 200;
                 ctx.Response.ContentType = "text/html";
-                var file = subProvider.GetFileInfo("index.html");
+                var file = fileProvider.GetFileInfo("index.html");
                 if (file.Exists)
                 {
                     await using var stream = file.CreateReadStream();

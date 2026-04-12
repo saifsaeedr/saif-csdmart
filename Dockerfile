@@ -24,6 +24,9 @@ RUN dotnet publish dmart.csproj -r linux-musl-x64 -p:PublishAot=true -c Release 
 FROM alpine:latest
 RUN apk add --no-cache icu-libs krb5-libs
 COPY --from=build /out /app
+# CXB files served from filesystem (ManifestEmbeddedFileProvider doesn't
+# work in native AOT on musl/Alpine). The middleware falls back to this.
+COPY --from=cxb-build /cxb/dist/client/ /app/cxb/
 WORKDIR /app
 # Make all files world-readable so rootless Podman with UID remapping works.
 RUN chmod -R a+rX /app
