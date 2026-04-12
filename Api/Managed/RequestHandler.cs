@@ -258,6 +258,12 @@ public static class RequestHandler
             return (Response.Fail(InternalErrorCode.ALREADY_EXIST_SPACE_NAME,
                 $"space {rec.Shortname} already exists", "request"), rec);
 
+        // Python's Meta.from_record passes ALL attributes to the Space constructor,
+        // including active_plugins. Without active_plugins, no hooks fire for this
+        // space — the resource_folders_creation plugin won't create the /schema folder.
+        var activePlugins = ExtractStringList(attrs, "active_plugins")
+            ?? new() { "resource_folders_creation", "audit" };
+
         var space = new Space
         {
             Uuid = string.IsNullOrEmpty(rec.Uuid) ? Guid.NewGuid().ToString() : rec.Uuid,
@@ -269,6 +275,7 @@ public static class RequestHandler
             HideSpace = attrs.TryGetValue("hide_space", out var hs) ? IsTruthy(hs) : null,
             IndexingEnabled = attrs.TryGetValue("indexing_enabled", out var ie) && IsTruthy(ie),
             Languages = new() { Language.En },
+            ActivePlugins = activePlugins,
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow,
         };
