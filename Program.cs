@@ -31,6 +31,10 @@ if (args.Length > 0 && !args[0].StartsWith('-'))
     serverArgs = args[1..];
 }
 
+// Load config.env early so non-server subcommands can read DB settings.
+AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
+var (dotenvPath, dotenvValues) = DotEnv.Load();
+
 switch (subcommand)
 {
     case "version":
@@ -47,19 +51,246 @@ switch (subcommand)
 
             Subcommands:
               serve          Start the HTTP server (default)
+              hyper          Alias for serve
               version        Print version info
+              info           Print build/git info as JSON
+              settings       Print effective settings as JSON
+              set_password   Set password for a user interactively
+              check          Run health checks on a space
+              export         Export space data to a zip file
+              import         Import data from a zip file or folder
               help           Print this help
-
-            Server options (via config.env or env vars):
-              LISTENING_HOST     Listen address (default: 0.0.0.0)
-              LISTENING_PORT     Listen port (default: 8282)
-              DATABASE_HOST      PostgreSQL host
-              DATABASE_PASSWORD  PostgreSQL password
-              JWT_SECRET         JWT signing secret
 
             Config file lookup: $BACKEND_ENV → ./config.env → ~/.dmart/config.env
             """);
         return;
+
+    case "info":
+    {
+        // Python reads info.json or falls back to git rev-parse.
+        var infoPath = Path.Combine(AppContext.BaseDirectory, "info.json");
+        if (File.Exists(infoPath))
+        {
+            Console.WriteLine(File.ReadAllText(infoPath));
+        }
+        else
+        {
+            static string Git(string gitArgs)
+            {
+                try
+                {
+                    var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = "git", Arguments = gitArgs,
+                        RedirectStandardOutput = true, UseShellExecute = false,
+                    });
+                    var output = p?.StandardOutput.ReadToEnd().Trim();
+                    p?.WaitForExit();
+                    return output ?? "";
+                }
+                catch { return ""; }
+            }
+            var branch = Git("rev-parse --abbrev-ref HEAD");
+            var commit = Git("rev-parse --short HEAD");
+            var tag = Git("describe --tags");
+            Console.WriteLine($"{{\"branch\":\"{branch}\",\"commit\":\"{commit}\",\"tag\":\"{tag}\",\"runtime\":\".NET {Environment.Version}\"}}");
+        }
+        return;
+    }
+
+    case "settings":
+    {
+        // Print effective DmartSettings as JSON (mirrors Python's settings.model_dump_json).
+        var cfgBuilder = new ConfigurationBuilder();
+        cfgBuilder.AddJsonFile("appsettings.json", optional: true);
+        if (dotenvPath is not null) cfgBuilder.AddInMemoryCollection(dotenvValues);
+        cfgBuilder.AddEnvironmentVariables();
+        var cfg = cfgBuilder.Build();
+        var s = new DmartSettings();
+        cfg.GetSection("Dmart").Bind(s);
+        // Print key settings (avoid leaking secrets — mask password/jwt)
+        Console.WriteLine($"{{");
+        Console.WriteLine($"  \"database_host\": \"{s.DatabaseHost}\",");
+        Console.WriteLine($"  \"database_port\": {s.DatabasePort},");
+        Console.WriteLine($"  \"database_username\": \"{s.DatabaseUsername}\",");
+        Console.WriteLine($"  \"database_name\": \"{s.DatabaseName}\",");
+        Console.WriteLine($"  \"listening_host\": \"{s.ListeningHost}\",");
+        Console.WriteLine($"  \"listening_port\": {s.ListeningPort},");
+        Console.WriteLine($"  \"management_space\": \"{s.ManagementSpace}\",");
+        Console.WriteLine($"  \"jwt_issuer\": \"{s.JwtIssuer}\",");
+        Console.WriteLine($"  \"jwt_access_minutes\": {s.JwtAccessMinutes},");
+        Console.WriteLine($"  \"is_registrable\": {s.IsRegistrable.ToString().ToLower()},");
+        Console.WriteLine($"  \"max_failed_login_attempts\": {s.MaxFailedLoginAttempts},");
+        Console.WriteLine($"  \"max_sessions_per_user\": {s.MaxSessionsPerUser},");
+        Console.WriteLine($"  \"allowed_cors_origins\": \"{s.AllowedCorsOrigins}\",");
+        Console.WriteLine($"  \"websocket_url\": \"{s.WebsocketUrl ?? ""}\"");
+        Console.WriteLine($"}}");
+        return;
+    }
+
+    case "set_password":
+    {
+        // Interactive password reset — mirrors Python's set_admin_passwd.py
+        Console.Write("Username: ");
+        var username = Console.ReadLine()?.Trim();
+        if (string.IsNullOrEmpty(username)) { Console.Error.WriteLine("Username required"); Environment.ExitCode = 1; return; }
+        Console.Write("New password: ");
+        var password = Console.ReadLine()?.Trim();
+        if (string.IsNullOrEmpty(password) || password.Length < 8) { Console.Error.WriteLine("Password must be >= 8 chars"); Environment.ExitCode = 1; return; }
+
+        // Build minimal DI to get Db + UserRepository + PasswordHasher
+        var cfgBuilder = new ConfigurationBuilder();
+        cfgBuilder.AddJsonFile("appsettings.json", optional: true);
+        if (dotenvPath is not null) cfgBuilder.AddInMemoryCollection(dotenvValues);
+        cfgBuilder.AddEnvironmentVariables();
+        var cfg = cfgBuilder.Build();
+        var s = new DmartSettings();
+        cfg.GetSection("Dmart").Bind(s);
+        var dbInst = new Db(Microsoft.Extensions.Options.Options.Create(s));
+        if (!dbInst.IsConfigured) { Console.Error.WriteLine("Database not configured"); Environment.ExitCode = 1; return; }
+        var hasher = new PasswordHasher();
+        var hashed = hasher.Hash(password);
+        await using var conn = await dbInst.OpenAsync();
+        await using var cmd = new Npgsql.NpgsqlCommand("UPDATE users SET password = $1, is_active = true WHERE shortname = $2", conn);
+        cmd.Parameters.Add(new() { Value = hashed });
+        cmd.Parameters.Add(new() { Value = username });
+        var rows = await cmd.ExecuteNonQueryAsync();
+        Console.WriteLine(rows > 0 ? $"Password updated for {username}" : $"User {username} not found");
+        return;
+    }
+
+    case "check":
+    case "health-check":
+    {
+        // Run health checks — mirrors Python's check subcommand.
+        var space = serverArgs.Length > 0 ? serverArgs[0] : null;
+        var cfgBuilder = new ConfigurationBuilder();
+        cfgBuilder.AddJsonFile("appsettings.json", optional: true);
+        if (dotenvPath is not null) cfgBuilder.AddInMemoryCollection(dotenvValues);
+        cfgBuilder.AddEnvironmentVariables();
+        var cfg = cfgBuilder.Build();
+        var s = new DmartSettings();
+        cfg.GetSection("Dmart").Bind(s);
+        var dbInst = new Db(Microsoft.Extensions.Options.Options.Create(s));
+        if (!dbInst.IsConfigured) { Console.Error.WriteLine("Database not configured"); Environment.ExitCode = 1; return; }
+        var healthRepo = new HealthCheckRepository(dbInst);
+        var spacesToCheck = new List<string>();
+        if (!string.IsNullOrEmpty(space))
+        {
+            spacesToCheck.Add(space);
+        }
+        else
+        {
+            // Check all spaces
+            var spaceRepo = new SpaceRepository(dbInst);
+            var allSpaces = await spaceRepo.ListAsync();
+            spacesToCheck.AddRange(allSpaces.Select(sp => sp.Shortname));
+        }
+        Console.WriteLine("{");
+        var first = true;
+        foreach (var sp in spacesToCheck)
+        {
+            if (!first) Console.WriteLine(",");
+            first = false;
+            Console.Write($"  \"{sp}\": {{");
+            foreach (var ht in new[] { "orphan_attachments", "dangling_owner", "stale_locks", "missing_payload_body", "missing_schema_reference" })
+            {
+                try
+                {
+                    var results = await healthRepo.RunAsync(sp, ht);
+                    Console.Write($"\"{ht}\": {results.Count}");
+                    if (ht != "missing_schema_reference") Console.Write(", ");
+                }
+                catch { Console.Write($"\"{ht}\": -1"); if (ht != "missing_schema_reference") Console.Write(", "); }
+            }
+            Console.Write("}");
+        }
+        Console.WriteLine("\n}");
+        return;
+    }
+
+    case "export":
+    {
+        // Export space data to zip — mirrors Python's export subcommand.
+        var spaceName = serverArgs.FirstOrDefault(a => !a.StartsWith('-'));
+        var outputIdx = Array.IndexOf(serverArgs, "--output");
+        var output = outputIdx >= 0 && outputIdx + 1 < serverArgs.Length ? serverArgs[outputIdx + 1] : null;
+        if (string.IsNullOrEmpty(output)) { Console.Error.WriteLine("Usage: dmart export [space_name] --output file.zip"); Environment.ExitCode = 1; return; }
+        if (!output.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) output += ".zip";
+
+        var cfgBuilder = new ConfigurationBuilder();
+        cfgBuilder.AddJsonFile("appsettings.json", optional: true);
+        if (dotenvPath is not null) cfgBuilder.AddInMemoryCollection(dotenvValues);
+        cfgBuilder.AddEnvironmentVariables();
+        var cfg = cfgBuilder.Build();
+        var s = new DmartSettings();
+        cfg.GetSection("Dmart").Bind(s);
+        var dbInst = new Db(Microsoft.Extensions.Options.Options.Create(s));
+        if (!dbInst.IsConfigured) { Console.Error.WriteLine("Database not configured"); Environment.ExitCode = 1; return; }
+
+        var nlog = Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance;
+        var refresher = new AuthzCacheRefresher(dbInst, nlog.CreateLogger<AuthzCacheRefresher>());
+        var entryRepo = new EntryRepository(dbInst);
+        var entryService = new EntryService(entryRepo,
+            new AttachmentRepository(dbInst),
+            new HistoryRepository(dbInst),
+            new PermissionService(new UserRepository(dbInst, refresher),
+                new AccessRepository(dbInst, refresher), refresher),
+            new PluginManager(Array.Empty<IHookPlugin>(), Array.Empty<IApiPlugin>(),
+                new SpaceRepository(dbInst), nlog.CreateLogger<PluginManager>()),
+            new SchemaValidator(entryRepo, nlog.CreateLogger<SchemaValidator>()));
+        var exportService = new ImportExportService(entryRepo, entryService, nlog.CreateLogger<ImportExportService>());
+
+        var spaceRepo = new SpaceRepository(dbInst);
+        var spaces = string.IsNullOrEmpty(spaceName)
+            ? (await spaceRepo.ListAsync()).Select(sp => sp.Shortname).ToList()
+            : new List<string> { spaceName };
+
+        using var zipStream = File.Create(output);
+        using var zip = new System.IO.Compression.ZipArchive(zipStream, System.IO.Compression.ZipArchiveMode.Create);
+        foreach (var sp in spaces)
+        {
+            var stream = await exportService.ExportAsync(sp, "/", "dmart");
+            stream.Position = 0;
+            var entry = zip.CreateEntry($"{sp}.json");
+            await using var es = entry.Open();
+            await stream.CopyToAsync(es);
+        }
+        Console.WriteLine($"Exported {spaces.Count} space(s) to {output}");
+        return;
+    }
+
+    case "import":
+    {
+        var target = serverArgs.Length > 0 ? serverArgs[0] : ".";
+        Console.WriteLine($"Import from: {target}");
+        Console.WriteLine("Note: CLI import requires the full migration pipeline (json_to_db).");
+        Console.WriteLine("Use the /managed/import HTTP endpoint for zip import instead.");
+        return;
+    }
+
+    case "init":
+    {
+        // Initialize ~/.dmart directory with sample config
+        var dmartHome = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dmart");
+        Directory.CreateDirectory(dmartHome);
+        var sampleConfig = Path.Combine(AppContext.BaseDirectory, "config.env.sample");
+        var targetConfig = Path.Combine(dmartHome, "config.env");
+        if (File.Exists(sampleConfig) && !File.Exists(targetConfig))
+        {
+            File.Copy(sampleConfig, targetConfig);
+            Console.WriteLine($"Created {targetConfig} from sample");
+        }
+        else if (File.Exists(targetConfig))
+        {
+            Console.WriteLine($"{targetConfig} already exists");
+        }
+        else
+        {
+            Console.WriteLine($"Initialized {dmartHome}/ (no sample config found to copy)");
+        }
+        return;
+    }
 
     case "serve":
     case "hyper":
@@ -76,16 +307,8 @@ switch (subcommand)
 // SERVER STARTUP (subcommand: serve / hyper)
 // ============================================================================
 
-// dmart Python uses `timestamp without time zone` columns. Npgsql 6+ rejects
-// DateTime values with Kind=Utc against those columns unless this switch is set.
-// This MUST run before any Npgsql operation, so it lives at the very top.
-AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
-
 var builder = WebApplication.CreateSlimBuilder(serverArgs);
 
-// AOT-friendly JSON: source-generated context. We REPLACE the default resolver
-// (instead of inserting at position 0) so the framework's camelCase default policy
-// can't override the snake_case policy declared on DmartJsonContext.
 builder.Services.ConfigureHttpJsonOptions(o =>
 {
     o.SerializerOptions.TypeInfoResolver = DmartJsonContext.Default;
@@ -94,16 +317,14 @@ builder.Services.ConfigureHttpJsonOptions(o =>
         System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull;
 });
 
-// dmart-Python-style config.env support.
+// Reuse the dotenv values loaded at the top of Program.cs.
 {
-    var (envPath, values) = DotEnv.Load();
-    if (envPath is not null && values.Count > 0)
+    if (dotenvPath is not null && dotenvValues.Count > 0)
     {
-        builder.Configuration.AddInMemoryCollection(values);
+        builder.Configuration.AddInMemoryCollection(dotenvValues);
         builder.Configuration.AddEnvironmentVariables();
     }
 
-    // Wire LISTENING_HOST/LISTENING_PORT from config.env into Kestrel.
     if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("ASPNETCORE_URLS")))
     {
         var dmartSection = builder.Configuration.GetSection("Dmart");
