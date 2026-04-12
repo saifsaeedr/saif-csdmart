@@ -38,7 +38,23 @@ var (dotenvPath, dotenvValues) = DotEnv.Load();
 switch (subcommand)
 {
     case "version":
-        Console.WriteLine("dmart-csharp 0.1.0 (AOT)");
+    {
+        // Python reads tag from info.json if present, else git describe --tags.
+        var vInfoPath = Path.Combine(AppContext.BaseDirectory, "info.json");
+        if (File.Exists(vInfoPath))
+        {
+            try
+            {
+                var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(vInfoPath));
+                var tag = doc.RootElement.TryGetProperty("tag", out var t) ? t.GetString() : null;
+                var ver = doc.RootElement.TryGetProperty("version", out var v) ? v.GetString() : null;
+                Console.WriteLine(!string.IsNullOrEmpty(tag) ? tag : $"dmart-csharp {ver ?? "0.1.0"}");
+            }
+            catch { Console.WriteLine("dmart-csharp 0.1.0"); }
+        }
+        else
+            Console.WriteLine("dmart-csharp 0.1.0 (AOT)");
+    }
         return;
 
     case "help":
