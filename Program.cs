@@ -33,9 +33,6 @@ if (args.Length > 0 && !args[0].StartsWith('-'))
 
 // Load config.env early so non-server subcommands can read DB settings.
 AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
-// Disable GSSAPI/Kerberos auth — avoids needing libgssapi_krb5.so on the
-// target system. Most dmart deployments use password auth over localhost.
-AppContext.SetSwitch("System.Net.Security.DisableGssapiPal", true);
 var (dotenvPath, dotenvValues) = DotEnv.Load();
 
 switch (subcommand)

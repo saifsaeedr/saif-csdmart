@@ -67,11 +67,6 @@ public sealed class Db(IOptions<DmartSettings> settings)
             MaxPoolSize = s.DatabasePoolSize + s.DatabaseMaxOverflow,
             Timeout = s.DatabasePoolTimeout,
             ConnectionIdleLifetime = s.DatabasePoolRecycle,
-            // Disable SSL so the static/portable binary doesn't need OpenSSL.
-            // Most dmart deployments connect to localhost Postgres without SSL.
-            // Users who need SSL should set PostgresConnection directly with
-            // SslMode=Require (and ensure OpenSSL is available on the target).
-            SslMode = Npgsql.SslMode.Disable,
         };
         return csb.ConnectionString;
     }

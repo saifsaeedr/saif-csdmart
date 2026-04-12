@@ -6,11 +6,6 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <PublishAot>true</PublishAot>
     <PublishSelfContained>true</PublishSelfContained>
-    <!-- Use invariant globalization so the portable binary (musl/Alpine)
-         doesn't require libicu on the target system. dmart doesn't do
-         locale-sensitive sorting or formatting — all wire formats are
-         fixed (ISO 8601 dates, snake_case JSON, English enum values). -->
-    <InvariantGlobalization>true</InvariantGlobalization>
     <!-- Required for ManifestEmbeddedFileProvider to enumerate embedded CXB assets -->
     <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
   </PropertyGroup>

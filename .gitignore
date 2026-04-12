@@ -37,4 +37,7 @@ appsettings.*.json
 cxb/node_modules/
 cxb/dist/
 cxb/.svelte-kit/
-dist/
+config.env
+dmart
+dmart (2)/
+*.tar.gz
