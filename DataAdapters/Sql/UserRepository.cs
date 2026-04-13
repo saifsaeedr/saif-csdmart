@@ -134,8 +134,8 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher)
         AddJsonbNotNull(cmd, JsonbHelpers.ToJsonbList(u.Groups));  // groups is NOT NULL
         AddJsonb(cmd, JsonbHelpers.ToJsonb(u.Acl));
         AddJsonb(cmd, JsonbHelpers.ToJsonb(u.Relationships));
-        // dmart's PG enum types `usertype` and `language` use the C# member names
-        // (web/mobile/bot, ar/en/ku/fr/tr), NOT the [EnumMember] full spellings.
+        // PG enum values: usertype='web'/'mobile'/'bot', language='ar'/'en'/'ku'/'fr'/'tr'.
+        // Both match the C# enum member names lowercased (UserType.Web→"web", Language.En→"en").
         cmd.Parameters.Add(new() { Value = JsonbHelpers.EnumNameLower(u.Type) });
         cmd.Parameters.Add(new() { Value = JsonbHelpers.EnumNameLower(u.Language) });
         cmd.Parameters.Add(new() { Value = (object?)u.Email ?? DBNull.Value });

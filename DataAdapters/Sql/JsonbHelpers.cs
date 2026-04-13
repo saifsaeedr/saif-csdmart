@@ -105,11 +105,10 @@ public static class JsonbHelpers
         return Enum.Parse<TEnum>(value, ignoreCase: true);
     }
 
-    // For PG ENUM columns where dmart's database uses the *member name* not the [EnumMember]
-    // value. Examples:
-    //   * users.language — pg enum {ar,en,ku,fr,tr}, NOT {arabic,english,...}
-    //     (SQLAlchemy creates PG enums from Python enum member names by default)
-    //   * users.type     — pg enum {web,mobile,bot}, matches member names
+    // For PG ENUM columns where dmart's database uses the C# member name
+    // lowercased. Examples:
+    //   * users.language — pg enum {ar,en,ku,fr,tr} matches C# {Ar,En,Ku,Fr,Tr}
+    //   * users.type     — pg enum {web,mobile,bot} matches C# {Web,Mobile,Bot}
     public static string EnumNameLower<TEnum>(TEnum value) where TEnum : struct, Enum
         => value.ToString().ToLowerInvariant();
 

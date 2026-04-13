@@ -23,7 +23,7 @@ public static class SqlSchema
     CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
     DO $$ BEGIN
-        CREATE TYPE language AS ENUM ('arabic','english','kurdish','french','turkish');
+        CREATE TYPE language AS ENUM ('ar','en','ku','fr','tr');
     EXCEPTION WHEN duplicate_object THEN null; END $$;
 
     DO $$ BEGIN
