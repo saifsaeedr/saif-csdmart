@@ -2,6 +2,8 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Dmart.Config;
+using Dmart.DataAdapters.Sql;
+using Dmart.Models.Enums;
 using Microsoft.Extensions.Options;
 
 namespace Dmart.Auth;
@@ -9,31 +11,38 @@ namespace Dmart.Auth;
 // Hand-rolled HS256 JWT — fully AOT-safe (no reflection, no JwtSecurityTokenHandler).
 // The JWT payload is built directly with Utf8JsonWriter so we don't depend on
 // source-gen JSON metadata for any value types (string[]/long/etc.) at runtime.
-// Microsoft.AspNetCore.Authentication.JwtBearer can validate these as long as it's
-// configured with the same SymmetricSecurityKey.
+//
+// Payload matches Python dmart's jwt.py for cross-service compatibility:
+//   { "data": { "shortname": "...", "type": "web" }, "expires": <unix> }
+// Plus standard claims (sub, iss, aud, iat, exp, jti, roles) for JwtBearer.
 public sealed class JwtIssuer(IOptions<DmartSettings> settings)
 {
     private readonly DmartSettings _s = settings.Value;
 
-    public string IssueAccess(string subject, IEnumerable<string>? roles = null)
-        => Sign(subject, roles, TimeSpan.FromMinutes(_s.JwtAccessMinutes));
+    public string IssueAccess(string subject, IEnumerable<string>? roles = null,
+        UserType userType = UserType.Web)
+        => Sign(subject, roles, userType, TimeSpan.FromMinutes(_s.JwtAccessMinutes));
 
-    public string IssueRefresh(string subject)
-        => Sign(subject, null, TimeSpan.FromDays(_s.JwtRefreshDays));
+    public string IssueRefresh(string subject, UserType userType = UserType.Web)
+        => Sign(subject, null, userType, TimeSpan.FromDays(_s.JwtRefreshDays));
 
-    private string Sign(string subject, IEnumerable<string>? roles, TimeSpan lifetime)
+    private string Sign(string subject, IEnumerable<string>? roles,
+        UserType userType, TimeSpan lifetime)
     {
         var now = DateTimeOffset.UtcNow;
+        var expiresUnix = now.Add(lifetime).ToUnixTimeSeconds();
+        var typeStr = JsonbHelpers.EnumMember(userType);
 
         using var payloadStream = new MemoryStream();
         using (var writer = new Utf8JsonWriter(payloadStream))
         {
             writer.WriteStartObject();
+            // Standard JWT claims (for JwtBearer middleware validation)
             writer.WriteString("sub", subject);
             writer.WriteString("iss", _s.JwtIssuer);
             writer.WriteString("aud", _s.JwtAudience);
             writer.WriteNumber("iat", now.ToUnixTimeSeconds());
-            writer.WriteNumber("exp", now.Add(lifetime).ToUnixTimeSeconds());
+            writer.WriteNumber("exp", expiresUnix);
             writer.WriteString("jti", Guid.NewGuid().ToString("n"));
             if (roles is not null)
             {
@@ -41,6 +50,12 @@ public sealed class JwtIssuer(IOptions<DmartSettings> settings)
                 foreach (var r in roles) writer.WriteStringValue(r);
                 writer.WriteEndArray();
             }
+            // Python-compatible claims (for cross-service interop)
+            writer.WriteStartObject("data");
+            writer.WriteString("shortname", subject);
+            writer.WriteString("type", typeStr);
+            writer.WriteEndObject();
+            writer.WriteNumber("expires", expiresUnix);
             writer.WriteEndObject();
         }
 

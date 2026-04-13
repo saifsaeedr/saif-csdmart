@@ -160,8 +160,8 @@ public sealed class UserService(
             await users.UpsertAsync(updatedUser, ct);
         }
 
-        var access = jwt.IssueAccess(updatedUser.Shortname, updatedUser.Roles);
-        var refresh = jwt.IssueRefresh(updatedUser.Shortname);
+        var access = jwt.IssueAccess(updatedUser.Shortname, updatedUser.Roles, updatedUser.Type);
+        var refresh = jwt.IssueRefresh(updatedUser.Shortname, updatedUser.Type);
 
         // Create session row (Python: db.set_user_session).
         await users.CreateSessionAsync(updatedUser.Shortname, access, ct);
