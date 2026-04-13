@@ -34,6 +34,7 @@ public sealed record Attachment
     public required ResourceType ResourceType { get; init; }
 
     // ----- Attachments-specific -----
+    public Locator? AuthorLocator { get; init; }
     public byte[]? Media { get; init; }
     public string? Body { get; init; }
     public string? State { get; init; }

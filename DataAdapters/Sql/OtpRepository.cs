@@ -29,18 +29,28 @@ public sealed class OtpRepository(Db db)
     public async Task<bool> VerifyAndConsumeAsync(string key, string code, CancellationToken ct = default)
     {
         await using var conn = await db.OpenAsync(ct);
-        await using (var cmd = new NpgsqlCommand("SELECT value FROM otp WHERE key = $1", conn))
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        try
         {
-            cmd.Parameters.Add(new() { Value = key });
-            var raw = await cmd.ExecuteScalarAsync(ct);
-            if (raw is not IDictionary<string, string?> dict) return false;
-            if (!dict.TryGetValue("code", out var stored) || stored != code) return false;
-            if (dict.TryGetValue("expires_at", out var expRaw)
-                && DateTime.TryParse(expRaw, out var exp) && exp < DateTime.UtcNow) return false;
+            await using (var cmd = new NpgsqlCommand("SELECT value FROM otp WHERE key = $1", conn, tx))
+            {
+                cmd.Parameters.Add(new() { Value = key });
+                var raw = await cmd.ExecuteScalarAsync(ct);
+                if (raw is not IDictionary<string, string?> dict) return false;
+                if (!dict.TryGetValue("code", out var stored) || stored != code) return false;
+                if (dict.TryGetValue("expires_at", out var expRaw)
+                    && DateTime.TryParse(expRaw, out var exp) && exp < DateTime.UtcNow) return false;
+            }
+            await using var del = new NpgsqlCommand("DELETE FROM otp WHERE key = $1", conn, tx);
+            del.Parameters.Add(new() { Value = key });
+            await del.ExecuteNonQueryAsync(ct);
+            await tx.CommitAsync(ct);
+            return true;
         }
-        await using var del = new NpgsqlCommand("DELETE FROM otp WHERE key = $1", conn);
-        del.Parameters.Add(new() { Value = key });
-        await del.ExecuteNonQueryAsync(ct);
-        return true;
+        catch
+        {
+            await tx.RollbackAsync(ct);
+            throw;
+        }
     }
 }

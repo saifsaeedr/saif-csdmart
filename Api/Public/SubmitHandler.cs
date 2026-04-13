@@ -55,7 +55,7 @@ public static class SubmitHandler
         using var doc = await JsonDocument.ParseAsync(req.Body, cancellationToken: ct);
         var body = doc.RootElement.Clone();
         string shortname = body.ValueKind == JsonValueKind.Object && body.TryGetProperty("shortname", out var sn) && sn.ValueKind == JsonValueKind.String
-            ? sn.GetString()!
+            ? sn.GetString() ?? ""
             : Guid.NewGuid().ToString("n")[..8];
 
         var entry = new Entry

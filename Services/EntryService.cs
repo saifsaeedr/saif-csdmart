@@ -113,9 +113,9 @@ public sealed class EntryService(
 
         var beforeEvent = BuildEvent(merged, ActionType.Update, actor);
         try { await plugins.BeforeActionAsync(beforeEvent, ct); }
-        catch (Exception ex)
+        catch (Exception)
         {
-            return Result<Entry>.Fail("bad_request", $"plugin rejected update: {ex.Message}");
+            return Result<Entry>.Fail("bad_request", "plugin rejected update");
         }
 
         await entries.UpsertAsync(merged, ct);
@@ -152,9 +152,9 @@ public sealed class EntryService(
             };
 
         try { await plugins.BeforeActionAsync(deleteEvent, ct); }
-        catch (Exception ex)
+        catch (Exception)
         {
-            return Result<bool>.Fail("bad_request", $"plugin rejected delete: {ex.Message}");
+            return Result<bool>.Fail("bad_request", "plugin rejected delete");
         }
 
         var ok = await entries.DeleteAsync(locator.SpaceName, locator.Subpath, locator.Shortname, locator.Type, ct);
@@ -192,9 +192,9 @@ public sealed class EntryService(
             Attributes = new() { ["src_shortname"] = from.Shortname, ["src_subpath"] = from.Subpath },
         };
         try { await plugins.BeforeActionAsync(moveEvent, ct); }
-        catch (Exception ex)
+        catch (Exception)
         {
-            return Result<Entry>.Fail("bad_request", $"plugin rejected move: {ex.Message}");
+            return Result<Entry>.Fail("bad_request", "plugin rejected move");
         }
 
         await entries.MoveAsync(from, to, ct);

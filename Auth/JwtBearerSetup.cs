@@ -22,6 +22,11 @@ public static class JwtBearerSetup
             .Configure<IOptions<DmartSettings>>((bearer, dmartOpts) =>
             {
                 var s = dmartOpts.Value;
+                if (s.JwtSecret.Length < 32)
+                {
+                    var logger = Microsoft.Extensions.Logging.LoggerFactory.Create(b => b.AddConsole()).CreateLogger("JwtBearerSetup");
+                    logger.LogWarning("JWT secret is shorter than 32 bytes — this is insecure for HS256");
+                }
                 var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(s.JwtSecret));
 
                 bearer.RequireHttpsMetadata = false;

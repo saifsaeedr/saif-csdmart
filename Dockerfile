@@ -23,4 +23,5 @@ RUN apk add --no-cache icu-libs krb5-libs
 COPY --from=build --chmod=755 /out /app
 COPY --from=cxb-build --chmod=755 /cxb/dist/client/ /app/cxb/
 WORKDIR /app
+ENV DOTNET_SYSTEM_NET_SECURITY_DISABLEGSSAPIPAL=true
 ENTRYPOINT ["./dmart"]

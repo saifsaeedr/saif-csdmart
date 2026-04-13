@@ -477,7 +477,11 @@ public static class QueryHelper
 
     // Sanitize an alias for SQL (replace dots/at-signs with underscores).
     private static string SanitizeAlias(string s)
-        => Regex.Replace(s.Replace("@", "").Replace(".", "_"), @"[^a-zA-Z0-9_]", "_");
+    {
+        var result = Regex.Replace(s.Replace("@", "").Replace(".", "_"), @"[^a-zA-Z0-9_]", "_");
+        if (result.Length > 0 && char.IsDigit(result[0])) result = "a_" + result;
+        return result;
+    }
 
     // BuildJsonbPath is defined in the search section above — reused by
     // both the search parser and the aggregation builder.
