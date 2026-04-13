@@ -11,6 +11,7 @@ using Dmart.Models.Json;
 using Dmart.Plugins;
 using Dmart.Plugins.BuiltIn;
 using Dmart;
+using Dmart.Api;
 using Dmart.Services;
 using Microsoft.Extensions.Options;
 
@@ -426,6 +427,7 @@ builder.Services.AddSingleton<ShortLinkService>();
 builder.Services.AddSingleton<CsvService>();
 builder.Services.AddSingleton<ImportExportService>();
 builder.Services.AddSingleton<QrService>();
+builder.Services.AddSingleton<WsConnectionManager>();
 
 // Auth
 builder.Services.AddSingleton<JwtIssuer>();
@@ -516,6 +518,10 @@ app.MapGroup("/public").MapPublic();
 app.MapGroup("/user").MapUser();
 app.MapGroup("/info").RequireAuthorization().MapInfo();
 app.MapGroup("/qr").MapQr();
+
+// WebSocket server — port of dmart/websocket.py.
+// /ws?token=<jwt>, /send-message/{user}, /broadcast-to-channels, /ws-info
+app.MapWebSocket();
 
 // Load plugins + mount API plugin routes
 {

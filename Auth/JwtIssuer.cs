@@ -56,6 +56,54 @@ public sealed class JwtIssuer(IOptions<DmartSettings> settings)
         return $"{signingInput}.{encodedSignature}";
     }
 
+    // Validate a JWT and return a ClaimsPrincipal. Used by the WebSocket
+    // handler to authenticate the ?token= query parameter (outside the normal
+    // JwtBearer middleware pipeline).
+    public System.Security.Claims.ClaimsPrincipal? Validate(string token)
+    {
+        var parts = token.Split('.');
+        if (parts.Length != 3) return null;
+
+        // Verify signature.
+        var signingInput = $"{parts[0]}.{parts[1]}";
+        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(_s.JwtSecret));
+        var expectedSig = Base64UrlEncode(hmac.ComputeHash(Encoding.UTF8.GetBytes(signingInput)));
+        if (expectedSig != parts[2]) return null;
+
+        // Decode payload.
+        var payloadJson = Encoding.UTF8.GetString(Base64UrlDecode(parts[1]));
+        var payload = JsonDocument.Parse(payloadJson).RootElement;
+
+        // Check expiration.
+        if (payload.TryGetProperty("exp", out var exp))
+        {
+            var expTime = DateTimeOffset.FromUnixTimeSeconds(exp.GetInt64());
+            if (expTime < DateTimeOffset.UtcNow) return null;
+        }
+
+        var sub = payload.TryGetProperty("sub", out var s) ? s.GetString() : null;
+        if (sub is null) return null;
+
+        var claims = new List<System.Security.Claims.Claim>
+        {
+            new("sub", sub),
+        };
+        var identity = new System.Security.Claims.ClaimsIdentity(claims, "jwt");
+        identity.AddClaim(new(identity.NameClaimType, sub));
+        return new System.Security.Claims.ClaimsPrincipal(identity);
+    }
+
     public static string Base64UrlEncode(byte[] bytes)
         => Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+    private static byte[] Base64UrlDecode(string s)
+    {
+        s = s.Replace('-', '+').Replace('_', '/');
+        switch (s.Length % 4)
+        {
+            case 2: s += "=="; break;
+            case 3: s += "="; break;
+        }
+        return Convert.FromBase64String(s);
+    }
 }
