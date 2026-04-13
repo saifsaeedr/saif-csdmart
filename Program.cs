@@ -10,6 +10,7 @@ using Dmart.Middleware;
 using Dmart.Models.Json;
 using Dmart.Plugins;
 using Dmart.Plugins.BuiltIn;
+using Dmart;
 using Dmart.Services;
 using Microsoft.Extensions.Options;
 
@@ -325,11 +326,14 @@ switch (subcommand)
 
 var builder = WebApplication.CreateSlimBuilder(serverArgs);
 
-// Structured JSON logging — mirrors Python's pythonjsonlogger .ljson output.
-// Configured via LOG_FORMAT=json in config.env (default: text for dev).
+// Structured logging — mirrors Python's pythonjsonlogger .ljson output.
+// LOG_FORMAT: "text" (default) or "json" (structured JSON lines)
+// LOG_FILE: path to log file (empty = stdout only, Python default: "../logs/dmart.ljson.log")
 {
-    var logFormat = builder.Configuration.GetSection("Dmart")["LogFormat"]
-                ?? dotenvValues.GetValueOrDefault("Dmart:LogFormat");
+    var dmartCfg = builder.Configuration.GetSection("Dmart");
+    var logFormat = dmartCfg["LogFormat"] ?? dotenvValues.GetValueOrDefault("Dmart:LogFormat") ?? "text";
+    var logFile = dmartCfg["LogFile"] ?? dotenvValues.GetValueOrDefault("Dmart:LogFile") ?? "";
+
     if (string.Equals(logFormat, "json", StringComparison.OrdinalIgnoreCase))
     {
         builder.Logging.AddJsonConsole(o =>
@@ -338,6 +342,14 @@ var builder = WebApplication.CreateSlimBuilder(serverArgs);
             o.TimestampFormat = "yyyy-MM-ddTHH:mm:ss.fffZ";
             o.UseUtcTimestamp = true;
         });
+    }
+
+    // If LOG_FILE is set, also write to a file. Python writes to ../logs/dmart.ljson.log.
+    if (!string.IsNullOrEmpty(logFile))
+    {
+        var logDir = Path.GetDirectoryName(logFile);
+        if (!string.IsNullOrEmpty(logDir)) Directory.CreateDirectory(logDir);
+        builder.Logging.AddProvider(new FileLoggerProvider(logFile, logFormat));
     }
 }
 
