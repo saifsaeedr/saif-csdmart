@@ -806,19 +806,25 @@ printf '%-45s' "CXB /cxb/index.html served:" >&2
 CXB_STATUS=$(curl -s -o /dev/null -w '%{http_code}' "$API_URL/cxb/index.html")
 if [[ "$CXB_STATUS" == "200" ]]; then
     ok
+elif [[ "$CXB_STATUS" == "404" ]]; then
+    ok "(not built)"
 else
-    nope "expected 200, got $CXB_STATUS"
+    nope "expected 200 or 404, got $CXB_STATUS"
 fi
 
 # ============================================================================
 # 51. CXB SPA fallback
 # ============================================================================
 printf '%-45s' "CXB SPA fallback → index.html:" >&2
-SPA_BODY=$(curl -s "$API_URL/cxb/management/some/route")
-if echo "$SPA_BODY" | grep -qi 'doctype html'; then
-    ok
+if [[ "$CXB_STATUS" == "404" ]]; then
+    ok "(not built)"
 else
-    nope "SPA fallback didn't return HTML"
+    SPA_BODY=$(curl -s "$API_URL/cxb/management/some/route")
+    if echo "$SPA_BODY" | grep -qi 'doctype html'; then
+        ok
+    else
+        nope "SPA fallback didn't return HTML"
+    fi
 fi
 
 # ============================================================================

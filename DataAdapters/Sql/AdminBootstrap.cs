@@ -22,6 +22,8 @@ public sealed class AdminBootstrap(
     IOptions<DmartSettings> settings,
     UserRepository users,
     AccessRepository access,
+    SpaceRepository spaces,
+    EntryRepository entries,
     PasswordHasher hasher,
     AuthzCacheRefresher authzRefresher,
     CountHistoryRepository countHistory,
@@ -60,7 +62,51 @@ public sealed class AdminBootstrap(
 
         try
         {
-            // Create the admin user FIRST — permissions and roles have FK
+            // Ensure the management space and its standard folders exist.
+            // Python dmart creates these during schema init; we do it here so
+            // the admin user, roles, and permissions have a home.
+            var mgmtSpace = await spaces.GetAsync(MgmtSpace, ct);
+            if (mgmtSpace is null)
+            {
+                mgmtSpace = new Space
+                {
+                    Uuid = Guid.NewGuid().ToString(),
+                    Shortname = MgmtSpace,
+                    SpaceName = MgmtSpace,
+                    Subpath = "/",
+                    OwnerShortname = s.AdminShortname,
+                    IsActive = true,
+                    Displayname = new Translation(En: "Management"),
+                    Description = new Translation(En: "Management space"),
+                    Languages = new() { Language.En },
+                    ActivePlugins = new() { "resource_folders_creation", "audit" },
+                    CreatedAt = DateTime.UtcNow,
+                    UpdatedAt = DateTime.UtcNow,
+                };
+                await spaces.UpsertAsync(mgmtSpace, ct);
+                log.LogInformation("admin bootstrap: created management space");
+            }
+
+            // Standard folders under management
+            foreach (var folder in new[] { "users", "roles", "permissions", "schema" })
+            {
+                var f = await entries.GetAsync(MgmtSpace, "/", folder, ResourceType.Folder, ct);
+                if (f is not null) continue;
+                await entries.UpsertAsync(new Entry
+                {
+                    Uuid = Guid.NewGuid().ToString(),
+                    Shortname = folder,
+                    SpaceName = MgmtSpace,
+                    Subpath = "/",
+                    ResourceType = ResourceType.Folder,
+                    IsActive = true,
+                    OwnerShortname = s.AdminShortname,
+                    CreatedAt = DateTime.UtcNow,
+                    UpdatedAt = DateTime.UtcNow,
+                }, ct);
+            }
+
+            // Create the admin user — permissions and roles have FK
             // constraints on owner_shortname → users, so the user must exist
             // before we can insert permission/role rows.
             var existing = await users.GetByShortnameAsync(s.AdminShortname, ct);
