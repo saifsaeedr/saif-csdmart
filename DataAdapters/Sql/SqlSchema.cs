@@ -57,7 +57,7 @@ public static class SqlSchema
         acl                     JSONB,
         relationships           JSONB,
         type                    usertype NOT NULL DEFAULT 'web',
-        language                language NOT NULL DEFAULT 'english',
+        language                language NOT NULL DEFAULT 'en',
         email                   TEXT,
         msisdn                  TEXT,
         locked_to_device        BOOLEAN NOT NULL DEFAULT FALSE,
