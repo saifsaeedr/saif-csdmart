@@ -326,13 +326,23 @@ switch (subcommand)
 
 var builder = WebApplication.CreateSlimBuilder(serverArgs);
 
-// Structured logging — mirrors Python's pythonjsonlogger .ljson output.
+// All logging config from config.env — no appsettings.json needed.
 // LOG_FORMAT: "text" (default) or "json" (structured JSON lines)
-// LOG_FILE: path to log file (empty = stdout only, Python default: "../logs/dmart.ljson.log")
+// LOG_FILE: path to log file (empty = stdout only)
+// LOG_LEVEL: trace/debug/information/warning/error/critical/none
 {
     var dmartCfg = builder.Configuration.GetSection("Dmart");
     var logFormat = dmartCfg["LogFormat"] ?? dotenvValues.GetValueOrDefault("Dmart:LogFormat") ?? "text";
     var logFile = dmartCfg["LogFile"] ?? dotenvValues.GetValueOrDefault("Dmart:LogFile") ?? "";
+    var logLevelStr = dmartCfg["LogLevel"] ?? dotenvValues.GetValueOrDefault("Dmart:LogLevel") ?? "information";
+
+    // Set minimum log level from config.env (replaces appsettings.json Logging section).
+    if (Enum.TryParse<LogLevel>(logLevelStr, ignoreCase: true, out var minLevel))
+        builder.Logging.SetMinimumLevel(minLevel);
+
+    // Suppress noisy ASP.NET framework logs (previously in appsettings.json).
+    builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
+    builder.Logging.AddFilter("Microsoft.Hosting.Lifetime", LogLevel.Information);
 
     if (string.Equals(logFormat, "json", StringComparison.OrdinalIgnoreCase))
     {
@@ -344,7 +354,6 @@ var builder = WebApplication.CreateSlimBuilder(serverArgs);
         });
     }
 
-    // If LOG_FILE is set, also write to a file. Python writes to ../logs/dmart.ljson.log.
     if (!string.IsNullOrEmpty(logFile))
     {
         var logDir = Path.GetDirectoryName(logFile);

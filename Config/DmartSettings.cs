@@ -91,6 +91,10 @@ public sealed class DmartSettings
     // Optional log file path. Empty = stdout only (container-friendly).
     // Python default: "../logs/dmart.ljson.log"
     public string LogFile { get; set; } = "";
+    // Log level: trace, debug, information, warning, error, critical, none.
+    // Default "information" matches Python. Set to "warning" in production
+    // to reduce noise.
+    public string LogLevel { get; set; } = "information";
 
     // CSV list of "space.schema" pairs allowed for public /submit endpoints.
     // Empty means allow all. Python: allowed_submit_models.
