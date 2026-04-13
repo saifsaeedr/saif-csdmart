@@ -38,6 +38,9 @@ jobs:
       - name: E2E smoke tests (curl.sh)
         run: |
           PUBLISH_DIR="bin/Release/net10.0/linux-x64/publish"
+          # Ensure config.env has a valid JWT secret (at least 32 bytes for HS256)
+          grep -q '^JWT_SECRET' config.env && sed -i '/^JWT_SECRET/d' config.env || true
+          echo 'JWT_SECRET="ci-test-secret-ci-test-secret-32bytes"' >> config.env
           cp config.env "$PUBLISH_DIR/"
           # Start server from the publish directory
           (cd "$PUBLISH_DIR" && ./dmart serve) &
