@@ -53,19 +53,9 @@ public sealed class RealtimeUpdatesNotifierPlugin(
         }
 
         // Broadcast directly to connected WebSocket clients — no HTTP round-trip.
-        var message = JsonSerializer.Serialize(new
-        {
-            type = "notification_subscription",
-            message = new
-            {
-                title = "updated",
-                subpath = e.Subpath,
-                space = e.SpaceName,
-                shortname = e.Shortname,
-                action_type = actionStr,
-                owner_shortname = e.UserShortname,
-            },
-        });
+        // Manual JSON to avoid anonymous type serialization (AOT-unsafe).
+        var esc = (string? s) => s?.Replace("\\", "\\\\").Replace("\"", "\\\"") ?? "";
+        var message = $"{{\"type\":\"notification_subscription\",\"message\":{{\"title\":\"updated\",\"subpath\":\"{esc(e.Subpath)}\",\"space\":\"{esc(e.SpaceName)}\",\"shortname\":\"{esc(e.Shortname)}\",\"action_type\":\"{actionStr}\",\"owner_shortname\":\"{esc(e.UserShortname)}\"}}}}";
 
         foreach (var channel in channels)
         {

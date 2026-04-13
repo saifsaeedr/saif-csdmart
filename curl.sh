@@ -797,6 +797,77 @@ else
 fi
 
 # ============================================================================
+# 53. HSTS not sent on HTTP (RFC 6797)
+# ============================================================================
+printf '%-45s' "HSTS absent on HTTP:" >&2
+if echo "$HEADERS" | grep -qi 'Strict-Transport-Security'; then
+    nope "HSTS should not be sent over HTTP"
+else
+    ok
+fi
+
+# ============================================================================
+# 54. Error messages don't leak internals
+# ============================================================================
+printf '%-45s' "Error messages masked:" >&2
+ERR_RESP=$(curl -s -H "$AUTH_HEADER" -H "$CT" -d '{invalid json!!!' "$API_URL/managed/query")
+if echo "$ERR_RESP" | jq -e '.error.message' > /dev/null 2>&1; then
+    ERR_MSG=$(echo "$ERR_RESP" | jq -r '.error.message')
+    if echo "$ERR_MSG" | grep -qi "System\.\|Exception\|stack"; then
+        nope "error leaks internals: $ERR_MSG"
+    else
+        ok
+    fi
+else
+    ok
+fi
+
+# ============================================================================
+# 55. WebSocket /ws-info endpoint
+# ============================================================================
+printf '%-45s' "WebSocket /ws-info:" >&2
+WS_INFO=$(curl -s "$API_URL/ws-info")
+if echo "$WS_INFO" | grep -q 'connected_clients'; then
+    ok
+else
+    nope "$WS_INFO"
+fi
+
+# ============================================================================
+# 56. WebSocket /broadcast-to-channels endpoint
+# ============================================================================
+printf '%-45s' "WebSocket broadcast endpoint:" >&2
+BC_RESP=$(curl -s -H "$CT" -d '{"type":"test","message":{"x":1},"channels":["test:/:__ALL__:__ALL__:__ALL__"]}' "$API_URL/broadcast-to-channels")
+if echo "$BC_RESP" | grep -q 'success'; then
+    ok
+else
+    nope "$BC_RESP"
+fi
+
+# ============================================================================
+# 57. WebSocket /send-message endpoint
+# ============================================================================
+printf '%-45s' "WebSocket send-message endpoint:" >&2
+SM_RESP=$(curl -s -H "$CT" -d '{"type":"test","message":{"x":1}}' "$API_URL/send-message/nobody")
+if echo "$SM_RESP" | grep -q 'message_sent'; then
+    ok
+else
+    nope "$SM_RESP"
+fi
+
+# ============================================================================
+# 58. CORS fallback uses localhost not 0.0.0.0
+# ============================================================================
+printf '%-45s' "CORS fallback is localhost:" >&2
+CORS_HEADERS=$(curl -sI -H "Origin: https://stranger.example.com" "$API_URL/")
+CORS_ORIGIN=$(echo "$CORS_HEADERS" | grep -i 'Access-Control-Allow-Origin' | head -1)
+if echo "$CORS_ORIGIN" | grep -q '0\.0\.0\.0'; then
+    nope "CORS fallback uses 0.0.0.0: $CORS_ORIGIN"
+else
+    ok
+fi
+
+# ============================================================================
 # Summary
 # ============================================================================
 echo "" >&2
