@@ -45,8 +45,8 @@ public sealed class DmartSettings
 
     // First-run admin bootstrap. If AdminShortname is set and the user doesn't
     // exist, a super_admin role + admin user are created on startup.
-    public string? AdminShortname { get; set; }
-    public string? AdminPassword { get; set; }
+    public string AdminShortname { get; set; } = "dmart";
+    public string AdminPassword { get; set; } = "dmart";
     public string? AdminEmail { get; set; }
 
     // count_history snapshot cadence (in minutes). Set to a large value to
