@@ -31,7 +31,14 @@ public sealed class AdminBootstrap(
 
     public async Task StartAsync(CancellationToken ct)
     {
-        if (!db.IsConfigured) return; // no DB → nothing to bootstrap
+        // C2: Warn loudly if production-dangerous defaults are active.
+        var s = settings.Value;
+        if (s.JwtSecret.Contains("change-me", StringComparison.OrdinalIgnoreCase))
+            log.LogCritical("JWT_SECRET is set to the default value — change it before production use!");
+        if (!string.IsNullOrEmpty(s.AdminPassword) && s.AdminPassword.Contains("change-me", StringComparison.OrdinalIgnoreCase))
+            log.LogCritical("ADMIN_PASSWORD is set to the default value — change it before production use!");
+
+        if (!db.IsConfigured) return;
         await BootstrapAdminAsync(ct);
         await RefreshAuthzAsync(ct);
         await SnapshotCountHistoryAsync(ct);

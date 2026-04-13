@@ -70,7 +70,10 @@ public static class ResponseHeadersMiddleware
                     // respond with that canonical same-host form so the browser
                     // can see a deterministic value without us reflecting
                     // arbitrary origins.
-                    var defaultOrigin = $"http://{settings.ListeningHost}:{settings.ListeningPort}";
+                    // Use localhost instead of 0.0.0.0 — "0.0.0.0" is not a valid
+                    // browser origin and causes CORS violations in the client.
+                    var host = settings.ListeningHost == "0.0.0.0" ? "localhost" : settings.ListeningHost;
+                    var defaultOrigin = $"http://{host}:{settings.ListeningPort}";
                     headers["Access-Control-Allow-Origin"] =
                         string.Equals(origin, defaultOrigin, StringComparison.Ordinal) ? origin : defaultOrigin;
                     headers["Access-Control-Allow-Credentials"] = "true";
@@ -97,7 +100,9 @@ public static class ResponseHeadersMiddleware
                 headers["X-Frame-Options"] = "DENY";
                 headers["Referrer-Policy"] = "strict-origin-when-cross-origin";
                 headers["Permissions-Policy"] = PermissionsPolicy;
-                headers["Strict-Transport-Security"] = Hsts;
+                // HSTS must only be sent over HTTPS (RFC 6797).
+                if (ctx.Request.IsHttps)
+                    headers["Strict-Transport-Security"] = Hsts;
 
                 return Task.CompletedTask;
             });

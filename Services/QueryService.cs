@@ -119,8 +119,8 @@ public sealed class QueryService(
             : users.CountQueryAsync(q, ct);
         await Task.WhenAll(pageTask, totalTask);
 
-        var records = pageTask.Result.Select(UserMapper.ToRecord).ToList();
-        return Response.Ok(records, new() { ["total"] = totalTask.Result, ["returned"] = records.Count });
+        var records = (await pageTask).Select(UserMapper.ToRecord).ToList();
+        return Response.Ok(records, new() { ["total"] = await totalTask, ["returned"] = records.Count });
     }
 
     // ====================================================================
@@ -139,8 +139,8 @@ public sealed class QueryService(
             : access.CountRolesQueryAsync(q, ct);
         await Task.WhenAll(pageTask, totalTask);
 
-        var records = pageTask.Result.Select(RoleMapper.ToRecord).ToList();
-        return Response.Ok(records, new() { ["total"] = totalTask.Result, ["returned"] = records.Count });
+        var records = (await pageTask).Select(RoleMapper.ToRecord).ToList();
+        return Response.Ok(records, new() { ["total"] = await totalTask, ["returned"] = records.Count });
     }
 
     // ====================================================================
@@ -159,8 +159,8 @@ public sealed class QueryService(
             : access.CountPermissionsQueryAsync(q, ct);
         await Task.WhenAll(pageTask, totalTask);
 
-        var records = pageTask.Result.Select(PermissionMapper.ToRecord).ToList();
-        return Response.Ok(records, new() { ["total"] = totalTask.Result, ["returned"] = records.Count });
+        var records = (await pageTask).Select(PermissionMapper.ToRecord).ToList();
+        return Response.Ok(records, new() { ["total"] = await totalTask, ["returned"] = records.Count });
     }
 
     // ====================================================================
@@ -179,8 +179,8 @@ public sealed class QueryService(
             : attachments.CountQueryAsync(q, ct);
         await Task.WhenAll(pageTask, totalTask);
 
-        var records = pageTask.Result.Select(AttachmentMapper.ToRecord).ToList();
-        return Response.Ok(records, new() { ["total"] = totalTask.Result, ["returned"] = records.Count });
+        var records = (await pageTask).Select(AttachmentMapper.ToRecord).ToList();
+        return Response.Ok(records, new() { ["total"] = await totalTask, ["returned"] = records.Count });
     }
 
     // ====================================================================
@@ -203,8 +203,8 @@ public sealed class QueryService(
             : history.CountHistoryQueryAsync(q, ct);
         await Task.WhenAll(pageTask, totalTask);
 
-        var records = pageTask.Result.Select(HistoryMapper.ToRecord).ToList();
-        return Response.Ok(records, new() { ["total"] = totalTask.Result, ["returned"] = records.Count });
+        var records = (await pageTask).Select(HistoryMapper.ToRecord).ToList();
+        return Response.Ok(records, new() { ["total"] = await totalTask, ["returned"] = records.Count });
     }
 
     // ====================================================================
@@ -278,7 +278,7 @@ public sealed class QueryService(
             : entries.CountQueryAsync(q, ct);
         await Task.WhenAll(pageTask, totalTask);
 
-        var records = pageTask.Result
+        var records = (await pageTask)
             .Select(e => EntryMapper.ToRecord(e, q.SpaceName, q.RetrieveJsonPayload))
             .ToList();
 
@@ -305,7 +305,7 @@ public sealed class QueryService(
             }
         }
 
-        return Response.Ok(records, new() { ["total"] = totalTask.Result, ["returned"] = records.Count });
+        return Response.Ok(records, new() { ["total"] = await totalTask, ["returned"] = records.Count });
     }
 
     // ====================================================================

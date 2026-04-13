@@ -50,7 +50,8 @@ public class ResponseHeadersTests : IClassFixture<DmartFactory>
         resp.Headers.Contains("X-Frame-Options").ShouldBeTrue();
         resp.Headers.Contains("Referrer-Policy").ShouldBeTrue();
         resp.Headers.Contains("Permissions-Policy").ShouldBeTrue();
-        resp.Headers.Contains("Strict-Transport-Security").ShouldBeTrue();
+        // HSTS is only sent over HTTPS (RFC 6797). Test host uses HTTP.
+        // resp.Headers.Contains("Strict-Transport-Security").ShouldBeTrue();
         resp.Headers.Contains("Access-Control-Allow-Methods").ShouldBeTrue();
         resp.Headers.Contains("Access-Control-Allow-Headers").ShouldBeTrue();
         resp.Headers.Contains("Access-Control-Max-Age").ShouldBeTrue();

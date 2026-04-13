@@ -586,7 +586,8 @@ fi
 # 35. Security headers present
 # ============================================================================
 printf '%-45s' "Security headers present:" >&2
-if echo "$HEADERS" | grep -qi 'X-Frame-Options' && echo "$HEADERS" | grep -qi 'X-Content-Type-Options' && echo "$HEADERS" | grep -qi 'Strict-Transport-Security'; then
+# HSTS is only sent over HTTPS (RFC 6797) — check other security headers instead.
+if echo "$HEADERS" | grep -qi 'X-Frame-Options' && echo "$HEADERS" | grep -qi 'X-Content-Type-Options' && echo "$HEADERS" | grep -qi 'Referrer-Policy'; then
     ok
 else
     nope "missing security headers"
