@@ -13,21 +13,6 @@ jobs:
   build-and-test:
     runs-on: self-hosted
 
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: dmart
-          POSTGRES_PASSWORD: tramd
-          POSTGRES_DB: dmart
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
     env:
       DMART_TEST_PG_CONN: "Host=localhost;Username=dmart;Password=tramd;Database=dmart"
       DMART_TEST_ADMIN: "cstest"
@@ -41,6 +26,11 @@ jobs:
         with:
           dotnet-version: "10.0.x"
 
+      - name: Fresh database
+        run: |
+          dropdb --if-exists -h 127.0.0.1 -U dmart dmart
+          createdb -h 127.0.0.1 -U dmart dmart
+
       - name: Build
         run: dotnet build dmart.slnx -c Release --nologo
 
@@ -51,13 +41,13 @@ jobs:
         run: |
           rm -rf bin obj
           dotnet publish dmart.csproj -r linux-x64 -p:PublishAot=true -p:StripSymbols=true -c Release
+          PUBLISH_DIR="bin/Release/net10.0/linux-x64/publish"
+          rm -f "$PUBLISH_DIR"/*.dbg "$PUBLISH_DIR"/*.pdb "$PUBLISH_DIR"/*.Development.json "$PUBLISH_DIR"/*.staticwebassets* "$PUBLISH_DIR"/*.deps.json
 
       - name: E2E smoke tests (curl.sh)
         run: |
           PUBLISH_DIR="bin/Release/net10.0/linux-x64/publish"
-          rm -f "$PUBLISH_DIR"/*.dbg "$PUBLISH_DIR"/*.pdb "$PUBLISH_DIR"/*.Development.json "$PUBLISH_DIR"/*.staticwebassets* "$PUBLISH_DIR"/*.deps.json
-          # Write a config.env for the binary
-          cat > "$PUBLISH_DIR/config.env" << EOF
+          cat > "$PUBLISH_DIR/config.env" << 'EOF'
           DATABASE_HOST="localhost"
           DATABASE_PORT=5432
           DATABASE_USERNAME="dmart"
@@ -70,16 +60,13 @@ jobs:
           LISTENING_HOST="127.0.0.1"
           LISTENING_PORT=5099
           EOF
-          # Start the server
           cd "$PUBLISH_DIR" && ./dmart serve &
           SERVER_PID=$!
           cd -
-          # Wait for it to be ready
           for i in $(seq 1 15); do
             curl -sf http://127.0.0.1:5099/ >/dev/null 2>&1 && break
             sleep 1
           done
-          # Run the E2E checks
           ./curl.sh
           CURL_RC=$?
           kill $SERVER_PID 2>/dev/null || true
