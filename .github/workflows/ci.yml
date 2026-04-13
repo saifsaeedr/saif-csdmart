@@ -39,8 +39,12 @@ jobs:
         run: |
           PUBLISH_DIR="bin/Release/net10.0/linux-x64/publish"
           cp config.env "$PUBLISH_DIR/"
-          # Read the port from config.env (fallback to 5099)
-          DMART_PORT=$(grep -m1 '^LISTENING_PORT' config.env | sed 's/.*=//' | tr -d '"' || echo 5099)
+          # Read settings from config.env with safe defaults.
+          # DmartSettings defaults: AdminShortname=dmart, AdminPassword=dmart, ListeningPort=5099
+          _cfg() { grep -m1 "^$1" config.env 2>/dev/null | sed 's/^[^=]*=//' | tr -d '"' | tr -d "'" | grep . || echo "$2"; }
+          DMART_PORT=$(_cfg LISTENING_PORT 5099)
+          DMART_ADMIN=$(_cfg ADMIN_SHORTNAME dmart)
+          DMART_PWD=$(_cfg ADMIN_PASSWORD dmart)
           # Start server from the publish directory
           (cd "$PUBLISH_DIR" && ./dmart serve) &
           SERVER_PID=$!
@@ -49,11 +53,6 @@ jobs:
             curl -sf "http://127.0.0.1:${DMART_PORT}/" >/dev/null 2>&1 && break
             sleep 1
           done
-          DMART_ADMIN=$(grep -m1 '^ADMIN_SHORTNAME' config.env | sed 's/^[^=]*=//' | tr -d '"' || true)
-          DMART_PWD=$(grep -m1 '^ADMIN_PASSWORD' config.env | sed 's/^[^=]*=//' | tr -d '"' || true)
-          # Fall back to DmartSettings defaults when config.env doesn't have admin keys
-          DMART_ADMIN="${DMART_ADMIN:-dmart}"
-          DMART_PWD="${DMART_PWD:-dmart}"
           DMART_URL="http://127.0.0.1:${DMART_PORT}" DMART_ADMIN="$DMART_ADMIN" DMART_PWD="$DMART_PWD" ./curl.sh
           CURL_RC=$?
           kill $SERVER_PID 2>/dev/null || true
