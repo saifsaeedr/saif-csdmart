@@ -62,16 +62,6 @@ jobs:
             done
           fi
           echo "Server detected on port: ${DMART_PORT:-NONE}"
-          # Debug: show what config.env contains and what the server bootstrapped
-          echo "=== config.env admin settings ==="
-          grep -i "ADMIN\|LISTENING\|PORT" config.env || echo "(no admin/port keys in config.env)"
-          echo "=== Test login with dmart/dmart ==="
-          curl -s -d '{"shortname":"dmart","password":"dmart"}' -H 'Content-Type: application/json' "http://127.0.0.1:${DMART_PORT}/user/login" | head -c 200
-          echo ""
-          echo "=== Test login with admin/admin ==="
-          curl -s -d '{"shortname":"admin","password":"admin"}' -H 'Content-Type: application/json' "http://127.0.0.1:${DMART_PORT}/user/login" | head -c 200
-          echo ""
-          echo "================================="
           # Use DmartSettings defaults (dmart/dmart) — on a fresh DB the
           # bootstrap creates this admin user automatically.
           DMART_URL="http://127.0.0.1:${DMART_PORT}" DMART_ADMIN=dmart DMART_PWD=dmart ./curl.sh

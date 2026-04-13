@@ -60,7 +60,34 @@ public sealed class AdminBootstrap(
 
         try
         {
-            // Ensure the super_manager permission exists FIRST (super_admin role
+            // Create the admin user FIRST — permissions and roles have FK
+            // constraints on owner_shortname → users, so the user must exist
+            // before we can insert permission/role rows.
+            var existing = await users.GetByShortnameAsync(s.AdminShortname, ct);
+            if (existing is null)
+            {
+                var admin = new User
+                {
+                    Uuid = Guid.NewGuid().ToString(),
+                    Shortname = s.AdminShortname,
+                    SpaceName = MgmtSpace,
+                    Subpath = "users",
+                    OwnerShortname = s.AdminShortname,
+                    Email = string.IsNullOrWhiteSpace(s.AdminEmail) ? null : s.AdminEmail,
+                    Password = hasher.Hash(s.AdminPassword),
+                    Roles = new() { "super_admin" },
+                    Language = ParseLanguage(s.DefaultLanguage),
+                    Type = UserType.Web,
+                    IsActive = true,
+                    IsEmailVerified = true,
+                    CreatedAt = DateTime.UtcNow,
+                    UpdatedAt = DateTime.UtcNow,
+                };
+                await users.UpsertAsync(admin, ct);
+                log.LogInformation("admin bootstrap: created admin user {Shortname}", s.AdminShortname);
+            }
+
+            // Ensure the super_manager permission exists (super_admin role
             // attaches it). super_manager grants every action on every resource type
             // across every space + subpath via dmart's __all_spaces__/__all_subpaths__
             // magic words. This matches the row dmart Python writes during its own
@@ -94,9 +121,7 @@ public sealed class AdminBootstrap(
                 log.LogInformation("admin bootstrap: created super_manager permission");
             }
 
-            // Ensure the super_admin role exists and has super_manager attached. We
-            // upsert unconditionally so that an older bootstrap that left the role with
-            // an empty Permissions list gets healed automatically.
+            // Ensure the super_admin role exists and has super_manager attached.
             var role = await access.GetRoleAsync("super_admin", ct);
             var needRoleUpsert = role is null || !role.Permissions.Contains("super_manager");
             if (needRoleUpsert)
@@ -118,33 +143,6 @@ public sealed class AdminBootstrap(
                 await access.UpsertRoleAsync(role, ct);
                 log.LogInformation("admin bootstrap: upserted super_admin role with super_manager permission");
             }
-
-            var existing = await users.GetByShortnameAsync(s.AdminShortname, ct);
-            if (existing is not null)
-            {
-                log.LogDebug("admin bootstrap: user {Shortname} already exists, skipping", s.AdminShortname);
-                return;
-            }
-
-            var admin = new User
-            {
-                Uuid = Guid.NewGuid().ToString(),
-                Shortname = s.AdminShortname,
-                SpaceName = MgmtSpace,
-                Subpath = "users",
-                OwnerShortname = s.AdminShortname,
-                Email = string.IsNullOrWhiteSpace(s.AdminEmail) ? null : s.AdminEmail,
-                Password = hasher.Hash(s.AdminPassword),
-                Roles = new() { "super_admin" },
-                Language = ParseLanguage(s.DefaultLanguage),
-                Type = UserType.Web,
-                IsActive = true,
-                IsEmailVerified = true,
-                CreatedAt = DateTime.UtcNow,
-                UpdatedAt = DateTime.UtcNow,
-            };
-            await users.UpsertAsync(admin, ct);
-            log.LogInformation("admin bootstrap: created admin user {Shortname}", s.AdminShortname);
         }
         catch (Exception ex)
         {
