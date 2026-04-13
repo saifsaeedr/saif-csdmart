@@ -13,11 +13,6 @@ jobs:
   build-and-test:
     runs-on: self-hosted
 
-    env:
-      DMART_TEST_PG_CONN: "Host=localhost;Username=dmart;Password=tramd;Database=dmart"
-      DMART_TEST_ADMIN: "cstest"
-      DMART_TEST_PWD: "cstest-password-123"
-
     steps:
       - uses: actions/checkout@v4
 
@@ -26,8 +21,9 @@ jobs:
         with:
           dotnet-version: "10.0.x"
 
-      - name: Fresh database
+      - name: Copy host config
         run: |
+          cp ~/config.env ./
           dropdb --if-exists -h 127.0.0.1 -U dmart dmart
           createdb -h 127.0.0.1 -U dmart dmart
 
@@ -47,22 +43,11 @@ jobs:
       - name: E2E smoke tests (curl.sh)
         run: |
           PUBLISH_DIR="bin/Release/net10.0/linux-x64/publish"
-          cat > "$PUBLISH_DIR/config.env" << 'EOF'
-          DATABASE_HOST="localhost"
-          DATABASE_PORT=5432
-          DATABASE_USERNAME="dmart"
-          DATABASE_PASSWORD="tramd"
-          DATABASE_NAME="dmart"
-          JWT_SECRET="ci-test-ci-test-ci-test-ci-test-32bytes"
-          ADMIN_SHORTNAME="cstest"
-          ADMIN_PASSWORD="cstest-password-123"
-          ADMIN_EMAIL="ci@test.local"
-          LISTENING_HOST="127.0.0.1"
-          LISTENING_PORT=5099
-          EOF
+          cp config.env "$PUBLISH_DIR/"
           cd "$PUBLISH_DIR" && ./dmart serve &
           SERVER_PID=$!
           cd -
+          sleep 3
           for i in $(seq 1 15); do
             curl -sf http://127.0.0.1:5099/ >/dev/null 2>&1 && break
             sleep 1
