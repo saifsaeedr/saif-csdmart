@@ -25,7 +25,7 @@ using Microsoft.Extensions.Options;
 // ============================================================================
 
 // Parse subcommand from args.
-var subcommand = "serve";
+var subcommand = "help";
 var serverArgs = args;
 if (args.Length > 0)
 {
@@ -43,34 +43,31 @@ switch (subcommand)
     case "-v":
     case "--version":
     {
-        // Prints build/git info as colorized formatted JSON.
+        // Version info is baked into the binary via InformationalVersion at build time.
+        // Format: "tag branch=X date=Y" — set by build.sh -p:InformationalVersion=...
+        // Falls back to info.json or live git for development (dotnet run).
         string json;
-        var infoPath = Path.Combine(AppContext.BaseDirectory, "info.json");
-        if (File.Exists(infoPath))
+        var asmVersion = typeof(Program).Assembly
+            .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+            .OfType<System.Reflection.AssemblyInformationalVersionAttribute>()
+            .FirstOrDefault()?.InformationalVersion;
+
+        if (!string.IsNullOrEmpty(asmVersion) && asmVersion.Contains("branch="))
         {
-            json = File.ReadAllText(infoPath);
+            // Parse "tag branch=X date=Y" format
+            var parts = asmVersion.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            var tag = parts[0];
+            var branch = parts.FirstOrDefault(p => p.StartsWith("branch="))?[7..] ?? "";
+            var date = string.Join(' ', parts.Where(p => p.StartsWith("date=")).Select(p => p[5..]));
+            if (string.IsNullOrEmpty(date))
+                date = parts.SkipWhile(p => !p.StartsWith("date=")).Skip(1).FirstOrDefault() ?? "";
+            var commit = tag.Contains('-') ? tag.Split('-').LastOrDefault()?.TrimStart('g') ?? "" : tag;
+            json = $"{{\"branch\":\"{branch}\",\"version\":\"{commit}\",\"tag\":\"{tag}\",\"version_date\":\"{date}\",\"runtime\":\".NET {Environment.Version}\"}}";
         }
         else
         {
-            static string Git(string gitArgs)
-            {
-                try
-                {
-                    var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-                    {
-                        FileName = "git", Arguments = gitArgs,
-                        RedirectStandardOutput = true, UseShellExecute = false,
-                    });
-                    var output = p?.StandardOutput.ReadToEnd().Trim();
-                    p?.WaitForExit();
-                    return output ?? "";
-                }
-                catch { return ""; }
-            }
-            var branch = Git("rev-parse --abbrev-ref HEAD");
-            var commit = Git("rev-parse --short HEAD");
-            var tag = Git("describe --tags");
-            json = $"{{\"branch\":\"{branch}\",\"commit\":\"{commit}\",\"tag\":\"{tag}\",\"runtime\":\".NET {Environment.Version}\"}}";
+            // No baked-in version — development build via dotnet run
+            json = $"{{\"version\":\"dev\",\"runtime\":\".NET {Environment.Version}\"}}";
         }
         PrintColorJson(System.Text.Json.JsonDocument.Parse(json).RootElement, 0);
         Console.WriteLine();
@@ -86,7 +83,8 @@ switch (subcommand)
             Usage: dmart [subcommand] [options]
 
             Subcommands:
-              serve          Start the HTTP server (default)
+              serve          Start the HTTP server
+                             Options: --cxb-config <path>
               version        Print version and build info
               settings       Print effective settings as JSON
               set_password   Set password for a user interactively
@@ -386,8 +384,20 @@ switch (subcommand)
 }
 
 // ============================================================================
-// SERVER STARTUP (subcommand: serve / hyper)
+// SERVER STARTUP (subcommand: serve)
 // ============================================================================
+
+// Parse serve options before passing remaining args to the web builder.
+// --cxb-config <path>  — path to CXB config.json
+for (var i = 0; i < serverArgs.Length - 1; i++)
+{
+    if (serverArgs[i] is "--cxb-config")
+    {
+        Environment.SetEnvironmentVariable("DMART_CXB_CONFIG", serverArgs[i + 1]);
+        serverArgs = serverArgs[..i].Concat(serverArgs[(i + 2)..]).ToArray();
+        break;
+    }
+}
 
 var builder = WebApplication.CreateSlimBuilder(serverArgs);
 

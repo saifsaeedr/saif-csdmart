@@ -24,12 +24,14 @@ if [[ "$TARGET" == "el9" || "$TARGET" == "rhel9" ]]; then
     echo "Building dmart-${VERSION} RPM for RHEL 9 via ${ENGINE}..."
     mkdir -p dist/out
     $ENGINE run --rm \
+        --network=host \
         -v "${SRCDIR}:/src:Z" \
         -w /src \
         -e VERSION="$VERSION" \
         almalinux:9 \
         bash -c '
             rpm -Uvh https://packages.microsoft.com/config/rhel/9/packages-microsoft-prod.rpm &&
+            dnf module -y reset nodejs && dnf module -y enable nodejs:20 &&
             dnf install -y dotnet-sdk-10.0 rpm-build clang zlib-devel git nodejs npm --nobest &&
             npm install -g yarn &&
             ./dist/build-rpm.sh
@@ -53,7 +55,7 @@ STAGING=$(mktemp -d)
 TARDIR="$STAGING/dmart-${VERSION}"
 mkdir -p "$TARDIR/plugins"
 
-# Binary
+# Binary (version info baked in via InformationalVersion)
 cp bin/dmart "$TARDIR/"
 
 # Plugin configs

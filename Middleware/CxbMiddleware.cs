@@ -39,14 +39,8 @@ public static class CxbMiddleware
         // No CXB available — skip silently (dev builds without build-cxb.sh).
         if (fileProvider is null) return app;
 
-        // Serve static files at /cxb.
-        app.UseStaticFiles(new StaticFileOptions
-        {
-            FileProvider = fileProvider,
-            RequestPath = "/cxb",
-        });
-
-        // Dynamic config.json with fallback chain.
+        // Dynamic config.json — MUST be before UseStaticFiles so it intercepts
+        // /cxb/config.json before the embedded/filesystem static file is served.
         app.Use(async (ctx, next) =>
         {
             if (ctx.Request.Path.StartsWithSegments("/cxb/config.json"))
@@ -71,9 +65,15 @@ public static class CxbMiddleware
                         return;
                     }
                 }
-                // Fall through to the embedded/filesystem config.json.
             }
             await next();
+        });
+
+        // Serve static files at /cxb.
+        app.UseStaticFiles(new StaticFileOptions
+        {
+            FileProvider = fileProvider,
+            RequestPath = "/cxb",
         });
 
         // SPA fallback — /cxb/* without file extension → index.html.
