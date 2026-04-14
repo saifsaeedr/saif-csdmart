@@ -301,10 +301,10 @@ public sealed class QueryService(
                     records[i] = records[i] with
                     {
                         Attachments = allAttachments[i]
-                            .GroupBy(a => a.ResourceType.ToString())
+                            .GroupBy(a => DataAdapters.Sql.JsonbHelpers.EnumMember(a.ResourceType))
                             .ToDictionary(
                                 g => g.Key,
-                                g => g.Select(a => AttachmentMapper.ToRecord(a)).ToList())
+                                g => g.Select(a => AttachmentMapper.ToEntryRecord(a)).ToList())
                     };
                 }
             }
@@ -693,6 +693,46 @@ internal static class AttachmentMapper
         {
             ResourceType = a.ResourceType,
             Subpath = a.Subpath,
+            Shortname = a.Shortname,
+            Uuid = a.Uuid,
+            Attributes = AttrHelper.StripNulls(attrs),
+        };
+    }
+
+    // Mirrors Python's get_entry_attachments output shape. The attachment is
+    // returned as a child of its parent entry, so:
+    //   * subpath is trimmed to the parent's subpath (last segment removed)
+    //   * media, relationships, acl, space_name are excluded from attributes
+    public static Record ToEntryRecord(Attachment a)
+    {
+        // Python: "/".join(subpath.split("/")[:-1])  — strip trailing shortname segment
+        var parentSubpath = a.Subpath;
+        var lastSlash = parentSubpath.LastIndexOf('/');
+        if (lastSlash > 0)
+            parentSubpath = parentSubpath[..lastSlash];
+        else
+            parentSubpath = "/";
+
+        var attrs = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["is_active"] = a.IsActive,
+            ["slug"] = a.Slug,
+            ["displayname"] = a.Displayname,
+            ["description"] = a.Description,
+            ["tags"] = a.Tags,
+            ["created_at"] = a.CreatedAt,
+            ["updated_at"] = a.UpdatedAt,
+            ["owner_shortname"] = a.OwnerShortname,
+            ["owner_group_shortname"] = a.OwnerGroupShortname,
+            ["payload"] = a.Payload,
+            ["last_checksum_history"] = a.LastChecksumHistory,
+            ["body"] = a.Body,
+            ["state"] = a.State,
+        };
+        return new Record
+        {
+            ResourceType = a.ResourceType,
+            Subpath = parentSubpath,
             Shortname = a.Shortname,
             Uuid = a.Uuid,
             Attributes = AttrHelper.StripNulls(attrs),

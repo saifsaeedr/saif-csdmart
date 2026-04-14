@@ -20,7 +20,8 @@ public sealed class AttachmentRepository(Db db)
 
     public async Task<List<Attachment>> ListForParentAsync(string spaceName, string parentSubpath, string parentShortname, CancellationToken ct = default)
     {
-        var attachmentSubpath = $"{parentSubpath.TrimEnd('/')}/{parentShortname}";
+        var normalized = Locator.NormalizeSubpath(parentSubpath);
+        var attachmentSubpath = $"{normalized.TrimEnd('/')}/{parentShortname}";
         await using var conn = await db.OpenAsync(ct);
         await using var cmd = new NpgsqlCommand(
             $"{SelectAllColumns} WHERE space_name = $1 AND subpath = $2 ORDER BY created_at DESC", conn);

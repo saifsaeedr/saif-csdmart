@@ -1,4 +1,6 @@
 using Dmart.Api;
+using Dmart.DataAdapters.Sql;
+using Dmart.Models.Api;
 using Dmart.Models.Core;
 using Dmart.Models.Enums;
 using Dmart.Models.Json;
@@ -12,13 +14,35 @@ public static class EntryHandler
     {
         g.MapGet("/entry/{resource_type}/{space}/{**rest}",
             async (string resource_type, string space, string rest,
-                   EntryService svc, CancellationToken ct) =>
+                   bool? retrieve_json_payload,
+                   bool? retrieve_attachments,
+                   EntryService svc, AttachmentRepository attachmentRepo,
+                   CancellationToken ct) =>
             {
                 if (!Enum.TryParse<ResourceType>(resource_type, true, out var rt)) return Results.BadRequest();
                 var (subpath, shortname) = RouteParts.SplitSubpathAndShortname(rest);
                 if (string.IsNullOrEmpty(shortname)) return Results.BadRequest();
                 var entry = await svc.GetAsync(new Locator(rt, space, subpath, shortname), actor: null, ct);
-                return entry is null ? Results.NotFound() : Results.Json(entry, DmartJsonContext.Default.Entry);
+                if (entry is null) return Results.NotFound();
+
+                var record = EntryMapper.ToRecord(entry, space, retrieve_json_payload == true);
+
+                Dictionary<string, List<Record>> attachmentsDict = new();
+                if (retrieve_attachments == true)
+                {
+                    var children = await attachmentRepo.ListForParentAsync(space, subpath, shortname, ct);
+                    if (children.Count > 0)
+                    {
+                        attachmentsDict = children
+                            .GroupBy(a => JsonbHelpers.EnumMember(a.ResourceType))
+                            .ToDictionary(
+                                grp => grp.Key,
+                                grp => grp.Select(a => AttachmentMapper.ToEntryRecord(a)).ToList());
+                    }
+                }
+
+                record = record with { Attachments = attachmentsDict };
+                return Results.Json(record, DmartJsonContext.Default.Record);
             });
 
         g.MapGet("/byuuid/{uuid}", async (string uuid, EntryService svc, CancellationToken ct) =>

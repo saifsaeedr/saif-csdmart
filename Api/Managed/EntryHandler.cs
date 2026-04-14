@@ -1,3 +1,5 @@
+using Dmart.DataAdapters.Sql;
+using Dmart.Models.Api;
 using Dmart.Models.Core;
 using Dmart.Models.Enums;
 using Dmart.Models.Json;
@@ -14,12 +16,19 @@ public static class EntryHandler
         // Python's db.load() dispatches to different tables based on class_type:
         //   Space → spaces table, User → users table, Role → roles, Permission → permissions
         //   everything else → entries table
+        //
+        // Query parameters (matching Python):
+        //   retrieve_json_payload   — include payload.body in the response (default false)
+        //   retrieve_attachments    — include child attachments grouped by type (default false)
         g.MapGet("/entry/{resource_type}/{space}/{**rest}",
             async (string resource_type, string space, string rest,
+                   bool? retrieve_json_payload,
+                   bool? retrieve_attachments,
                    EntryService svc,
-                   DataAdapters.Sql.SpaceRepository spaces,
-                   DataAdapters.Sql.UserRepository users,
-                   DataAdapters.Sql.AccessRepository access,
+                   AttachmentRepository attachmentRepo,
+                   SpaceRepository spaces,
+                   UserRepository users,
+                   AccessRepository access,
                    HttpContext http, CancellationToken ct) =>
             {
                 if (!Enum.TryParse<ResourceType>(resource_type, true, out var rt))
@@ -27,29 +36,61 @@ public static class EntryHandler
                 var (subpath, shortname) = RouteParts.SplitSubpathAndShortname(rest);
                 if (string.IsNullOrEmpty(shortname)) return Results.BadRequest();
 
+                var actor = http.User.Identity?.Name;
+
                 // Route to the correct table based on resource_type.
-                object? result = rt switch
+                // Non-entry types are returned directly (no attachment support).
+                switch (rt)
                 {
-                    ResourceType.Space => await spaces.GetAsync(shortname, ct),
-                    ResourceType.User => await users.GetByShortnameAsync(shortname, ct),
-                    ResourceType.Role => await access.GetRoleAsync(shortname, ct),
-                    ResourceType.Permission => await access.GetPermissionAsync(shortname, ct),
-                    _ => await svc.GetAsync(new Locator(rt, space, subpath, shortname),
-                             http.User.Identity?.Name, ct),
-                };
+                    case ResourceType.Space:
+                    {
+                        var s = await spaces.GetAsync(shortname, ct);
+                        return s is null ? Results.NotFound() : Results.Json(s, DmartJsonContext.Default.Space);
+                    }
+                    case ResourceType.User:
+                    {
+                        var u = await users.GetByShortnameAsync(shortname, ct);
+                        return u is null ? Results.NotFound() : Results.Json(u, DmartJsonContext.Default.User);
+                    }
+                    case ResourceType.Role:
+                    {
+                        var r = await access.GetRoleAsync(shortname, ct);
+                        return r is null ? Results.NotFound() : Results.Json(r, DmartJsonContext.Default.Role);
+                    }
+                    case ResourceType.Permission:
+                    {
+                        var p = await access.GetPermissionAsync(shortname, ct);
+                        return p is null ? Results.NotFound() : Results.Json(p, DmartJsonContext.Default.Permission);
+                    }
+                }
 
-                if (result is null) return Results.NotFound();
+                // Entry-flavor types: load, convert to Record (matching Python's dict
+                // response shape), and optionally attach child attachments.
+                var entry = await svc.GetAsync(new Locator(rt, space, subpath, shortname), actor, ct);
+                if (entry is null) return Results.NotFound();
 
-                // Serialize through the appropriate source-gen type info.
-                return result switch
+                var record = EntryMapper.ToRecord(entry, space, retrieve_json_payload == true);
+
+                // Python always includes "attachments" in the response (empty dict
+                // when not requested or no children). Match that by defaulting to
+                // an empty dictionary so the key is never omitted.
+                Dictionary<string, List<Record>> attachmentsDict = new();
+
+                if (retrieve_attachments == true)
                 {
-                    Models.Core.Space s => Results.Json(s, DmartJsonContext.Default.Space),
-                    Models.Core.User u => Results.Json(u, DmartJsonContext.Default.User),
-                    Models.Core.Role r => Results.Json(r, DmartJsonContext.Default.Role),
-                    Models.Core.Permission p => Results.Json(p, DmartJsonContext.Default.Permission),
-                    Entry e => Results.Json(e, DmartJsonContext.Default.Entry),
-                    _ => Results.NotFound(),
-                };
+                    var children = await attachmentRepo.ListForParentAsync(space, subpath, shortname, ct);
+                    if (children.Count > 0)
+                    {
+                        attachmentsDict = children
+                            .GroupBy(a => JsonbHelpers.EnumMember(a.ResourceType))
+                            .ToDictionary(
+                                grp => grp.Key,
+                                grp => grp.Select(a => AttachmentMapper.ToEntryRecord(a)).ToList());
+                    }
+                }
+
+                record = record with { Attachments = attachmentsDict };
+                return Results.Json(record, DmartJsonContext.Default.Record);
             });
 
         g.MapGet("/byuuid/{uuid}", async (string uuid, EntryService svc, CancellationToken ct) =>

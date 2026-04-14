@@ -68,5 +68,6 @@ namespace Dmart.Models.Json;
 [JsonSerializable(typeof(List<Dictionary<string, object>>))]
 [JsonSerializable(typeof(Dictionary<string, object>))]
 [JsonSerializable(typeof(Dictionary<string, List<string>>))]
+[JsonSerializable(typeof(Dictionary<string, List<Record>>))]
 [JsonSerializable(typeof(Dictionary<string, string>))]
 public partial class DmartJsonContext : JsonSerializerContext;
