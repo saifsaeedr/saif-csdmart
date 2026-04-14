@@ -5,6 +5,7 @@ dmart.Tests/obj/
 dmart.Tests/TestResults/
 cxb/node_modules/
 cxb/dist/
+!cxb/dist/client/
 cxb/.svelte-kit/
 .git/
 *.tar.gz

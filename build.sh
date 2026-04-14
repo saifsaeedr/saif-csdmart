@@ -10,11 +10,13 @@ INFORMATIONAL_VERSION="${TAG:-${COMMIT:-0.1.0}} branch=${BRANCH} date=${VERSION_
 echo "Version: $INFORMATIONAL_VERSION"
 
 # Build CXB frontend (embedded into the dmart binary)
-if [ -f cxb/package.json ]; then
+if [ -f cxb/dist/client/index.html ]; then
+    echo "CXB frontend already built, skipping"
+elif [ -f cxb/package.json ]; then
     echo "=== Building CXB frontend ==="
     ./build-cxb.sh
 else
-    echo "Skipping CXB build (cxb/package.json not found)"
+    echo "Skipping CXB build (no cxb source or dist found)"
 fi
 
 RID="linux-x64"

@@ -37,12 +37,24 @@ public static class CxbMiddleware
         }
         catch { /* native AOT on musl — fall through */ }
 
-        // Strategy 2: Filesystem at {BaseDir}/cxb/ (Docker).
+        // Strategy 2: Filesystem fallback (Docker / RPM).
         if (fileProvider is null)
         {
-            var fsPath = Path.Combine(AppContext.BaseDirectory, "cxb");
-            if (File.Exists(Path.Combine(fsPath, "index.html")))
-                fileProvider = new PhysicalFileProvider(fsPath);
+            var candidates = new[]
+            {
+                Path.Combine(AppContext.BaseDirectory, "cxb"),
+                Path.Combine(Directory.GetCurrentDirectory(), "cxb"),
+                "/usr/lib/dmart/cxb",
+                "/app/cxb",
+            };
+            foreach (var fsPath in candidates)
+            {
+                if (File.Exists(Path.Combine(fsPath, "index.html")))
+                {
+                    fileProvider = new PhysicalFileProvider(fsPath);
+                    break;
+                }
+            }
         }
 
         // No CXB available — skip silently (dev builds without build-cxb.sh).

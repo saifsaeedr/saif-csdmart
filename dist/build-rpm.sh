@@ -20,22 +20,55 @@ TARGET="${1:-}"
 # Build inside a container for cross-distro targets
 if [[ "$TARGET" == "el9" || "$TARGET" == "rhel9" ]]; then
     ENGINE="${CONTAINER_ENGINE:-podman}"
-    VERSION="${VERSION:-$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "0.1.0")}"
+    if [ -z "$VERSION" ]; then
+        GIT_DESC=$(git describe --tags 2>/dev/null || echo "v0.1.0")
+        BASE_VER=$(echo "$GIT_DESC" | cut -d '-' -f 1 | sed 's/^v//')
+        MINOR=$(echo "$GIT_DESC" | cut -d '-' -f 2 -s)
+        VERSION="${BASE_VER}${MINOR:+.$MINOR}"
+    fi
     echo "Building dmart-${VERSION} RPM for RHEL 9 via ${ENGINE}..."
+    # Build CXB locally (static files, no platform dependency)
+    if [ -f cxb/package.json ] && [ ! -f cxb/dist/client/index.html ]; then
+        echo "Building CXB frontend locally..."
+        ./build-cxb.sh
+    fi
     mkdir -p dist/out
-    $ENGINE run --rm \
-        --network=host \
-        -v "${SRCDIR}:/src:Z" \
-        -w /src \
-        -e VERSION="$VERSION" \
-        almalinux:9 \
-        bash -c '
+    CONTAINER_NAME="dmart-el9-builder"
+    # Check if builder container exists and is usable
+    NEED_CREATE=true
+    if $ENGINE container exists "$CONTAINER_NAME" 2>/dev/null; then
+        # Try to start it — if it runs, we can reuse it
+        $ENGINE start "$CONTAINER_NAME" 2>/dev/null || true
+        sleep 1
+        if $ENGINE exec "$CONTAINER_NAME" true 2>/dev/null; then
+            echo "Reusing existing $CONTAINER_NAME container..."
+            NEED_CREATE=false
+        else
+            echo "Container $CONTAINER_NAME is dead, recreating..."
+            $ENGINE rm -f "$CONTAINER_NAME" 2>/dev/null || true
+        fi
+    fi
+    if [ "$NEED_CREATE" = true ]; then
+        echo "Creating $CONTAINER_NAME container (first time — installs SDK)..."
+        $ENGINE run -d \
+            --name "$CONTAINER_NAME" \
+            --network=host \
+            -v "${SRCDIR}:/src:Z" \
+            -w /src \
+            almalinux:9 \
+            tail -f /dev/null
+        $ENGINE exec "$CONTAINER_NAME" bash -c '
             rpm -Uvh https://packages.microsoft.com/config/rhel/9/packages-microsoft-prod.rpm &&
-            dnf module -y reset nodejs && dnf module -y enable nodejs:20 &&
-            dnf install -y dotnet-sdk-10.0 rpm-build clang zlib-devel git nodejs npm --nobest &&
-            npm install -g yarn &&
-            ./dist/build-rpm.sh
+            dnf install -y dotnet-sdk-10.0 rpm-build clang zlib-devel git --nobest
         '
+    fi
+    # Clean previous build output to force recompilation against el9 glibc
+    $ENGINE exec -w /src "$CONTAINER_NAME" rm -rf bin/Release obj/Release
+    $ENGINE exec \
+        -e VERSION="$VERSION" \
+        -w /src \
+        "$CONTAINER_NAME" \
+        ./dist/build-rpm.sh
     echo ""
     echo "=== RHEL 9 RPM ==="
     ls -lh dist/out/*el9*.rpm 2>/dev/null || ls -lh dist/out/*.rpm
@@ -43,7 +76,12 @@ if [[ "$TARGET" == "el9" || "$TARGET" == "rhel9" ]]; then
 fi
 
 # Native build
-VERSION="${VERSION:-$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "0.1.0")}"
+if [ -z "$VERSION" ]; then
+    GIT_DESC=$(git describe --tags 2>/dev/null || echo "v0.1.0")
+    BASE_VER=$(echo "$GIT_DESC" | cut -d '-' -f 1 | sed 's/^v//')
+    MINOR=$(echo "$GIT_DESC" | cut -d '-' -f 2 -s)
+    VERSION="${BASE_VER}${MINOR:+.$MINOR}"
+fi
 echo "Building dmart-${VERSION} RPM..."
 
 # Step 1: Build binaries
