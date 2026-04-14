@@ -18,9 +18,8 @@ interface WebsiteConfig {
 
 const loadConfig = async (): Promise<WebsiteConfig> => {
   try {
-    const basePath = import.meta.env.BASE_URL || '/';
-    const configPath = `${basePath}/config.json`.replace('//', '/');
-    const response = await fetch(configPath);
+    const configUrl = new URL('config.json', document.baseURI).href;
+    const response = await fetch(configUrl);
     if (!response.ok) {
       throw new Error(`Failed to load config: ${response.status} ${response.statusText}`);
     }
@@ -33,10 +32,10 @@ const loadConfig = async (): Promise<WebsiteConfig> => {
       short_name: "dmart",
       display_name: "dmart",
       description: "dmart unified data platform",
-      default_language: "en",
+      default_language: "ar",
       languages: { ar: "العربية", en: "English" },
-      backend: "",
-      websocket: "",
+      backend: "http://localhost:8282",
+      websocket: "ws://localhost:8484/ws",
       backend_timeout: 30000,
       delay_total_count: false
     };
@@ -49,10 +48,10 @@ export let website: WebsiteConfig = {
   short_name: "dmart",
   display_name: "dmart",
   description: "dmart unified data platform",
-  default_language: "en",
+  default_language: "ar",
   languages: { ar: "العربية", en: "English" },
-  backend: "",
-  websocket: "",
+  backend: "http://localhost:8282",
+  websocket: "ws://localhost:8484/ws",
   backend_timeout: 30000,
   delay_total_count: false
 };

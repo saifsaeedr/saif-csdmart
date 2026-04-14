@@ -15,11 +15,8 @@
 
     $goto
 
-    // When backend is empty (CXB embedded in the same binary), use the
-    // current origin so API calls go to / not relative to /cxb/...
-    const backendUrl = website.backend || window.location.origin;
     const dmartAxios = axios.create({
-        baseURL: backendUrl,
+        baseURL: website.backend,
         withCredentials: true,
         timeout: website.backend_timeout,
     });
@@ -32,6 +29,12 @@
         return Promise.reject(error);
     });
     Dmart.setAxiosInstance(dmartAxios);
+
+    const storedToken = typeof localStorage !== 'undefined' && localStorage.getItem("authToken");
+    if (storedToken) {
+        Dmart.setToken(storedToken);
+    }
+
     getSpaces();
 
     const profilePromise = Dmart.getProfile();
@@ -52,6 +55,6 @@
             </div>
         </div>
     {/if}
-{:catch _}
+{:catch error}
     <Login />
 {/await}
