@@ -272,8 +272,25 @@ public sealed class EntryService(
         string? Str(string key, string? fallback)
             => patch.TryGetValue(key, out var v) && v is not null ? v.ToString() : fallback;
 
-        Translation? TrFromString(string key, Translation? fallback)
-            => patch.TryGetValue(key, out var v) && v is not null ? new Translation(En: v.ToString()) : fallback;
+        Translation? PatchTranslation(string key, Translation? fallback)
+        {
+            if (!patch.TryGetValue(key, out var v) || v is null) return fallback;
+            if (v is JsonElement el)
+            {
+                if (el.ValueKind == JsonValueKind.Object)
+                    return new Translation(
+                        En: el.TryGetProperty("en", out var en) ? en.GetString() : fallback?.En,
+                        Ar: el.TryGetProperty("ar", out var ar) ? ar.GetString() : fallback?.Ar,
+                        Ku: el.TryGetProperty("ku", out var ku) ? ku.GetString() : fallback?.Ku);
+                if (el.ValueKind == JsonValueKind.String)
+                    return new Translation(En: el.GetString());
+                if (el.ValueKind == JsonValueKind.Null)
+                    return null;
+            }
+            if (v is string s)
+                return new Translation(En: s);
+            return fallback;
+        }
 
         bool? PatchBool(string key, bool? fallback)
         {
@@ -309,8 +326,8 @@ public sealed class EntryService(
 
         return existing with
         {
-            Displayname = TrFromString("displayname", existing.Displayname),
-            Description = TrFromString("description", existing.Description),
+            Displayname = PatchTranslation("displayname", existing.Displayname),
+            Description = PatchTranslation("description", existing.Description),
             Slug = Str("slug", existing.Slug),
             OwnerShortname = Str("owner_shortname", existing.OwnerShortname) ?? existing.OwnerShortname,
             State = Str("state", existing.State),
