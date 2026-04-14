@@ -441,6 +441,23 @@ public sealed class QueryService(
 // (uuid, resource_type, shortname, subpath). Then _set_query_final_results
 // deletes password (for users) and query_policies (for all). We mirror that.
 
+// Strip null-valued and empty-string entries from the attributes dictionary so the
+// JSON response doesn't contain "key": null or "key": "" for optional fields.
+internal static class AttrHelper
+{
+    public static Dictionary<string, object> StripNulls(Dictionary<string, object?> attrs)
+    {
+        var result = new Dictionary<string, object>(attrs.Count, StringComparer.Ordinal);
+        foreach (var (k, v) in attrs)
+        {
+            if (v is null) continue;
+            if (v is string s && s.Length == 0) continue;
+            result[k] = v;
+        }
+        return result;
+    }
+}
+
 internal static class EntryMapper
 {
     public static Record ToRecord(Entry e, string spaceName, bool includePayloadBody = true)
@@ -474,7 +491,7 @@ internal static class EntryMapper
             Subpath = e.Subpath,
             Shortname = e.Shortname,
             Uuid = e.Uuid,
-            Attributes = attrs!,
+            Attributes = AttrHelper.StripNulls(attrs),
         };
     }
 
@@ -524,7 +541,7 @@ internal static class SpaceMapper
             Subpath = s.Subpath,
             Shortname = s.Shortname,
             Uuid = s.Uuid,
-            Attributes = attrs!,
+            Attributes = AttrHelper.StripNulls(attrs),
         };
     }
 }
@@ -572,7 +589,7 @@ internal static class UserMapper
             Subpath = u.Subpath,
             Shortname = u.Shortname,
             Uuid = u.Uuid,
-            Attributes = attrs!,
+            Attributes = AttrHelper.StripNulls(attrs),
         };
     }
 }
@@ -605,7 +622,7 @@ internal static class RoleMapper
             Subpath = r.Subpath,
             Shortname = r.Shortname,
             Uuid = r.Uuid,
-            Attributes = attrs!,
+            Attributes = AttrHelper.StripNulls(attrs),
         };
     }
 }
@@ -644,7 +661,7 @@ internal static class PermissionMapper
             Subpath = p.Subpath,
             Shortname = p.Shortname,
             Uuid = p.Uuid,
-            Attributes = attrs!,
+            Attributes = AttrHelper.StripNulls(attrs),
         };
     }
 }
@@ -678,7 +695,7 @@ internal static class AttachmentMapper
             Subpath = a.Subpath,
             Shortname = a.Shortname,
             Uuid = a.Uuid,
-            Attributes = attrs!,
+            Attributes = AttrHelper.StripNulls(attrs),
         };
     }
 }
@@ -708,7 +725,7 @@ internal static class HistoryMapper
             Shortname = h.Shortname,
             Subpath = h.Subpath,
             Uuid = h.Uuid.ToString(),
-            Attributes = attrs!,
+            Attributes = AttrHelper.StripNulls(attrs),
         };
     }
 }

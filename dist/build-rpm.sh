@@ -30,7 +30,8 @@ if [[ "$TARGET" == "el9" || "$TARGET" == "rhel9" ]]; then
         almalinux:9 \
         bash -c '
             rpm -Uvh https://packages.microsoft.com/config/rhel/9/packages-microsoft-prod.rpm &&
-            dnf install -y dotnet-sdk-10.0 rpm-build clang zlib-devel git --nobest &&
+            dnf install -y dotnet-sdk-10.0 rpm-build clang zlib-devel git nodejs npm --nobest &&
+            npm install -g yarn &&
             ./dist/build-rpm.sh
         '
     echo ""

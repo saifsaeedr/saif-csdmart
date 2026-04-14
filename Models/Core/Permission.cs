@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using Dmart.Models.Enums;
 
 namespace Dmart.Models.Core;
@@ -34,5 +35,6 @@ public sealed record Permission
     public List<string>? RestrictedFields { get; init; }
     public Dictionary<string, object>? AllowedFieldsValues { get; init; }
     public string? FilterFieldsValues { get; init; }
+    [JsonIgnore]
     public List<string> QueryPolicies { get; init; } = new();
 }

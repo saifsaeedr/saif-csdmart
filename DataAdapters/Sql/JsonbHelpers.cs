@@ -12,7 +12,16 @@ public static class JsonbHelpers
         => t is null ? null : JsonSerializer.Serialize(t, DmartJsonContext.Default.Translation);
 
     public static Translation? FromTranslation(string? json)
-        => string.IsNullOrEmpty(json) ? null : JsonSerializer.Deserialize(json, DmartJsonContext.Default.Translation);
+    {
+        if (string.IsNullOrEmpty(json)) return null;
+        var t = JsonSerializer.Deserialize(json, DmartJsonContext.Default.Translation);
+        if (t is null) return null;
+        // Normalize empty strings to null so WhenWritingNull strips them
+        return new Translation(
+            string.IsNullOrEmpty(t.En) ? null : t.En,
+            string.IsNullOrEmpty(t.Ar) ? null : t.Ar,
+            string.IsNullOrEmpty(t.Ku) ? null : t.Ku);
+    }
 
     public static string? ToJsonb(Payload? p)
         => p is null ? null : JsonSerializer.Serialize(p, DmartJsonContext.Default.Payload);

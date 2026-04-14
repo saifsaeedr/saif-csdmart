@@ -18,11 +18,17 @@ cat > info.json << EOF
 EOF
 echo "Generated info.json: $(cat info.json)"
 
-# rm -rf bin obj
+# Build CXB frontend (embedded into the dmart binary)
+if [ -f cxb/package.json ]; then
+    echo "=== Building CXB frontend ==="
+    ./build-cxb.sh
+else
+    echo "Skipping CXB build (cxb/package.json not found)"
+fi
 
 RID="linux-x64"
 
-# AOT publish the server
+# AOT publish the server (includes CXB via EmbeddedResource)
 dotnet publish dmart.csproj -r "$RID" \
   -p:PublishAot=true \
   -p:StripSymbols=true \

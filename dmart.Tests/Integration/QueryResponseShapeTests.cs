@@ -125,19 +125,15 @@ public class QueryResponseShapeTests : IClassFixture<DmartFactory>
         var mgmt = resp.Records!.First(r => r.Shortname == "management");
         var keys = (mgmt.Attributes ?? new()).Keys;
 
-        // The 26-key superset Python dumps for a Spaces row. Any drift from
-        // this list means the C# mapper has fallen out of parity.
-        var expected = new[]
+        // Keys that are always present (non-null) for any Space row.
+        // Null-valued keys are stripped from the response to match Python behaviour.
+        var alwaysPresent = new[]
         {
-            "is_active", "slug", "displayname", "description", "tags",
-            "created_at", "updated_at", "owner_shortname", "owner_group_shortname",
-            "acl", "payload", "relationships", "last_checksum_history",
-            "root_registration_signature", "primary_website", "indexing_enabled",
-            "capture_misses", "check_health", "languages", "icon", "mirrors",
-            "hide_folders", "hide_space", "active_plugins", "ordinal",
-            "space_name",
+            "is_active", "tags", "created_at", "updated_at", "owner_shortname",
+            "acl", "relationships", "indexing_enabled", "capture_misses",
+            "check_health", "languages", "space_name",
         };
-        foreach (var e in expected) keys.ShouldContain(e);
+        foreach (var e in alwaysPresent) keys.ShouldContain(e);
 
         // And verify query_policies is stripped (Python deletes it before
         // returning).
@@ -162,16 +158,14 @@ public class QueryResponseShapeTests : IClassFixture<DmartFactory>
         var rec = resp.Records![0];
         var keys = (rec.Attributes ?? new()).Keys;
 
-        // The 20-key superset Python dumps for an Entries row.
-        var expected = new[]
+        // Keys that are always present (non-null) for any Entry row.
+        // Null-valued keys are stripped from the response.
+        var alwaysPresent = new[]
         {
-            "is_active", "slug", "displayname", "description", "tags",
-            "created_at", "updated_at", "owner_shortname", "owner_group_shortname",
-            "acl", "payload", "relationships", "last_checksum_history",
-            "state", "is_open", "reporter", "workflow_shortname",
-            "collaborators", "resolution_reason", "space_name",
+            "is_active", "tags", "created_at", "updated_at",
+            "owner_shortname", "acl", "relationships", "space_name",
         };
-        foreach (var e in expected) keys.ShouldContain(e);
+        foreach (var e in alwaysPresent) keys.ShouldContain(e);
 
         keys.ShouldNotContain("query_policies");
     }
@@ -218,5 +212,76 @@ public class QueryResponseShapeTests : IClassFixture<DmartFactory>
         // Explicit opt-out: Python returns total=-1 when the caller skips the
         // count query, and we match that sentinel.
         ((int)resp.Attributes!["total"]!).ShouldBe(-1);
+    }
+
+    // ==================== null stripping ====================
+
+    [Fact]
+    public async Task Entry_Attributes_Have_No_Null_Values()
+    {
+        if (!DmartFactory.HasPg) return;
+        var query = Resolve();
+
+        var resp = await query.ExecuteAsync(new Query
+        {
+            Type = QueryType.Subpath,
+            SpaceName = "management",
+            Subpath = "/",
+            Limit = 5,
+        }, _factory.AdminShortname);
+
+        resp.Records.ShouldNotBeEmpty();
+        foreach (var rec in resp.Records!)
+        {
+            if (rec.Attributes is null) continue;
+            foreach (var (key, val) in rec.Attributes)
+                val.ShouldNotBeNull($"record {rec.Shortname} has null attribute: {key}");
+        }
+    }
+
+    [Fact]
+    public async Task Space_Attributes_Have_No_Null_Values()
+    {
+        if (!DmartFactory.HasPg) return;
+        var query = Resolve();
+
+        var resp = await query.ExecuteAsync(new Query
+        {
+            Type = QueryType.Spaces,
+            SpaceName = "management",
+            Subpath = "/",
+            Limit = 100,
+        }, _factory.AdminShortname);
+
+        resp.Records.ShouldNotBeEmpty();
+        foreach (var rec in resp.Records!)
+        {
+            if (rec.Attributes is null) continue;
+            foreach (var (key, val) in rec.Attributes)
+                val.ShouldNotBeNull($"space {rec.Shortname} has null attribute: {key}");
+        }
+    }
+
+    // ==================== password / query_policies hidden ====================
+
+    [Fact]
+    public async Task User_Entry_Endpoint_Hides_Password()
+    {
+        if (!DmartFactory.HasPg) return;
+        var client = _factory.CreateClient();
+        var raw = await client.PostAsync("/user/login",
+            new StringContent($"{{\"shortname\":\"{_factory.AdminShortname}\",\"password\":\"{_factory.AdminPassword}\"}}",
+                System.Text.Encoding.UTF8, "application/json"));
+        var loginBody = await raw.Content.ReadAsStringAsync();
+        var token = System.Text.Json.JsonDocument.Parse(loginBody).RootElement
+            .GetProperty("records")[0].GetProperty("attributes")
+            .GetProperty("access_token").GetString();
+        client.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+
+        var resp = await client.GetAsync($"/managed/entry/user/management/users/{_factory.AdminShortname}");
+        var body = await resp.Content.ReadAsStringAsync();
+        body.ShouldNotContain("\"password\"");
+        body.ShouldNotContain("\"query_policies\"");
     }
 }

@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using Dmart.Models.Enums;
 
 namespace Dmart.Models.Core;
@@ -44,5 +45,6 @@ public sealed record Entry
     public string? WorkflowShortname { get; init; }
     public Dictionary<string, string>? Collaborators { get; init; }
     public string? ResolutionReason { get; init; }
+    [JsonIgnore]
     public List<string>? QueryPolicies { get; init; }
 }

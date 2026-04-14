@@ -173,4 +173,29 @@ public class QuerySpacesTests : IClassFixture<DmartFactory>
         resp.Status.ShouldBe(Status.Success);
         resp.Records!.Count.ShouldBeLessThanOrEqualTo(2);
     }
+
+    [Fact]
+    public async Task QuerySpaces_SuperAdmin_Sees_All_Spaces()
+    {
+        // The __all_spaces__:__all_subpaths__ permission should grant visibility
+        // to every space, not just those owned by the user.
+        if (!DmartFactory.HasPg) return;
+        var (query, _) = Resolve();
+
+        var resp = await query.ExecuteAsync(new Query
+        {
+            Type = QueryType.Spaces,
+            SpaceName = "management",
+            Subpath = "/",
+            Limit = 100,
+        }, _factory.AdminShortname);
+
+        resp.Status.ShouldBe(Status.Success);
+        var total = (int)resp.Attributes!["total"]!;
+        var returned = resp.Records!.Count;
+        // total should equal returned (all visible with limit=100)
+        returned.ShouldBe(total);
+        // At least the management space should be visible
+        resp.Records!.ShouldContain(r => r.Shortname == "management");
+    }
 }

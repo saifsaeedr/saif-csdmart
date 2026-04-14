@@ -302,14 +302,22 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher)
             IsEmailVerified = r.GetBoolean(26),
             IsMsisdnVerified = r.GetBoolean(27),
             ForcePasswordChange = r.GetBoolean(28),
-            DeviceId = r.IsDBNull(29) ? null : r.GetString(29),
-            GoogleId = r.IsDBNull(30) ? null : r.GetString(30),
-            FacebookId = r.IsDBNull(31) ? null : r.GetString(31),
-            SocialAvatarUrl = r.IsDBNull(32) ? null : r.GetString(32),
+            DeviceId = NullIfEmpty(r, 29),
+            GoogleId = NullIfEmpty(r, 30),
+            FacebookId = NullIfEmpty(r, 31),
+            SocialAvatarUrl = NullIfEmpty(r, 32),
             AttemptCount = r.IsDBNull(33) ? null : r.GetInt32(33),
             LastLogin = JsonbHelpers.FromDictStringObject(r.IsDBNull(34) ? null : r.GetString(34)),
             Notes = r.IsDBNull(35) ? null : r.GetString(35),
             QueryPolicies = r.IsDBNull(36) ? new() : ((string[])r.GetValue(36)).ToList(),
         };
+    }
+
+    // Reads a string column, returning null for both DB NULL and empty strings.
+    private static string? NullIfEmpty(NpgsqlDataReader r, int ordinal)
+    {
+        if (r.IsDBNull(ordinal)) return null;
+        var s = r.GetString(ordinal);
+        return s.Length == 0 ? null : s;
     }
 }

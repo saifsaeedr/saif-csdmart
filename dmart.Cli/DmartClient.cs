@@ -60,7 +60,7 @@ public sealed class DmartClient : IDisposable
         try
         {
             var resp = await PostQueryAsync(
-                $"{{\"type\":\"spaces\",\"space_name\":\"management\",\"subpath\":\"/\"}}");
+                $"{{\"type\":\"spaces\",\"space_name\":\"management\",\"subpath\":\"/\",\"limit\":100}}");
             if (resp.TryGetProperty("records", out var recs))
                 SpaceNames = recs.EnumerateArray().Select(r => r.GetProperty("shortname").GetString()!).ToList();
         }

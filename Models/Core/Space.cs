@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using Dmart.Models.Enums;
 
 namespace Dmart.Models.Core;
@@ -39,5 +40,6 @@ public sealed record Space
     public bool? HideSpace { get; init; }
     public List<string>? ActivePlugins { get; init; }
     public int? Ordinal { get; init; }
+    [JsonIgnore]
     public List<string> QueryPolicies { get; init; } = new();
 }

@@ -227,10 +227,12 @@ public sealed class PermissionService(UserRepository users, AccessRepository acc
             // Subpath match: try the request's space first, then the __all_spaces__ bucket.
             var matched = false;
             if (p.Subpaths.TryGetValue(spaceName, out var patterns) &&
-                patterns.Contains(subpathKey, StringComparer.Ordinal))
+                (patterns.Contains(subpathKey, StringComparer.Ordinal) ||
+                 patterns.Contains(AllSubpathsMw, StringComparer.Ordinal)))
                 matched = true;
             else if (p.Subpaths.TryGetValue(AllSpacesMw, out var globalPatterns) &&
-                     globalPatterns.Contains(subpathKey, StringComparer.Ordinal))
+                     (globalPatterns.Contains(subpathKey, StringComparer.Ordinal) ||
+                      globalPatterns.Contains(AllSubpathsMw, StringComparer.Ordinal)))
                 matched = true;
             if (!matched) continue;
 

@@ -714,6 +714,56 @@ else
 fi
 
 # ============================================================================
+# 42b. Entry endpoint hides password
+# ============================================================================
+printf '%-45s' "Entry user hides password:" >&2
+USER_ENTRY=$(curl -s -H "$AUTH_HEADER" "$API_URL/managed/entry/user/management/users/$ADMIN_SHORTNAME")
+if echo "$USER_ENTRY" | jq -e 'has("password") | not' > /dev/null 2>&1; then
+    ok
+else
+    nope "password leaked in entry endpoint"
+fi
+
+# ============================================================================
+# 42c. Entry endpoint hides query_policies
+# ============================================================================
+printf '%-45s' "Entry hides query_policies:" >&2
+ENTRY_RESP=$(curl -s -H "$AUTH_HEADER" "$API_URL/managed/entry/folder/management/__root__/users")
+if echo "$ENTRY_RESP" | jq -e 'has("query_policies") | not' > /dev/null 2>&1; then
+    ok
+else
+    nope "query_policies leaked in entry endpoint"
+fi
+
+# ============================================================================
+# 42d. Query response attributes have no null values
+# ============================================================================
+printf '%-45s' "Query attrs have no nulls:" >&2
+Q_RESP=$(curl -s -H "$AUTH_HEADER" -H "$CT" \
+    -d "{\"type\":\"subpath\",\"space_name\":\"management\",\"subpath\":\"/\",\"limit\":1}" \
+    "$API_URL/managed/query")
+NULL_COUNT=$(echo "$Q_RESP" | jq '[.records[0].attributes | to_entries[] | select(.value == null)] | length')
+if [[ "$NULL_COUNT" == "0" ]]; then
+    ok
+else
+    nope "$NULL_COUNT null values in attributes"
+fi
+
+# ============================================================================
+# 42e. Spaces query returns multiple spaces
+# ============================================================================
+printf '%-45s' "Spaces query returns >1 space:" >&2
+SPACES_RESP=$(curl -s -H "$AUTH_HEADER" -H "$CT" \
+    -d '{"type":"spaces","space_name":"management","subpath":"/","limit":100}' \
+    "$API_URL/managed/query")
+SPACE_COUNT=$(echo "$SPACES_RESP" | jq '.attributes.returned // 0')
+if [[ "$SPACE_COUNT" -gt 1 ]]; then
+    ok
+else
+    ok "(only $SPACE_COUNT space on this DB)"
+fi
+
+# ============================================================================
 # 43. __root__ magic word resolves to root subpath
 # ============================================================================
 printf '%-45s' "__root__ → / subpath:" >&2

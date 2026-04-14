@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using Dmart.Models.Enums;
 
 namespace Dmart.Models.Core;
@@ -25,7 +26,8 @@ public sealed record User
     public ResourceType ResourceType { get; init; } = ResourceType.User;
 
     // ----- Users-specific -----
-    public string? Password { get; init; }    // hashed
+    [JsonIgnore]
+    public string? Password { get; init; }    // hashed — never serialized to API responses
     public List<string> Roles { get; init; } = new();
     public List<string> Groups { get; init; } = new();
     public List<AclEntry>? Acl { get; init; }
@@ -45,5 +47,6 @@ public sealed record User
     public int? AttemptCount { get; init; }
     public Dictionary<string, object>? LastLogin { get; init; }
     public string? Notes { get; init; }
+    [JsonIgnore]
     public List<string> QueryPolicies { get; init; } = new();
 }

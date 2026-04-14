@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using Dmart.Models.Enums;
 
 namespace Dmart.Models.Core;
@@ -28,5 +29,6 @@ public sealed record Role
 
     // ----- Roles-specific -----
     public List<string> Permissions { get; init; } = new();
+    [JsonIgnore]
     public List<string> QueryPolicies { get; init; } = new();
 }
