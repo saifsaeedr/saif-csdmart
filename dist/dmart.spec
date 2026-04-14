@@ -26,7 +26,6 @@ built-in plugin configurations, and a systemd service unit.
 %install
 # Binaries
 install -D -m 0755 dmart       %{buildroot}/usr/bin/dmart
-install -D -m 0755 dmart-cli   %{buildroot}/usr/bin/dmart-cli
 
 # Plugin configs
 for dir in plugins/*/; do
@@ -40,6 +39,10 @@ install -D -m 0644 config.env.sample %{buildroot}/usr/share/dmart/config.env.sam
 
 # Systemd unit
 install -D -m 0644 dmart.service %{buildroot}/usr/lib/systemd/system/dmart.service
+
+# Shell completions
+install -D -m 0644 dmart.bash %{buildroot}/etc/bash_completion.d/dmart
+install -D -m 0644 dmart.fish %{buildroot}/usr/share/fish/vendor_completions.d/dmart.fish
 
 # Runtime directories
 install -d -m 0755 %{buildroot}/etc/dmart
@@ -85,10 +88,11 @@ fi
 
 %files
 %attr(0755, root, root) /usr/bin/dmart
-%attr(0755, root, root) /usr/bin/dmart-cli
 /usr/lib/dmart/plugins/
 /usr/share/dmart/config.env.sample
 /usr/lib/systemd/system/dmart.service
+/etc/bash_completion.d/dmart
+/usr/share/fish/vendor_completions.d/dmart.fish
 %dir %attr(0750, root, dmart) /etc/dmart
 %dir %attr(0755, dmart, dmart) /var/lib/dmart
 %dir %attr(0755, dmart, dmart) /var/lib/dmart/spaces

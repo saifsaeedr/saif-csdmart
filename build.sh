@@ -28,16 +28,11 @@ fi
 
 RID="linux-x64"
 
-# AOT publish the server (includes CXB via EmbeddedResource)
+# AOT publish the single binary (server + CLI client)
 dotnet publish dmart.csproj -r "$RID" \
   -p:PublishAot=true \
   -p:StripSymbols=true \
   -c Release
-
-# Publish the CLI tool as AOT native binary
-dotnet publish dmart.Cli/dmart.Cli.csproj -r "$RID" -c Release \
-  -p:PublishAot=true \
-  -p:StripSymbols=true
 
 # Clean up dev-only files from publish output
 PUBLISH_DIR="bin/Release/net10.0/${RID}/publish"
@@ -47,17 +42,14 @@ rm -f "$PUBLISH_DIR"/*.dbg "$PUBLISH_DIR"/*.pdb \
       "$PUBLISH_DIR"/*.deps.json \
       info.json
 
-# Copy binaries to top-level bin/ for easy access
+# Copy binary to top-level bin/ for easy access
 mkdir -p bin
 cp "$PUBLISH_DIR/dmart" bin/
-cp "dmart.Cli/bin/Release/net10.0/${RID}/publish/dmart-cli" bin/ 2>/dev/null \
-  || cp "dmart.Cli/bin/Release/net10.0/dmart-cli" bin/ 2>/dev/null \
-  || echo "Warning: dmart-cli binary not found"
 
 echo ""
 echo "Published to $PUBLISH_DIR/"
 ls -lh "$PUBLISH_DIR/dmart"
 du -sh "$PUBLISH_DIR/"
 echo ""
-echo "Binaries copied to bin/:"
-ls -lh bin/dmart bin/dmart-cli 2>/dev/null
+echo "Binary copied to bin/:"
+ls -lh bin/dmart

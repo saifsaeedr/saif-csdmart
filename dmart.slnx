@@ -1,5 +1,4 @@
 <Solution>
   <Project Path="dmart.csproj" />
   <Project Path="dmart.Tests/dmart.Tests.csproj" />
-  <Project Path="dmart.Cli/dmart.Cli.csproj" />
 </Solution>

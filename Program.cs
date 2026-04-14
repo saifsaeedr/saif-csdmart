@@ -24,10 +24,10 @@ using Microsoft.Extensions.Options;
 //   dmart help        Print available subcommands
 // ============================================================================
 
-// Parse subcommand from args (first non-flag argument).
+// Parse subcommand from args.
 var subcommand = "serve";
 var serverArgs = args;
-if (args.Length > 0 && !args[0].StartsWith('-'))
+if (args.Length > 0)
 {
     subcommand = args[0].ToLowerInvariant();
     serverArgs = args[1..];
@@ -40,56 +40,15 @@ var (dotenvPath, dotenvValues) = DotEnv.Load();
 switch (subcommand)
 {
     case "version":
+    case "-v":
+    case "--version":
     {
-        // Python reads tag from info.json if present, else git describe --tags.
-        var vInfoPath = Path.Combine(AppContext.BaseDirectory, "info.json");
-        if (File.Exists(vInfoPath))
-        {
-            try
-            {
-                var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(vInfoPath));
-                var tag = doc.RootElement.TryGetProperty("tag", out var t) ? t.GetString() : null;
-                var ver = doc.RootElement.TryGetProperty("version", out var v) ? v.GetString() : null;
-                Console.WriteLine(!string.IsNullOrEmpty(tag) ? tag : $"dmart-csharp {ver ?? "0.1.0"}");
-            }
-            catch { Console.WriteLine("dmart-csharp 0.1.0"); }
-        }
-        else
-            Console.WriteLine("dmart-csharp 0.1.0 (AOT)");
-    }
-        return;
-
-    case "help":
-    case "--help":
-    case "-h":
-        Console.WriteLine("""
-            dmart — Structured CMS/IMS (C# port)
-
-            Usage: dmart [subcommand] [options]
-
-            Subcommands:
-              serve          Start the HTTP server (default)
-              hyper          Alias for serve
-              version        Print version info
-              info           Print build/git info as JSON
-              settings       Print effective settings as JSON
-              set_password   Set password for a user interactively
-              check          Run health checks on a space
-              export         Export space data to a zip file
-              import         Import data from a zip file or folder
-              help           Print this help
-
-            Config file lookup: $BACKEND_ENV → ./config.env → ~/.dmart/config.env
-            """);
-        return;
-
-    case "info":
-    {
-        // Python reads info.json or falls back to git rev-parse.
+        // Prints build/git info as colorized formatted JSON.
+        string json;
         var infoPath = Path.Combine(AppContext.BaseDirectory, "info.json");
         if (File.Exists(infoPath))
         {
-            Console.WriteLine(File.ReadAllText(infoPath));
+            json = File.ReadAllText(infoPath);
         }
         else
         {
@@ -111,10 +70,36 @@ switch (subcommand)
             var branch = Git("rev-parse --abbrev-ref HEAD");
             var commit = Git("rev-parse --short HEAD");
             var tag = Git("describe --tags");
-            Console.WriteLine($"{{\"branch\":\"{branch}\",\"commit\":\"{commit}\",\"tag\":\"{tag}\",\"runtime\":\".NET {Environment.Version}\"}}");
+            json = $"{{\"branch\":\"{branch}\",\"commit\":\"{commit}\",\"tag\":\"{tag}\",\"runtime\":\".NET {Environment.Version}\"}}";
         }
+        PrintColorJson(System.Text.Json.JsonDocument.Parse(json).RootElement, 0);
+        Console.WriteLine();
         return;
     }
+
+    case "help":
+    case "--help":
+    case "-h":
+        Console.WriteLine("""
+            dmart — Structured CMS/IMS (C# port)
+
+            Usage: dmart [subcommand] [options]
+
+            Subcommands:
+              serve          Start the HTTP server (default)
+              version        Print version and build info
+              settings       Print effective settings as JSON
+              set_password   Set password for a user interactively
+              check          Run health checks on a space
+              export         Export space data to a zip file
+              import         Import data from a zip file or folder
+              init           Initialize ~/.dmart with config files
+              cli            Interactive CLI client (REPL/command/script)
+              help           Print this help
+
+            Config file lookup: $BACKEND_ENV → ./config.env → ~/.dmart/config.env
+            """);
+        return;
 
     case "settings":
     {
@@ -378,8 +363,19 @@ switch (subcommand)
         return;
     }
 
+    case "cli":
+    {
+        // Interactive CLI client — port of Python cli/cli.py.
+        // Usage:
+        //   dmart cli                          # REPL mode
+        //   dmart cli c <space> <command...>    # Single command
+        //   dmart cli s <script_file>           # Script mode
+        var exitCode = await Dmart.Cli.CliRunner.RunAsync(serverArgs);
+        Environment.ExitCode = exitCode;
+        return;
+    }
+
     case "serve":
-    case "hyper":
         break; // fall through to server startup below
 
     default:
@@ -607,6 +603,26 @@ app.MapWebSocket();
     }
 }
 
+// Pre-flight check: is the port available?
+{
+    var port = int.TryParse(app.Configuration["Dmart:ListeningPort"], out var p) ? p : 5099;
+    try
+    {
+        using var probe = new System.Net.Sockets.Socket(
+            System.Net.Sockets.AddressFamily.InterNetwork,
+            System.Net.Sockets.SocketType.Stream,
+            System.Net.Sockets.ProtocolType.Tcp);
+        probe.Bind(new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, port));
+    }
+    catch (System.Net.Sockets.SocketException)
+    {
+        Console.Error.WriteLine($"\u001b[31mError: Port {port} is already in use.\u001b[0m");
+        Console.Error.WriteLine($"\u001b[33mAnother dmart instance may be running. Stop it first or change LISTENING_PORT in config.env.\u001b[0m");
+        Environment.ExitCode = 1;
+        return;
+    }
+}
+
 app.Run();
 
 // Exposed so dmart.Tests can use WebApplicationFactory<Program>.
@@ -648,5 +664,56 @@ public partial class Program
             lines.Add($"{k}={v}");
         File.WriteAllLines(cliIniPath, lines);
         Console.WriteLine($"Updated {cliIniPath} with credentials for {shortname}");
+    }
+
+    // ANSI-colorized JSON output for terminal display.
+    // Cyan=keys, Yellow=strings, Magenta=numbers, Green=true, Red=false, Gray=null.
+    static void PrintColorJson(System.Text.Json.JsonElement el, int indent)
+    {
+        var pad = new string(' ', indent * 2);
+        switch (el.ValueKind)
+        {
+            case System.Text.Json.JsonValueKind.Object:
+                Console.WriteLine("{");
+                var props = el.EnumerateObject().ToList();
+                for (var i = 0; i < props.Count; i++)
+                {
+                    Console.Write($"{pad}  \u001b[36m\"{props[i].Name}\"\u001b[0m: ");
+                    PrintColorJson(props[i].Value, indent + 1);
+                    Console.WriteLine(i < props.Count - 1 ? "," : "");
+                }
+                Console.Write($"{pad}}}");
+                break;
+            case System.Text.Json.JsonValueKind.Array:
+                var items = el.EnumerateArray().ToList();
+                if (items.Count == 0) { Console.Write("[]"); break; }
+                Console.WriteLine("[");
+                for (var i = 0; i < items.Count; i++)
+                {
+                    Console.Write($"{pad}  ");
+                    PrintColorJson(items[i], indent + 1);
+                    Console.WriteLine(i < items.Count - 1 ? "," : "");
+                }
+                Console.Write($"{pad}]");
+                break;
+            case System.Text.Json.JsonValueKind.String:
+                Console.Write($"\u001b[33m\"{el.GetString()}\"\u001b[0m");
+                break;
+            case System.Text.Json.JsonValueKind.Number:
+                Console.Write($"\u001b[35m{el}\u001b[0m");
+                break;
+            case System.Text.Json.JsonValueKind.True:
+                Console.Write("\u001b[32mtrue\u001b[0m");
+                break;
+            case System.Text.Json.JsonValueKind.False:
+                Console.Write("\u001b[31mfalse\u001b[0m");
+                break;
+            case System.Text.Json.JsonValueKind.Null:
+                Console.Write("\u001b[90mnull\u001b[0m");
+                break;
+            default:
+                Console.Write(el.ToString());
+                break;
+        }
     }
 }

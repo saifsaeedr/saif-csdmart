@@ -53,9 +53,8 @@ STAGING=$(mktemp -d)
 TARDIR="$STAGING/dmart-${VERSION}"
 mkdir -p "$TARDIR/plugins"
 
-# Binaries
+# Binary
 cp bin/dmart "$TARDIR/"
-cp bin/dmart-cli "$TARDIR/"
 
 # Plugin configs
 cp -r plugins/*/ "$TARDIR/plugins/"
@@ -63,8 +62,10 @@ cp -r plugins/*/ "$TARDIR/plugins/"
 # Config sample
 cp config.env.sample "$TARDIR/"
 
-# Systemd unit
+# Systemd unit + shell completions
 cp dist/dmart.service "$TARDIR/"
+cp dist/dmart.bash "$TARDIR/"
+cp dist/dmart.fish "$TARDIR/"
 
 # Create tarball
 tar -czf "$STAGING/dmart-${VERSION}.tar.gz" -C "$STAGING" "dmart-${VERSION}"

@@ -17,9 +17,6 @@
     <Compile Remove="dmart.Tests/**" />
     <Content Remove="dmart.Tests/**" />
     <None Remove="dmart.Tests/**" />
-    <Compile Remove="dmart.Cli/**" />
-    <Content Remove="dmart.Cli/**" />
-    <None Remove="dmart.Cli/**" />
   </ItemGroup>
 
   <ItemGroup>
@@ -55,6 +52,9 @@
     <DirectPInvoke Include="libc" />
     <PackageReference Include="Npgsql" Version="10.0.2" />
     <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" Version="10.0.5" />
+    <!-- CLI subcommand (merged from dmart.Cli) -->
+    <PackageReference Include="ReadLine" Version="2.0.1" />
+    <PackageReference Include="Spectre.Console" Version="0.50.0" />
   </ItemGroup>
 
 </Project>
