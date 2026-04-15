@@ -25,6 +25,7 @@ jobs:
 
       - name: Build SRPM
         run: |
+          rm -rf bin obj dist/out
           VERSION="${GITHUB_REF_NAME#v}"
           VERSION="${VERSION:-0.1.0}"
           VERSION="$VERSION" ./dist/build-rpm.sh srpm
@@ -54,6 +55,7 @@ jobs:
 
       - name: Build Fedora RPM
         run: |
+          rm -rf bin obj dist/out
           VERSION="${GITHUB_REF_NAME#v}"
           VERSION="${VERSION:-0.1.0}"
           VERSION="$VERSION" ./dist/build-rpm.sh
@@ -83,6 +85,7 @@ jobs:
 
       - name: Build EL9 RPM via podman
         run: |
+          rm -rf dist/out
           VERSION="${GITHUB_REF_NAME#v}"
           VERSION="${VERSION:-0.1.0}"
           VERSION="$VERSION" ./dist/build-rpm.sh el9
