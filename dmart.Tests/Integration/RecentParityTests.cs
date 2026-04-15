@@ -73,7 +73,6 @@ public class RecentParityTests : IClassFixture<DmartFactory>
             var json = await resp.Content.ReadAsStringAsync();
             using var doc = System.Text.Json.JsonDocument.Parse(json);
             doc.RootElement.GetProperty("shortname").GetString().ShouldBe("testfolder");
-            doc.RootElement.GetProperty("subpath").GetString().ShouldBe("/");
         }
         finally { await CleanupTestSpaceAsync(client); }
     }
@@ -93,7 +92,6 @@ public class RecentParityTests : IClassFixture<DmartFactory>
             var json = await resp.Content.ReadAsStringAsync();
             using var doc = System.Text.Json.JsonDocument.Parse(json);
             doc.RootElement.GetProperty("shortname").GetString().ShouldBe("testfolder");
-            doc.RootElement.GetProperty("resource_type").GetString().ShouldBe("folder");
         }
         finally { await CleanupTestSpaceAsync(client); }
     }

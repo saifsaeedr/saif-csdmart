@@ -15,8 +15,8 @@ public static class EntryHandler
     {
         // Mirrors dmart Python's `/entry/{resource_type}/{space}/{subpath:path}/{shortname}`.
         // Python returns {**meta.model_dump(exclude_none=True), "attachments": {...}}
-        // — a flat dict with ALL model fields at the top level (state, is_open,
-        // workflow_shortname, etc.), NOT nested under "attributes".
+        // — Meta fields at root (no space_name/subpath/resource_type), attachments
+        // use Record shape with attributes wrapper.
         //
         // Query parameters (matching Python):
         //   retrieve_json_payload   — include payload.body in the response (default false)
@@ -67,25 +67,35 @@ public static class EntryHandler
                 var entry = await svc.GetAsync(new Locator(rt, space, subpath, shortname), actor, ct);
                 if (entry is null) return Results.NotFound();
 
-                // Build attachments dict (Python always includes the key, even empty).
-                Dictionary<string, List<Record>> attachmentsDict = new();
+                // Build attachments grouped by type. Each attachment is flat —
+                // attributes are spread at root, not nested under "attributes".
+                var attNode = new JsonObject();
                 if (retrieve_attachments == true)
                 {
                     var children = await attachmentRepo.ListForParentAsync(space, subpath, shortname, ct);
-                    if (children.Count > 0)
+                    foreach (var grp in children.GroupBy(a => JsonbHelpers.EnumMember(a.ResourceType)))
                     {
-                        attachmentsDict = children
-                            .GroupBy(a => JsonbHelpers.EnumMember(a.ResourceType))
-                            .ToDictionary(
-                                grp => grp.Key,
-                                grp => grp.Select(a => AttachmentMapper.ToEntryRecord(a)).ToList());
+                        var arr = new JsonArray();
+                        foreach (var rec in grp.Select(a => AttachmentMapper.ToEntryRecord(a)))
+                        {
+                            var recJson = JsonSerializer.Serialize(rec, DmartJsonContext.Default.Record);
+                            var recNode = JsonNode.Parse(recJson)!.AsObject();
+                            if (recNode["attributes"] is JsonObject attrs)
+                            {
+                                recNode.Remove("attributes");
+                                foreach (var prop in attrs.ToList())
+                                {
+                                    attrs.Remove(prop.Key);
+                                    recNode[prop.Key] = prop.Value;
+                                }
+                            }
+                            arr.Add((JsonNode)recNode);
+                        }
+                        attNode[grp.Key] = arr;
                     }
                 }
 
-                // Build the flat response matching Python's meta.model_dump() + attachments.
-                // Serialize Entry via source-gen (AOT-safe), then merge attachments in.
                 var node = EntryToJsonNode.Convert(entry, retrieve_json_payload == true);
-                var attNode = JsonSerializer.SerializeToNode(attachmentsDict, DmartJsonContext.Default.DictionaryStringListRecord);
                 node["attachments"] = attNode;
                 return Results.Content(node.ToJsonString(DmartJsonContext.Default.Options), "application/json");
             });
@@ -118,8 +128,12 @@ internal static class EntryToJsonNode
         var json = JsonSerializer.Serialize(entry, DmartJsonContext.Default.Entry);
         var node = JsonNode.Parse(json)!.AsObject();
 
-        // Remove internal-only field that Python doesn't return.
+        // Remove fields that Python's Meta.model_dump() doesn't include.
+        // These live on the DB row / Locator, not on the Meta model.
         node.Remove("query_policies");
+        node.Remove("space_name");
+        node.Remove("subpath");
+        node.Remove("resource_type");
 
         // Strip payload.body if not requested.
         if (!includePayloadBody && node["payload"] is JsonObject payload)
