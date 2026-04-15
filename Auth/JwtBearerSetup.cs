@@ -1,5 +1,8 @@
 using System.Text;
+using System.Text.Json;
 using Dmart.Config;
+using Dmart.Models.Api;
+using Dmart.Models.Json;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
@@ -61,6 +64,32 @@ public static class JwtBearerSetup
                                 ctx.Token = fromCookie;
                         }
                         return Task.CompletedTask;
+                    },
+                    // Return a JSON error body matching Python's api.Response shape:
+                    // {"status":"failed","error":{"type":"jwtauth","code":N,"message":"..."}}
+                    OnChallenge = async ctx =>
+                    {
+                        ctx.HandleResponse(); // suppress default empty-body 401
+
+                        int code = InternalErrorCode.NOT_AUTHENTICATED;
+                        string message = "Not authenticated";
+
+                        if (ctx.AuthenticateFailure is SecurityTokenExpiredException)
+                        {
+                            code = InternalErrorCode.EXPIRED_TOKEN;
+                            message = "Token has expired";
+                        }
+                        else if (ctx.AuthenticateFailure is SecurityTokenException)
+                        {
+                            code = InternalErrorCode.INVALID_TOKEN;
+                            message = "Invalid token";
+                        }
+
+                        ctx.Response.StatusCode = 401;
+                        ctx.Response.ContentType = "application/json";
+                        var body = Response.Fail(code, message, "jwtauth");
+                        await ctx.Response.WriteAsync(
+                            JsonSerializer.Serialize(body, DmartJsonContext.Default.Response));
                     },
                 };
             });

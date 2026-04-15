@@ -132,6 +132,16 @@ public class ManagedCrudDbTests : IClassFixture<DmartFactory>
         var client = _factory.CreateClient();
         var resp = await client.GetAsync("/managed/entry/content/test/itest/anything");
         resp.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+
+        // Should return a JSON body matching Python's shape:
+        // {"status":"failed","error":{"type":"jwtauth","code":49,"message":"..."}}
+        var json = await resp.Content.ReadAsStringAsync();
+        json.ShouldNotBeNullOrWhiteSpace();
+        var body = System.Text.Json.JsonSerializer.Deserialize(json, DmartJsonContext.Default.Response);
+        body.ShouldNotBeNull();
+        body!.Status.ShouldBe(Status.Failed);
+        body.Error.ShouldNotBeNull();
+        body.Error!.Type.ShouldBe("jwtauth");
     }
 
     private async Task<string> GetTokenAsync(HttpClient client)
