@@ -185,8 +185,8 @@ public sealed class QueryService(
 
     private async Task<Response> QueryAttachmentsAsync(Query q, string? actor, CancellationToken ct)
     {
-        if (!await CanQueryAsync(actor, ResourceType.Content, q.SpaceName, q.Subpath ?? "/", ct))
-            return Response.Fail("forbidden", "no read access for subpath");
+        // Python skips subpath-level permission checks for attachment queries
+        // (same as row-level ACL — see QueryHelper.AppendAclFilter).
 
         var pageTask = attachments.QueryAsync(q, ct);
         var totalTask = q.RetrieveTotal == false
@@ -331,7 +331,8 @@ public sealed class QueryService(
 
     private async Task<Response> QueryAggregationAsync(Query q, string? actor, string tableName, CancellationToken ct)
     {
-        if (!await CanQueryAsync(actor, ResourceType.Content, q.SpaceName, q.Subpath ?? "/", ct))
+        // Python skips permission checks for attachment queries (see AppendAclFilter).
+        if (tableName != "attachments" && !await CanQueryAsync(actor, ResourceType.Content, q.SpaceName, q.Subpath ?? "/", ct))
             return Response.Fail("forbidden", "no read access for subpath");
 
         if (q.AggregationData is null)
