@@ -1,7 +1,0 @@
-:8000 {
-	log {
-		output file /home/logs/caddy.log
-	}
-
-	reverse_proxy 127.0.0.1:8282
-}

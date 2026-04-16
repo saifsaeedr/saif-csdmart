@@ -172,8 +172,8 @@ cp "$STAGING/dmart-${VERSION}.tar.gz" "$RPMBUILD/SOURCES/"
 # Bake the version into the spec so SRPM rebuilds work without --define
 sed "s/^Version:.*$/Version:        ${VERSION}/" dist/dmart.spec > "$RPMBUILD/SPECS/dmart.spec"
 
-# Step 4: Build binary RPM + source RPM
-rpmbuild -ba \
+# Step 4: Build binary RPM (use -bb, not -ba — tarball has pre-built binary, not source)
+rpmbuild -bb \
     --define "_topdir $RPMBUILD" \
     "$RPMBUILD/SPECS/dmart.spec"
 

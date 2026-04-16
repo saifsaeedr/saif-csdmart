@@ -25,6 +25,8 @@ jobs:
 
       - name: Build SRPM
         run: |
+          pkill -f 'dmart serve' 2>/dev/null || true
+          sleep 1
           rm -rf bin obj dist/out
           VERSION="${GITHUB_REF_NAME#v}"
           VERSION="${VERSION:-0.1.0}"
@@ -55,6 +57,8 @@ jobs:
 
       - name: Build Fedora RPM
         run: |
+          pkill -f 'dmart serve' 2>/dev/null || true
+          sleep 1
           rm -rf bin obj dist/out
           VERSION="${GITHUB_REF_NAME#v}"
           VERSION="${VERSION:-0.1.0}"
@@ -85,7 +89,11 @@ jobs:
 
       - name: Build EL9 RPM via podman
         run: |
+          pkill -f 'dmart serve' 2>/dev/null || true
+          sleep 1
           rm -rf dist/out
+          # Remove stale builder container from previous runs
+          podman rm -f dmart-el9-builder 2>/dev/null || true
           VERSION="${GITHUB_REF_NAME#v}"
           VERSION="${VERSION:-0.1.0}"
           VERSION="$VERSION" ./dist/build-rpm.sh el9

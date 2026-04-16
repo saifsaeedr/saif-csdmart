@@ -1,0 +1,12 @@
+{
+  "shortname": "sample_subprocess",
+  "is_active": true,
+  "type": "hook",
+  "listen_time": "after",
+  "filters": {
+    "subpaths": ["__ALL__"],
+    "resource_types": ["__ALL__"],
+    "schema_shortnames": ["__ALL__"],
+    "actions": ["create", "update", "delete"]
+  }
+}

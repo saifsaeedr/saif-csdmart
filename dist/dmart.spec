@@ -28,16 +28,24 @@ built-in plugin configurations, and a systemd service unit.
 %setup -q
 
 %build
-# Build AOT native binary from source
-dotnet publish dmart.csproj -r linux-x64 \
-    -p:PublishAot=true \
-    -p:StripSymbols=true \
-    -c Release \
-    -o %{_builddir}/%{name}-%{version}/out
+# Build from source if dmart.csproj is present (SRPM rebuild).
+# Binary RPM path already has the pre-built binary — skip.
+if [ -f dmart.csproj ]; then
+    dotnet publish dmart.csproj -r linux-x64 \
+        -p:PublishAot=true \
+        -p:StripSymbols=true \
+        -c Release \
+        -o %{_builddir}/%{name}-%{version}/out
+fi
 
 %install
-# Binary
-install -D -m 0755 out/dmart %{buildroot}/usr/bin/dmart
+# Binary — from out/ (SRPM build) or root (binary RPM)
+# SRPM builds put binary in out/, binary RPM has it in root
+if [ -f out/dmart ]; then
+    install -D -m 0755 out/dmart %{buildroot}/usr/bin/dmart
+else
+    install -D -m 0755 dmart %{buildroot}/usr/bin/dmart
+fi
 
 # Plugin configs
 for dir in plugins/*/; do

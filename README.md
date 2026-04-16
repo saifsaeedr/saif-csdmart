@@ -16,7 +16,24 @@ DMART is a headless information management system for applications with small-to
 
 ## Quick Start
 
-### From RPM (Fedora / RHEL 9)
+### Container (fastest — no build needed)
+
+Pull the pre-built all-in-one image (dmart + PostgreSQL) from GitHub Container Registry:
+
+```bash
+podman run --name dmart -p 8000:8000 -d -it ghcr.io/edraj/csdmart:latest
+```
+
+Set the admin password and open the UI:
+
+```bash
+podman exec -it dmart dmart set_password
+# Open http://localhost:8000/cxb/
+```
+
+### RPM (Fedora / RHEL 9)
+
+Download the RPM from the [latest release](https://github.com/edraj/csdmart/releases):
 
 ```bash
 sudo dnf install ./dmart-*.rpm
@@ -35,14 +52,6 @@ vi config.env                          # set database credentials
 dotnet run -- serve
 # In another terminal:
 dmart set_password                     # set admin password
-```
-
-### Docker (all-in-one with PostgreSQL)
-
-```bash
-./build-cxb.sh                         # build frontend
-./admin_scripts/docker/notes.sh        # build & run container
-# Open http://localhost:8000/cxb/
 ```
 
 ## CLI
@@ -143,7 +152,7 @@ cat > ~/.dmart/plugins/my_plugin/config.json << 'EOF'
 EOF
 ```
 
-Plugins export C-ABI functions: `get_info()`, `hook()` or `handle_request()`, `free_string()`. Can be written in any language (C#, Rust, C, Go). See `custom_plugins_sdk/` for samples.
+Plugins export C-ABI functions: `get_info()`, `hook()` or `handle_request()`, `free_string()`. Can be written in any language (C#, Rust, C, Go). See [custom_plugins_sdk/README.md](custom_plugins_sdk/README.md) for the full development guide with working examples.
 
 ## Building
 
@@ -184,19 +193,11 @@ sudo systemctl enable --now dmart
 journalctl -u dmart -f
 ```
 
-### Ansible
-
-```bash
-cd admin_scripts/ansible
-vi inventory.ini           # add your servers
-ansible-playbook -i inventory.ini deploy.yml
-```
-
 ### Docker (all-in-one)
 
 ```bash
 ./admin_scripts/docker/notes.sh
-# Includes: PostgreSQL 18 + dmart + Caddy reverse proxy
+# Includes: PostgreSQL 18 + dmart
 # Access: http://localhost:8000/cxb/
 ```
 
@@ -234,7 +235,7 @@ custom_plugins_sdk/       # Sample native plugin projects
 - **.NET 10** with Native AOT (single binary, no runtime needed)
 - **PostgreSQL** (same schema as Python dmart)
 - **Svelte** (CXB admin frontend, embedded in binary)
-- **Caddy** (reverse proxy in Docker setup)
+- **PostgreSQL** client libs (Npgsql, no ORM)
 
 ## License
 
