@@ -54,6 +54,33 @@ public sealed class PermissionService(UserRepository users, AccessRepository acc
     public static ResourceContext FromUser(User u) =>
         new(u.IsActive, u.OwnerShortname, u.OwnerGroupShortname, u.Acl);
 
+    // Resolves the user + flattened permission list, using the in-memory cache.
+    // Shared by CanAsync and HasAnyAccessToSpaceAsync to avoid duplicating the
+    // user → roles → permissions loading logic.
+    private async Task<(User? User, List<Permission> Perms)> ResolvePermissionsAsync(
+        string actorShortname, CancellationToken ct)
+    {
+        var cached = cache.GetCachedUserAccess(actorShortname);
+        if (cached is not null)
+            return (cached.User, cached.Permissions);
+
+        var user = await users.GetByShortnameAsync(actorShortname, ct);
+        if (user is null || !user.IsActive)
+            return (user, new());
+
+        if (user.Roles.Count == 0)
+        {
+            cache.SetCachedUserAccess(actorShortname, new(user, new()));
+            return (user, new());
+        }
+
+        var roles = await access.GetRolesAsync(user.Roles, ct);
+        var permNames = roles.SelectMany(r => r.Permissions).Distinct().ToArray();
+        var perms = permNames.Length == 0 ? new() : await access.GetPermissionsAsync(permNames, ct);
+        cache.SetCachedUserAccess(actorShortname, new(user, perms));
+        return (user, perms);
+    }
+
     public async Task<bool> CanAsync(
         string? actorShortname,
         string action,
@@ -65,39 +92,8 @@ public sealed class PermissionService(UserRepository users, AccessRepository acc
         // Anonymous: only "view" is allowed (Python: anonymous reads, no writes).
         if (actorShortname is null) return action == "view";
 
-        // Cache hot path: try the in-memory user-access cache first. The cache key
-        // is the actor shortname; the cached value holds the User row + the
-        // resolved Permission list. AuthzCacheRefresher invalidates this entire
-        // dictionary on every user/role/permission write so we never serve stale
-        // permission decisions across config changes.
-        Models.Core.User user;
-        List<Permission> perms;
-        var cached = cache.GetCachedUserAccess(actorShortname);
-        if (cached is not null)
-        {
-            user = cached.User;
-            perms = cached.Permissions;
-        }
-        else
-        {
-            var loaded = await users.GetByShortnameAsync(actorShortname, ct);
-            if (loaded is null || !loaded.IsActive) return false;
-            user = loaded;
-
-            // Walk roles → role.permissions → permission rows. The result is cached
-            // even if it's empty so that "no access" decisions are also fast.
-            if (user.Roles.Count == 0)
-            {
-                cache.SetCachedUserAccess(actorShortname, new(user, new()));
-                return false;
-            }
-            var roles = await access.GetRolesAsync(user.Roles, ct);
-            var permNames = roles.SelectMany(r => r.Permissions).Distinct().ToArray();
-            perms = permNames.Length == 0 ? new() : await access.GetPermissionsAsync(permNames, ct);
-            cache.SetCachedUserAccess(actorShortname, new(user, perms));
-        }
-
-        if (!user.IsActive) return false;
+        var (user, perms) = await ResolvePermissionsAsync(actorShortname, ct);
+        if (user is null || !user.IsActive) return false;
 
         // 1. Per-entry ACL: if the resource has an ACL entry naming this user with the
         //    requested action in their allowed_actions list, grant immediately.
@@ -135,17 +131,52 @@ public sealed class PermissionService(UserRepository users, AccessRepository acc
 
         var rt = JsonbHelpers.EnumMember(target.Type);
 
+        // Python: effective_space = entry_shortname when resource_type is space.
+        // For a space named "evd", permissions are keyed under space_name "evd",
+        // but the query comes with space_name "management" (the management space).
+        var effectiveSpace = target.Type == ResourceType.Space
+            && !string.IsNullOrEmpty(target.Shortname) && target.Shortname != "*"
+            ? target.Shortname
+            : target.SpaceName;
+
         // 4. Hierarchical subpath walk + global-form magic word at each level.
-        foreach (var candidate in BuildSubpathWalk(target.Subpath))
+        //    Python appends the entry shortname for folder resource types so that
+        //    a folder "users" at subpath "/" also checks the "users" permission key.
+        var walkPath = target.Subpath;
+        if (target.Type == ResourceType.Folder && !string.IsNullOrEmpty(target.Shortname) && target.Shortname != "*")
         {
-            if (CheckAtCandidate(perms, target.SpaceName, candidate, rt, action, achieved, recordAttributes))
+            walkPath = walkPath == "/"
+                ? target.Shortname
+                : $"{walkPath.TrimEnd('/')}/{target.Shortname}";
+        }
+        foreach (var candidate in BuildSubpathWalk(walkPath))
+        {
+            if (CheckAtCandidate(perms, effectiveSpace, candidate, rt, action, achieved, recordAttributes))
                 return true;
             var global = ToGlobalForm(candidate);
             if (global is not null && global != candidate &&
-                CheckAtCandidate(perms, target.SpaceName, global, rt, action, achieved, recordAttributes))
+                CheckAtCandidate(perms, effectiveSpace, global, rt, action, achieved, recordAttributes))
                 return true;
         }
 
+        return false;
+    }
+
+    // Check if the user has ANY permission that references this space (by name or
+    // via __all_spaces__). Used for the spaces listing — a user should see a space
+    // if they have any grant within it, regardless of resource_type.
+    public async Task<bool> HasAnyAccessToSpaceAsync(string? actorShortname, string spaceName, CancellationToken ct = default)
+    {
+        if (actorShortname is null) return false;
+        var (user, perms) = await ResolvePermissionsAsync(actorShortname, ct);
+        if (user is null || !user.IsActive) return false;
+
+        foreach (var p in perms)
+        {
+            if (!p.IsActive) continue;
+            if (p.Subpaths.ContainsKey(spaceName) || p.Subpaths.ContainsKey(AllSpacesMw))
+                return true;
+        }
         return false;
     }
 

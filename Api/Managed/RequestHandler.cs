@@ -243,9 +243,11 @@ public static class RequestHandler
             SpaceName = space,
             Subpath = "/" + rec.Subpath.TrimStart('/'),
             OwnerShortname = actor,
+            Subpaths = ExtractSubpathsDict(attrs),
             ResourceTypes = ExtractStringList(attrs, "resource_types") ?? new(),
             Actions = ExtractStringList(attrs, "actions") ?? new(),
             Conditions = ExtractStringList(attrs, "conditions") ?? new(),
+            RestrictedFields = ExtractStringList(attrs, "restricted_fields"),
             IsActive = !attrs.TryGetValue("is_active", out var ia) || !IsExplicitlyFalse(ia),
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow,
@@ -620,6 +622,27 @@ public static class RequestHandler
         if (raw is IEnumerable<object> objs)
             return objs.Select(o => o?.ToString() ?? "").ToList();
         return null;
+    }
+
+    // Extracts the "subpaths" dictionary: { "space_name": ["subpath1", "subpath2"], ... }
+    private static Dictionary<string, List<string>> ExtractSubpathsDict(Dictionary<string, object> attrs)
+    {
+        var result = new Dictionary<string, List<string>>();
+        if (!attrs.TryGetValue("subpaths", out var raw) || raw is null) return result;
+
+        if (raw is JsonElement el && el.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in el.EnumerateObject())
+            {
+                var paths = new List<string>();
+                if (prop.Value.ValueKind == JsonValueKind.Array)
+                    foreach (var item in prop.Value.EnumerateArray())
+                        if (item.ValueKind == JsonValueKind.String)
+                            paths.Add(item.GetString()!);
+                result[prop.Name] = paths;
+            }
+        }
+        return result;
     }
 
     private static string? ConvertToString(object? v) => v switch
