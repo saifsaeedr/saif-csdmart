@@ -15,6 +15,7 @@ public enum ContentType
     [EnumMember(Value = "markdown")]    Markdown,
     [EnumMember(Value = "html")]        Html,
     [EnumMember(Value = "json")]        Json,
+    [EnumMember(Value = "image")]       Image,
     [EnumMember(Value = "image_jpeg")]  ImageJpeg,
     [EnumMember(Value = "image_png")]   ImagePng,
     [EnumMember(Value = "image_svg")]   ImageSvg,

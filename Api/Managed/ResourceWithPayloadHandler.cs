@@ -265,6 +265,7 @@ public static class ResourceWithPayloadHandler
         var mt = (mime ?? "").ToLowerInvariant();
         return mt switch
         {
+            "image" => ContentType.Image,
             "image/jpeg" => ContentType.ImageJpeg,
             "image/png"  => ContentType.ImagePng,
             "image/svg+xml" => ContentType.ImageSvg,
