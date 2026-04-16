@@ -45,6 +45,11 @@ public sealed class QueryService(
         return subpath == "/" && await perms.HasAnyAccessToSpaceAsync(actor, spaceName, ct);
     }
 
+    // Python returns (0, []) when the user has no matching query policies — a success
+    // with zero records, not an error. This matches that behavior.
+    private static Response EmptyQueryResponse() =>
+        Response.Ok(Array.Empty<Record>(), new() { ["total"] = 0, ["returned"] = 0 });
+
     public async Task<Response> ExecuteAsync(Query q, string? actor, CancellationToken ct = default)
     {
         // Clamp limit: default to 100, cap at MaxQueryLimit.
@@ -129,7 +134,7 @@ public sealed class QueryService(
     private async Task<Response> QueryUsersAsync(Query q, string? actor, CancellationToken ct)
     {
         if (!await CanQueryAsync(actor, ResourceType.User, q.SpaceName, q.Subpath ?? "/", ct))
-            return Response.Fail("forbidden", "no read access for subpath");
+            return EmptyQueryResponse();
 
         var pageTask = users.QueryAsync(q, ct);
         var totalTask = q.RetrieveTotal == false
@@ -148,7 +153,7 @@ public sealed class QueryService(
     private async Task<Response> QueryRolesAsync(Query q, string? actor, CancellationToken ct)
     {
         if (!await CanQueryAsync(actor, ResourceType.Role, q.SpaceName, q.Subpath ?? "/", ct))
-            return Response.Fail("forbidden", "no read access for subpath");
+            return EmptyQueryResponse();
 
         var pageTask = access.QueryRolesAsync(q, ct);
         var totalTask = q.RetrieveTotal == false
@@ -167,7 +172,7 @@ public sealed class QueryService(
     private async Task<Response> QueryPermissionsAsync(Query q, string? actor, CancellationToken ct)
     {
         if (!await CanQueryAsync(actor, ResourceType.Permission, q.SpaceName, q.Subpath ?? "/", ct))
-            return Response.Fail("forbidden", "no read access for subpath");
+            return EmptyQueryResponse();
 
         var pageTask = access.QueryPermissionsAsync(q, ct);
         var totalTask = q.RetrieveTotal == false
@@ -185,8 +190,10 @@ public sealed class QueryService(
 
     private async Task<Response> QueryAttachmentsAsync(Query q, string? actor, CancellationToken ct)
     {
-        // Python skips subpath-level permission checks for attachment queries
-        // (same as row-level ACL — see QueryHelper.AppendAclFilter).
+        // Python: get_user_query_policies() → if empty return (0, []). Row-level ACL
+        // is skipped for attachments (see AppendAclFilter), but the policy gate remains.
+        if (!await CanQueryAsync(actor, ResourceType.Content, q.SpaceName, q.Subpath ?? "/", ct))
+            return EmptyQueryResponse();
 
         var pageTask = attachments.QueryAsync(q, ct);
         var totalTask = q.RetrieveTotal == false
@@ -209,7 +216,7 @@ public sealed class QueryService(
             return Response.Fail("unauthorized", "history queries require authentication");
 
         if (!await CanQueryAsync(actor, ResourceType.Content, q.SpaceName, q.Subpath ?? "/", ct))
-            return Response.Fail("forbidden", "no read access for subpath");
+            return EmptyQueryResponse();
 
         var pageTask = history.QueryHistoryAsync(q, ct);
         var totalTask = q.RetrieveTotal == false
@@ -228,7 +235,7 @@ public sealed class QueryService(
     private async Task<Response> QueryTagsAsync(Query q, string? actor, CancellationToken ct)
     {
         if (!await CanQueryAsync(actor, ResourceType.Content, q.SpaceName, q.Subpath ?? "/", ct))
-            return Response.Fail("forbidden", "no read access for subpath");
+            return EmptyQueryResponse();
 
         // SQL: unnest tags jsonb array, group by tag, count.
         var args = new List<NpgsqlParameter>();
@@ -282,7 +289,7 @@ public sealed class QueryService(
     private async Task<Response> QueryEntriesAsync(Query q, string? actor, CancellationToken ct)
     {
         if (!await CanQueryAsync(actor, ResourceType.Content, q.SpaceName, q.Subpath ?? "/", ct))
-            return Response.Fail("forbidden", "no read access for subpath");
+            return EmptyQueryResponse();
 
         var pageTask = entries.QueryAsync(q, ct);
         var totalTask = q.RetrieveTotal == false
@@ -331,9 +338,8 @@ public sealed class QueryService(
 
     private async Task<Response> QueryAggregationAsync(Query q, string? actor, string tableName, CancellationToken ct)
     {
-        // Python skips permission checks for attachment queries (see AppendAclFilter).
-        if (tableName != "attachments" && !await CanQueryAsync(actor, ResourceType.Content, q.SpaceName, q.Subpath ?? "/", ct))
-            return Response.Fail("forbidden", "no read access for subpath");
+        if (!await CanQueryAsync(actor, ResourceType.Content, q.SpaceName, q.Subpath ?? "/", ct))
+            return EmptyQueryResponse();
 
         if (q.AggregationData is null)
             return Response.Fail("bad_query", "aggregation_data required for aggregation queries");
@@ -393,32 +399,32 @@ public sealed class QueryService(
             if (sub == "users" || sub.StartsWith("users/", StringComparison.Ordinal))
             {
                 if (!await CanQueryAsync(actor, ResourceType.User, q.SpaceName, q.Subpath ?? "/", ct))
-                    return Response.Fail("forbidden", "no read access for subpath");
+                    return EmptyQueryResponse();
                 total = await users.CountQueryAsync(q, ct);
             }
             else if (sub == "roles" || sub.StartsWith("roles/", StringComparison.Ordinal))
             {
                 if (!await CanQueryAsync(actor, ResourceType.Role, q.SpaceName, q.Subpath ?? "/", ct))
-                    return Response.Fail("forbidden", "no read access for subpath");
+                    return EmptyQueryResponse();
                 total = await access.CountRolesQueryAsync(q, ct);
             }
             else if (sub == "permissions" || sub.StartsWith("permissions/", StringComparison.Ordinal))
             {
                 if (!await CanQueryAsync(actor, ResourceType.Permission, q.SpaceName, q.Subpath ?? "/", ct))
-                    return Response.Fail("forbidden", "no read access for subpath");
+                    return EmptyQueryResponse();
                 total = await access.CountPermissionsQueryAsync(q, ct);
             }
             else
             {
                 if (!await CanQueryAsync(actor, ResourceType.Content, q.SpaceName, q.Subpath ?? "/", ct))
-                    return Response.Fail("forbidden", "no read access for subpath");
+                    return EmptyQueryResponse();
                 total = await entries.CountQueryAsync(q, ct);
             }
         }
         else
         {
             if (!await CanQueryAsync(actor, ResourceType.Content, q.SpaceName, q.Subpath ?? "/", ct))
-                return Response.Fail("forbidden", "no read access for subpath");
+                return EmptyQueryResponse();
             total = await entries.CountQueryAsync(q, ct);
         }
 
