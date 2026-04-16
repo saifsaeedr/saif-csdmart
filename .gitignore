@@ -6,6 +6,11 @@ obj/
 *.nupkg
 **/packages/
 
+# .NET SDK caches (created by container builders with --userns=keep-id)
+.nuget/
+.dotnet/
+.local/
+
 # User-specific
 *.user
 *.suo

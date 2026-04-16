@@ -121,6 +121,7 @@ if [[ "$TARGET" == "el9" || "$TARGET" == "rhel9" ]]; then
     rm -rf bin/Release obj/Release
     $ENGINE exec \
         -e VERSION="$VERSION" \
+        -e HOME=/tmp \
         -w /src \
         "$CONTAINER_NAME" \
         bash /src/dist/build-rpm.sh

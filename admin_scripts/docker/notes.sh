@@ -49,7 +49,7 @@ fi
 
 # 2. Build AOT binary for musl (Alpine)
 echo "Building dmart AOT binary (linux-musl-x64)..."
-podman exec -w /src "$BUILDER" \
+podman exec -e HOME=/tmp -w /src "$BUILDER" \
     dotnet publish dmart.csproj -r linux-musl-x64 \
         -p:PublishAot=true -p:StripSymbols=true -c Release \
         -p:InformationalVersion="$VERSION" \
