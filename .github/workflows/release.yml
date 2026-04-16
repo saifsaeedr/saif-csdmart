@@ -1,6 +1,7 @@
 name: Release
 
 on:
+  workflow_dispatch:
   release:
     types: [created]
 
@@ -33,6 +34,7 @@ jobs:
           VERSION="$VERSION" ./dist/build-rpm.sh srpm
 
       - name: Upload SRPM to release
+        if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -40,6 +42,11 @@ jobs:
           if [ -n "$SRPM" ]; then
             gh release upload "$GITHUB_REF_NAME" "$SRPM" --clobber
           fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: srpm
+          path: dist/out/*.src.rpm
 
   build-fedora-rpm:
     name: Build Fedora RPM
@@ -65,6 +72,7 @@ jobs:
           VERSION="$VERSION" ./dist/build-rpm.sh
 
       - name: Upload Fedora RPM to release
+        if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -72,6 +80,11 @@ jobs:
           if [ -n "$RPM" ]; then
             gh release upload "$GITHUB_REF_NAME" "$RPM" --clobber
           fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fedora-rpm
+          path: dist/out/*.x86_64.rpm
 
   build-el9-rpm:
     name: Build RHEL 9 RPM
@@ -99,6 +112,7 @@ jobs:
           VERSION="$VERSION" ./dist/build-rpm.sh el9
 
       - name: Upload EL9 RPM to release
+        if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -106,6 +120,11 @@ jobs:
           if [ -n "$RPM" ]; then
             gh release upload "$GITHUB_REF_NAME" "$RPM" --clobber
           fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: el9-rpm
+          path: dist/out/*.x86_64.rpm
 
   build-container:
     name: Build & Push Container Image

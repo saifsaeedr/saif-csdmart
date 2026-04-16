@@ -39,3 +39,6 @@ dmart (2)/
 
 # RPM build output
 dist/out/
+
+# Staged binary from container builder
+admin_scripts/docker/dmart-binary

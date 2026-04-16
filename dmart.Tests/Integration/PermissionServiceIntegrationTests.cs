@@ -390,4 +390,147 @@ public class PermissionServiceIntegrationTests : IClassFixture<DmartFactory>
         (await perms.CanUpdateAsync(null, l)).ShouldBeFalse("anonymous update is denied");
         (await perms.CanDeleteAsync(null, l)).ShouldBeFalse("anonymous delete is denied");
     }
+
+    // ==================== folder walk: shortname appended to subpath ====================
+
+    [Fact]
+    public async Task Folder_Walk_Permission_On_Subpath_Grants_Access_To_Folder_Entry_At_Root()
+    {
+        // Python appends the folder shortname to the subpath walk. So a permission
+        // on subpath "users" grants access to the folder entry {subpath="/", shortname="users"}.
+        if (!DmartFactory.HasPg) return;
+        var (perms, users, access) = Resolve();
+
+        var permName = $"itest_perm_fw_{Guid.NewGuid():N}".Substring(0, 24);
+        var roleName = $"itest_role_fw_{Guid.NewGuid():N}".Substring(0, 24);
+        var userName = $"itest_user_fw_{Guid.NewGuid():N}".Substring(0, 24);
+
+        try
+        {
+            // Permission grants view on subpath "users" with resource_type "folder".
+            await access.UpsertPermissionAsync(BuildPerm(
+                permName,
+                "management",
+                new() { ["test"] = new() { "users" } },
+                actions: new() { "view", "query" },
+                resourceTypes: new() { "folder", "user" }));
+
+            await access.UpsertRoleAsync(BuildRole(roleName, permName));
+            await users.UpsertAsync(BuildUser(userName, roleName));
+            await access.InvalidateAllCachesAsync();
+
+            // Folder entry at subpath="/", shortname="users" — the walk appends "users"
+            // to produce ["/", "users"], and "users" matches the permission.
+            var folderLocator = new Locator(ResourceType.Folder, "test", "/", "users");
+            (await perms.CanReadAsync(userName, folderLocator))
+                .ShouldBeTrue("permission on subpath 'users' should grant view of folder 'users' at /");
+
+            // Content inside the users folder — subpath is "users", walk hits directly.
+            var contentLocator = new Locator(ResourceType.User, "test", "/users", "alice");
+            (await perms.CanReadAsync(userName, contentLocator))
+                .ShouldBeTrue("permission on subpath 'users' should grant view of entries under /users");
+
+            // Folder at a different subpath — should be denied.
+            var otherFolder = new Locator(ResourceType.Folder, "test", "/", "roles");
+            (await perms.CanReadAsync(userName, otherFolder))
+                .ShouldBeFalse("no permission on 'roles' — folder should be denied");
+        }
+        finally
+        {
+            await CleanupUserAsync(users, access, userName, roleName, permName);
+        }
+    }
+
+    // ==================== effective_space for space resources ====================
+
+    [Fact]
+    public async Task Space_Resource_Uses_Shortname_As_Effective_Space()
+    {
+        // Python: effective_space = entry_shortname when resource_type == space.
+        // A permission keyed to space "test" should grant query access when checking
+        // a Space resource whose shortname is "test" (even though the locator's
+        // space_name is "management" — the management space is where spaces live).
+        if (!DmartFactory.HasPg) return;
+        var (perms, users, access) = Resolve();
+
+        var permName = $"itest_perm_es_{Guid.NewGuid():N}".Substring(0, 24);
+        var roleName = $"itest_role_es_{Guid.NewGuid():N}".Substring(0, 24);
+        var userName = $"itest_user_es_{Guid.NewGuid():N}".Substring(0, 24);
+
+        try
+        {
+            // Permission grants "query" on any subpath in the "test" space.
+            // Empty resourceTypes means "any resource type" — matching how real
+            // permissions work (they rarely include "space" explicitly).
+            await access.UpsertPermissionAsync(BuildPerm(
+                permName,
+                "management",
+                new() { ["test"] = new() { PermissionService.AllSubpathsMw } },
+                actions: new() { "query", "view" }));
+
+            await access.UpsertRoleAsync(BuildRole(roleName, permName));
+            await users.UpsertAsync(BuildUser(userName, roleName));
+            await access.InvalidateAllCachesAsync();
+
+            // Check: can the user query the Space resource for "test"?
+            // The locator has space_name="management" (spaces live there) but
+            // shortname="test" — effective_space should resolve to "test".
+            var spaceLocator = new Locator(ResourceType.Space, "management", "/", "test");
+            (await perms.CanAsync(userName, "query", spaceLocator))
+                .ShouldBeTrue("permission on space 'test' should grant query on Space resource 'test'");
+
+            // Space "other" should be denied — no permission for it.
+            var otherSpace = new Locator(ResourceType.Space, "management", "/", "other");
+            (await perms.CanAsync(userName, "query", otherSpace))
+                .ShouldBeFalse("no permission for space 'other'");
+        }
+        finally
+        {
+            await CleanupUserAsync(users, access, userName, roleName, permName);
+        }
+    }
+
+    // ==================== HasAnyAccessToSpaceAsync ====================
+
+    [Fact]
+    public async Task HasAnyAccess_Returns_True_For_Space_With_Any_Permission()
+    {
+        if (!DmartFactory.HasPg) return;
+        var (perms, users, access) = Resolve();
+
+        var permName = $"itest_perm_ha_{Guid.NewGuid():N}".Substring(0, 24);
+        var roleName = $"itest_role_ha_{Guid.NewGuid():N}".Substring(0, 24);
+        var userName = $"itest_user_ha_{Guid.NewGuid():N}".Substring(0, 24);
+
+        try
+        {
+            // Permission only covers "test" space with resource_type "content" — no "space".
+            await access.UpsertPermissionAsync(BuildPerm(
+                permName,
+                "management",
+                new() { ["test"] = new() { "data" } },
+                actions: new() { "view" },
+                resourceTypes: new() { "content" }));
+
+            await access.UpsertRoleAsync(BuildRole(roleName, permName));
+            await users.UpsertAsync(BuildUser(userName, roleName));
+            await access.InvalidateAllCachesAsync();
+
+            // HasAnyAccessToSpaceAsync should return true for "test" (has a permission referencing it).
+            (await perms.HasAnyAccessToSpaceAsync(userName, "test"))
+                .ShouldBeTrue("user has content permission in 'test' space");
+
+            // Should return false for unrelated space.
+            (await perms.HasAnyAccessToSpaceAsync(userName, "unrelated"))
+                .ShouldBeFalse("no permission in 'unrelated' space");
+
+            // Anonymous should always return false.
+            (await perms.HasAnyAccessToSpaceAsync(null, "test"))
+                .ShouldBeFalse("anonymous has no space access");
+        }
+        finally
+        {
+            await CleanupUserAsync(users, access, userName, roleName, permName);
+        }
+    }
 }

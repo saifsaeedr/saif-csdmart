@@ -106,23 +106,24 @@ if [[ "$TARGET" == "el9" || "$TARGET" == "rhel9" ]]; then
         echo "Creating $CONTAINER_NAME container (first time — installs SDK)..."
         $ENGINE run -d \
             --name "$CONTAINER_NAME" \
+            --userns=keep-id \
             --network=host \
             -v "${SRCDIR}:/src:Z" \
             -w /src \
             almalinux:9 \
             tail -f /dev/null
-        $ENGINE exec "$CONTAINER_NAME" bash -c '
+        $ENGINE exec --user root "$CONTAINER_NAME" bash -c '
             rpm -Uvh https://packages.microsoft.com/config/rhel/9/packages-microsoft-prod.rpm &&
             dnf install -y dotnet-sdk-10.0 rpm-build clang zlib-devel git --nobest
         '
     fi
     # Clean previous build output to force recompilation against el9 glibc
-    $ENGINE exec -w /src "$CONTAINER_NAME" rm -rf bin/Release obj/Release
+    rm -rf bin/Release obj/Release
     $ENGINE exec \
         -e VERSION="$VERSION" \
         -w /src \
         "$CONTAINER_NAME" \
-        ./dist/build-rpm.sh
+        bash /src/dist/build-rpm.sh
     echo ""
     echo "=== RHEL 9 RPM ==="
     ls -lh dist/out/*el9*.rpm 2>/dev/null || ls -lh dist/out/*.rpm

@@ -1,0 +1,29 @@
+# Runtime-only image — expects pre-built binary from the builder container.
+#
+# Used by notes.sh after building via the persistent builder container.
+# For a self-contained build, use Dockerfile instead.
+
+ARG VERSION=unknown
+
+FROM alpine:edge
+
+RUN apk add --no-cache \
+      postgresql18 postgresql18-contrib \
+      bash curl tzdata icu-libs krb5-libs
+
+COPY --chmod=755 admin_scripts/docker/dmart-binary /usr/bin/dmart
+COPY plugins/ /usr/lib/dmart/plugins/
+COPY cxb/dist/client/ /usr/lib/dmart/cxb/
+COPY --chmod=755 admin_scripts/docker/entrypoint.sh /entrypoint.sh
+
+ENV DOTNET_SYSTEM_NET_SECURITY_DISABLEGSSAPIPAL=true
+LABEL name="dmart" vendor="dmart.cc" version="${VERSION}" license="AGPLv3+" \
+      org.opencontainers.image.name="dmart" \
+      org.opencontainers.image.vendor="dmart.cc" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.description="dmart C# with PostgreSQL — all-in-one Alpine container" \
+      org.opencontainers.image.url="https://dmart.cc" \
+      org.opencontainers.image.source="https://github.com/edraj/csdmart" \
+      org.opencontainers.image.license="AGPLv3+"
+EXPOSE 8000
+CMD ["/entrypoint.sh"]

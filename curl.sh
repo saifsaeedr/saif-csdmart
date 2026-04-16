@@ -1065,6 +1065,134 @@ else
 fi
 
 # ============================================================================
+# 65. Limited-user permission: create user with restricted role
+# ============================================================================
+# Create a permission, role, and user that can only access "test" space content.
+# Then verify spaces listing, root query, folder entry, and counters all work.
+LPERM="curltest_perm_$(date +%s)"
+LROLE="curltest_role_$(date +%s)"
+LUSER="curltest_user_$(date +%s)"
+
+printf '%-45s' "Limited user: setup role+user:" >&2
+# Create permission (covers test space + management/users)
+SETUP1=$(curl -s -H "$CT" -H "$AUTH_HEADER" "$API_URL/managed/request" -d "{
+  \"space_name\":\"management\",\"request_type\":\"create\",\"records\":[{
+    \"resource_type\":\"permission\",\"subpath\":\"/permissions\",\"shortname\":\"$LPERM\",
+    \"attributes\":{
+      \"is_active\":true,
+      \"subpaths\":{\"management\":[\"users\",\"schema\"],\"$SPACE\":[\"__all_subpaths__\"]},
+      \"resource_types\":[\"content\",\"folder\",\"user\",\"schema\"],
+      \"actions\":[\"view\",\"query\"],
+      \"conditions\":[]
+    }
+  }]
+}")
+# Create role
+SETUP2=$(curl -s -H "$CT" -H "$AUTH_HEADER" "$API_URL/managed/request" -d "{
+  \"space_name\":\"management\",\"request_type\":\"create\",\"records\":[{
+    \"resource_type\":\"role\",\"subpath\":\"/roles\",\"shortname\":\"$LROLE\",
+    \"attributes\":{\"is_active\":true,\"permissions\":[\"$LPERM\"]}
+  }]
+}")
+# Create user with that role
+SETUP3=$(curl -s -H "$CT" -H "$AUTH_HEADER" "$API_URL/managed/request" -d "{
+  \"space_name\":\"management\",\"request_type\":\"create\",\"records\":[{
+    \"resource_type\":\"user\",\"subpath\":\"/users\",\"shortname\":\"$LUSER\",
+    \"attributes\":{
+      \"is_active\":true,\"password\":\"Test1234\",
+      \"roles\":[\"$LROLE\"],\"type\":\"web\"
+    }
+  }]
+}")
+if echo "$SETUP3" | jq -e '.status == "success"' > /dev/null 2>&1; then
+    ok
+else
+    nope "setup: $SETUP1 / $SETUP2 / $SETUP3"
+fi
+
+# Reload security data so the new permission/role/user are visible
+curl -s -H "$AUTH_HEADER" "$API_URL/managed/reload-security-data" > /dev/null 2>&1
+
+# Login as limited user
+LTOKEN=$(curl -s -H "$CT" "$API_URL/user/login" -d "{\"shortname\":\"$LUSER\",\"password\":\"Test1234\"}" | jq -r '.records[0].attributes.access_token // empty')
+LAUTH="Authorization: Bearer $LTOKEN"
+
+# 66. Limited user: spaces query returns permitted spaces
+printf '%-45s' "Limited user: sees permitted spaces:" >&2
+if [ -n "$LTOKEN" ]; then
+    LSPACES=$(curl -s -H "$CT" -H "$LAUTH" "$API_URL/managed/query" -d '{"type":"spaces","space_name":"management","subpath":"/","limit":100}')
+    LSPACE_NAMES=$(echo "$LSPACES" | jq -r '.records[]?.shortname // empty' 2>/dev/null)
+    if echo "$LSPACE_NAMES" | grep -q "management"; then
+        ok
+    else
+        nope "spaces: $LSPACES"
+    fi
+else
+    nope "limited user login failed"
+fi
+
+# 67. Limited user: root query on management returns folders
+printf '%-45s' "Limited user: management/ returns folders:" >&2
+if [ -n "$LTOKEN" ]; then
+    LROOT=$(curl -s -H "$CT" -H "$LAUTH" "$API_URL/managed/query" -d '{"type":"search","space_name":"management","subpath":"/","limit":50}')
+    if echo "$LROOT" | jq -e '.status == "success" and (.attributes.total > 0)' > /dev/null 2>&1; then
+        ok
+    else
+        nope "root query: $LROOT"
+    fi
+else
+    nope "limited user login failed"
+fi
+
+# 68. Limited user: folder entry accessible
+printf '%-45s' "Limited user: GET folder/management/users:" >&2
+if [ -n "$LTOKEN" ]; then
+    LFOLDER=$(curl -s -H "$LAUTH" "$API_URL/managed/entry/folder/management/users")
+    if echo "$LFOLDER" | jq -e '.shortname == "users"' > /dev/null 2>&1; then
+        ok
+    else
+        nope "folder entry: $LFOLDER"
+    fi
+else
+    nope "limited user login failed"
+fi
+
+# 69. Limited user: counters query succeeds
+printf '%-45s' "Limited user: counters management/users:" >&2
+if [ -n "$LTOKEN" ]; then
+    LCOUNTERS=$(curl -s -H "$CT" -H "$LAUTH" "$API_URL/managed/query" -d '{"type":"counters","space_name":"management","subpath":"/users","limit":100,"exact_subpath":true,"filter_types":["user"]}')
+    if echo "$LCOUNTERS" | jq -e '.status == "success"' > /dev/null 2>&1; then
+        ok
+    else
+        nope "counters: $LCOUNTERS"
+    fi
+else
+    nope "limited user login failed"
+fi
+
+# 70. Limited user: no access to unpermitted subpath
+printf '%-45s' "Limited user: denied unpermitted folder:" >&2
+if [ -n "$LTOKEN" ]; then
+    LDENIED_CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "$LAUTH" "$API_URL/managed/entry/folder/management/workflows")
+    if [ "$LDENIED_CODE" = "404" ]; then
+        ok
+    else
+        nope "expected 404, got $LDENIED_CODE"
+    fi
+else
+    nope "limited user login failed"
+fi
+
+# Cleanup limited user, role, permission
+curl -s -H "$CT" -H "$AUTH_HEADER" "$API_URL/managed/request" -d "{
+  \"space_name\":\"management\",\"request_type\":\"delete\",\"records\":[
+    {\"resource_type\":\"user\",\"subpath\":\"/users\",\"shortname\":\"$LUSER\"},
+    {\"resource_type\":\"role\",\"subpath\":\"/roles\",\"shortname\":\"$LROLE\"},
+    {\"resource_type\":\"permission\",\"subpath\":\"/permissions\",\"shortname\":\"$LPERM\"}
+  ]
+}" > /dev/null 2>&1
+
+# ============================================================================
 # Summary
 # ============================================================================
 echo "" >&2
