@@ -133,7 +133,7 @@ public static class WebSocketHandler
             var formatted = $"{{\"type\":\"{msgType}\",\"message\":{message}}}";
             var sent = await mgr.SendMessageAsync(user_shortname, formatted);
             return Results.Text($"{{\"status\":\"success\",\"message_sent\":{sent.ToString().ToLower()}}}", "application/json");
-        });
+        }).WithTags("WebSocket");
 
         // POST /broadcast-to-channels — broadcast to subscribed clients.
         // Used by realtime_updates_notifier plugin after CRUD events.
@@ -155,7 +155,7 @@ public static class WebSocketHandler
                 }
             }
             return Results.Text($"{{\"status\":\"success\",\"message_sent\":{sent.ToString().ToLower()}}}", "application/json");
-        });
+        }).WithTags("WebSocket");
 
         // GET /ws-info — list connected clients + channels (admin debugging).
         app.MapGet("/ws-info", (WsConnectionManager mgr) =>
@@ -165,6 +165,6 @@ public static class WebSocketHandler
             return Results.Text(
                 $"{{\"status\":\"success\",\"data\":{{\"connected_clients\":{mgr.ConnectionCount},\"channels\":{{{channelsJson}}}}}}}",
                 "application/json");
-        });
+        }).WithTags("WebSocket");
     }
 }
