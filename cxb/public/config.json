@@ -6,6 +6,5 @@
   "description": "dmart unified data platform",
   "default_language": "en",
   "languages": { "ar": "العربية", "en": "English" },
-  "backend": "",
-  "websocket": ""
+  "backend": ""
 }

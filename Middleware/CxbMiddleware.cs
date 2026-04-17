@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Text;
+using System.Text.Json;
 using Dmart.Config;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Options;
@@ -76,6 +77,9 @@ public static class CxbMiddleware
 
         // Dynamic config.json — MUST be before UseStaticFiles so it intercepts
         // {cxbUrl}/config.json before the embedded/filesystem static file is served.
+        // Rewrites `backend` and `websocket` fields based on the incoming
+        // request's scheme+host so the SPA always targets whatever URL the
+        // browser used to reach dmart (even through reverse proxies).
         app.Use(async (ctx, next) =>
         {
             if (ctx.Request.Path.StartsWithSegments($"{cxbUrl}/config.json"))
@@ -94,12 +98,26 @@ public static class CxbMiddleware
                 {
                     if (!string.IsNullOrEmpty(p) && File.Exists(p))
                     {
+                        var bytes = await File.ReadAllBytesAsync(p);
+                        var rewritten = RewriteCxbConfig(bytes, ctx);
                         ctx.Response.ContentType = "application/json";
                         ctx.Response.Headers["Cache-Control"] = "no-cache";
-                        await ctx.Response.SendFileAsync(p);
+                        ctx.Response.ContentLength = rewritten.Length;
+                        await ctx.Response.Body.WriteAsync(rewritten);
                         return;
                     }
                 }
+            }
+            await next();
+        });
+
+        // Browser auto-requests /favicon.ico at the root — redirect to CXB's.
+        app.Use(async (ctx, next) =>
+        {
+            if (ctx.Request.Path.Equals("/favicon.ico", StringComparison.OrdinalIgnoreCase))
+            {
+                ctx.Response.Redirect($"{cxbUrl}/favicon.ico");
+                return;
             }
             await next();
         });
@@ -145,5 +163,51 @@ public static class CxbMiddleware
         });
 
         return app;
+    }
+
+    // Parse config.json, overwrite `backend` with the request's own origin,
+    // and return the rewritten bytes. Any other fields pass through untouched.
+    // The SPA derives its WebSocket URL (ws(s)://{host}/ws) from `backend` at
+    // the call site — config carries only the single source of truth.
+    private static byte[] RewriteCxbConfig(byte[] source, HttpContext ctx)
+    {
+        var backend = $"{ctx.Request.Scheme}://{ctx.Request.Host.Value}";
+
+        try
+        {
+            using var doc = JsonDocument.Parse(source);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return source;
+
+            using var ms = new MemoryStream();
+            using (var writer = new Utf8JsonWriter(ms))
+            {
+                writer.WriteStartObject();
+                var sawBackend = false;
+                foreach (var prop in doc.RootElement.EnumerateObject())
+                {
+                    if (prop.NameEquals("backend"))
+                    {
+                        writer.WriteString("backend", backend);
+                        sawBackend = true;
+                    }
+                    else if (prop.NameEquals("websocket"))
+                    {
+                        // Legacy field — dropped so stale config.json files on
+                        // disk don't leak obsolete URLs into the SPA.
+                    }
+                    else
+                    {
+                        prop.WriteTo(writer);
+                    }
+                }
+                if (!sawBackend) writer.WriteString("backend", backend);
+                writer.WriteEndObject();
+            }
+            return ms.ToArray();
+        }
+        catch (JsonException)
+        {
+            return source;
+        }
     }
 }

@@ -80,7 +80,11 @@ public sealed class AdminBootstrap(
                     Email = string.IsNullOrWhiteSpace(s.AdminEmail) ? null : s.AdminEmail,
                     Password = string.IsNullOrEmpty(s.AdminPassword) ? null : hasher.Hash(s.AdminPassword),
                     Roles = new() { "super_admin" },
-                    Language = ParseLanguage(s.DefaultLanguage),
+                    // Admin is always bootstrapped as English — there's no user-facing
+                    // localization that consumes User.Language, so a richer default
+                    // would just be cosmetic. Users can change their own language via
+                    // POST /user/profile if they need to.
+                    Language = Language.En,
                     Type = UserType.Web,
                     IsActive = true,
                     IsEmailVerified = true,
@@ -217,14 +221,4 @@ public sealed class AdminBootstrap(
     }
 
     public Task StopAsync(CancellationToken ct) => Task.CompletedTask;
-
-    // Accepts ISO codes ("en"/"ar"/"ku") and dmart's full forms ("english"/"arabic"...).
-    private static Language ParseLanguage(string code) => code?.ToLowerInvariant() switch
-    {
-        "ar" or "arabic"  => Language.Ar,
-        "ku" or "kurdish" => Language.Ku,
-        "fr" or "french"  => Language.Fr,
-        "tr" or "turkish" => Language.Tr,
-        _                 => Language.En,
-    };
 }

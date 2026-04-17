@@ -15,7 +15,7 @@ public class SettingsTests
         s.JwtIssuer.ShouldBe("dmart");
         s.JwtAudience.ShouldBe("dmart");
         s.JwtAccessMinutes.ShouldBeGreaterThan(0);
-        s.DefaultLanguage.ShouldBe("en");
+        s.ManagementSpace.ShouldBe("management");
     }
 
     [Fact]

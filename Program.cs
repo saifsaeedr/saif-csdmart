@@ -146,40 +146,37 @@ switch (subcommand)
 
     case "settings":
     {
-        // Print effective DmartSettings as colorized JSON (masks secrets).
+        // Print effective DmartSettings as colorized JSON. Shares its
+        // projection with GET /info/settings via SettingsSerializer so CLI
+        // and API output stay in sync. Secrets are redacted automatically.
         var cfgBuilder = new ConfigurationBuilder();
-
         if (dotenvPath is not null) cfgBuilder.AddInMemoryCollection(dotenvValues);
         cfgBuilder.AddEnvironmentVariables();
         var cfg = cfgBuilder.Build();
         var s = new DmartSettings();
         cfg.GetSection("Dmart").Bind(s);
+        var dict = SettingsSerializer.ToPublicDictionary(s);
+
         using var ms = new MemoryStream();
         using (var w = new System.Text.Json.Utf8JsonWriter(ms, new System.Text.Json.JsonWriterOptions { Indented = false }))
         {
             w.WriteStartObject();
-            w.WriteString("database_host", s.DatabaseHost);
-            w.WriteNumber("database_port", s.DatabasePort);
-            w.WriteString("database_username", s.DatabaseUsername);
-            w.WriteString("database_name", s.DatabaseName);
-            w.WriteString("listening_host", s.ListeningHost);
-            w.WriteNumber("listening_port", s.ListeningPort);
-            w.WriteString("app_url", s.AppUrl);
-            w.WriteString("management_space", s.ManagementSpace);
-            w.WriteString("spaces_root", s.SpacesRoot);
-            w.WriteString("jwt_issuer", s.JwtIssuer);
-            w.WriteString("jwt_audience", s.JwtAudience);
-            w.WriteNumber("jwt_access_minutes", s.JwtAccessMinutes);
-            w.WriteNumber("jwt_refresh_days", s.JwtRefreshDays);
-            w.WriteString("admin_shortname", "dmart");
-            w.WriteBoolean("is_registrable", s.IsRegistrable);
-            w.WriteNumber("max_failed_login_attempts", s.MaxFailedLoginAttempts);
-            w.WriteNumber("max_sessions_per_user", s.MaxSessionsPerUser);
-            w.WriteNumber("max_query_limit", s.MaxQueryLimit);
-            w.WriteString("log_format", s.LogFormat);
-            w.WriteString("log_level", s.LogLevel);
-            w.WriteString("allowed_cors_origins", s.AllowedCorsOrigins ?? "");
-            w.WriteString("websocket_url", s.WebsocketUrl ?? "");
+            foreach (var (k, v) in dict.OrderBy(kv => kv.Key, StringComparer.Ordinal))
+            {
+                switch (v)
+                {
+                    case bool b:   w.WriteBoolean(k, b); break;
+                    case int i:    w.WriteNumber(k, i); break;
+                    case long l:   w.WriteNumber(k, l); break;
+                    case double d: w.WriteNumber(k, d); break;
+                    case System.Collections.IList list:
+                        w.WriteStartArray(k);
+                        foreach (var item in list) w.WriteStringValue(item?.ToString() ?? "");
+                        w.WriteEndArray();
+                        break;
+                    default: w.WriteString(k, v?.ToString() ?? ""); break;
+                }
+            }
             w.WriteEndObject();
         }
         var json = System.Text.Encoding.UTF8.GetString(ms.ToArray());

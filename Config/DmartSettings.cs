@@ -35,11 +35,13 @@ public sealed class DmartSettings
     public int DatabasePoolTimeout { get; set; } = 30;
     public int DatabasePoolRecycle { get; set; } = 1800;
 
-    public string DefaultLanguage { get; set; } = "en";
-
-    // Admin user "dmart" is created on first startup. Passwordless by default —
-    // use `dmart set_password` to set the password. If AdminPassword is set in
-    // config.env, the bootstrap hashes and stores it (used by tests and CI).
+    // ADMIN_PASSWORD and ADMIN_EMAIL are read ONLY on first startup, by
+    // AdminBootstrap, when the hardcoded `dmart` admin user doesn't already
+    // exist. Subsequent restarts ignore these values — use `dmart
+    // set_password` / the /user/profile endpoint to change them afterwards.
+    // Main intended use: provisioning a known admin in CI / fresh installs.
+    // Leaving AdminPassword unset creates a passwordless admin account
+    // (common for interactive setup where `dmart set_password` follows).
     public string? AdminPassword { get; set; }
     public string? AdminEmail { get; set; }
 
@@ -47,12 +49,6 @@ public sealed class DmartSettings
     // disable periodic recording — the snapshotter still writes one row on
     // startup.
     public int CountHistoryIntervalMinutes { get; set; } = 360;
-
-    // Optional websocket bridge URL. When set, the realtime_updates_notifier
-    // plugin posts broadcast messages to {WebsocketUrl}/broadcast-to-channels
-    // after CRUD events. Leave null to disable realtime broadcasting without
-    // unloading the plugin.
-    public string? WebsocketUrl { get; set; }
 
     // Python-parity runtime knobs. Defaults mirror utils/settings.py so a
     // deployment config.env carrying only the DATABASE_* block still lands

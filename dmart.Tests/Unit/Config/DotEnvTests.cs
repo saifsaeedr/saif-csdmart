@@ -112,10 +112,10 @@ public class DotEnvTests
         try
         {
             // A URL fragment without a preceding space must NOT be treated as a
-            // trailing comment — otherwise realtime_updates_notifier config
-            // breaks when someone sets WEBSOCKET_URL=http://host/#frag.
-            File.WriteAllText(tmp, "WEBSOCKET_URL=http://host/#frag\n");
-            DotEnv.Parse(tmp)["WEBSOCKET_URL"].ShouldBe("http://host/#frag");
+            // trailing comment — URL-valued settings like APP_URL can legally
+            // carry a #fragment.
+            File.WriteAllText(tmp, "APP_URL=http://host/#frag\n");
+            DotEnv.Parse(tmp)["APP_URL"].ShouldBe("http://host/#frag");
         }
         finally { File.Delete(tmp); }
     }
