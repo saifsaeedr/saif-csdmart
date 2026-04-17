@@ -15,7 +15,6 @@ public sealed class DmartSettings
     public string JwtAudience { get; set; } = "dmart";
     public int JwtAccessMinutes { get; set; } = 15;
     public int JwtRefreshDays { get; set; } = 30;
-    public string RedisConnection { get; set; } = "localhost:6379";
 
     // Full Npgsql connection string. If unset, Db builds one from the
     // individual DATABASE_* components below (matching Python's behavior
@@ -37,7 +36,6 @@ public sealed class DmartSettings
     public int DatabasePoolRecycle { get; set; } = 1800;
 
     public string DefaultLanguage { get; set; } = "en";
-    public bool EnableSqlBackend { get; set; }
 
     // Admin user "dmart" is created on first startup. Passwordless by default —
     // use `dmart set_password` to set the password. If AdminPassword is set in
@@ -59,21 +57,38 @@ public sealed class DmartSettings
     // Python-parity runtime knobs. Defaults mirror utils/settings.py so a
     // deployment config.env carrying only the DATABASE_* block still lands
     // on the same behavior as Python.
-    public string AppName { get; set; } = "dmart";
     public string AppUrl { get; set; } = "";
     public string ListeningHost { get; set; } = "0.0.0.0";
     public int ListeningPort { get; set; } = 8282;
     public string ManagementSpace { get; set; } = "management";
-    public string UsersSubpath { get; set; } = "users";
     public int MaxSessionsPerUser { get; set; } = 5;
-    public int LockPeriod { get; set; } = 300;
     public int MaxFailedLoginAttempts { get; set; } = 5;
     public int MaxQueryLimit { get; set; } = 10000;
-    public int OtpTokenTtl { get; set; } = 60 * 5;
-    public int SessionInactivityTtl { get; set; }
     public int UrlShorterExpires { get; set; } = 60 * 60;
     public bool IsRegistrable { get; set; } = true;
+
+    // When true, POST /user/create requires a valid email_otp / msisdn_otp
+    // attribute that was previously obtained via /user/otp-request. When
+    // false, registration proceeds without OTP verification. Mirrors
+    // Python's `is_otp_for_create_required`.
     public bool IsOtpForCreateRequired { get; set; } = true;
+
+    // Global TTL (seconds) for one-time passwords. OtpRepository enforces
+    // this when verifying a code — entries older than OtpTokenTtl seconds
+    // are treated as expired regardless of the per-endpoint "expires" value
+    // that was stored at creation time. Mirrors Python's `otp_token_ttl`.
+    public int OtpTokenTtl { get; set; } = 60 * 5;
+
+    // If > 0, sessions that haven't been touched for this many seconds are
+    // rejected at JWT validation time (and the session row is deleted). 0
+    // disables the check. Mirrors Python's `session_inactivity_ttl`.
+    public int SessionInactivityTtl { get; set; }
+
+    // How long (seconds) a PUT /managed/lock stays held before any user can
+    // take it. Prevents orphaned locks when a client crashes without calling
+    // DELETE /managed/lock. Mirrors Python's `lock_period`.
+    public int LockPeriod { get; set; } = 300;
+
     public string MockOtpCode { get; set; } = "123456";
     public bool MockSmtpApi { get; set; }
     public bool MockSmppApi { get; set; }

@@ -18,7 +18,11 @@ public static class RegistrationHandler
             var msisdn = body.TryGetValue("msisdn", out var m) ? m?.ToString() : null;
             var password = body.TryGetValue("password", out var p) ? p?.ToString() : null;
             var language = body.TryGetValue("language", out var l) ? l?.ToString() : null;
-            var result = await svc.CreateAsync(shortname, email, msisdn, password, language, ct);
+            // Optional OTP fields — enforced only when IsOtpForCreateRequired=true.
+            // The caller obtains these via POST /user/otp-request before registering.
+            var emailOtp = body.TryGetValue("email_otp", out var eo) ? eo?.ToString() : null;
+            var msisdnOtp = body.TryGetValue("msisdn_otp", out var mo) ? mo?.ToString() : null;
+            var result = await svc.CreateAsync(shortname, email, msisdn, password, language, emailOtp, msisdnOtp, ct);
             return result.IsOk
                 ? Response.Ok(attributes: new() { ["uuid"] = result.Value!.Uuid, ["shortname"] = result.Value.Shortname })
                 : Response.Fail(result.ErrorCode!, result.ErrorMessage!);

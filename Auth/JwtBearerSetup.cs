@@ -65,6 +65,29 @@ public static class JwtBearerSetup
                         }
                         return Task.CompletedTask;
                     },
+                    // After a token's signature + lifetime have passed, also
+                    // enforce session inactivity if configured. If the session
+                    // is older than settings.SessionInactivityTtl, the row is
+                    // evicted and authentication fails.
+                    OnTokenValidated = async ctx =>
+                    {
+                        var settings = ctx.HttpContext.RequestServices
+                            .GetRequiredService<IOptions<DmartSettings>>().Value;
+                        if (settings.SessionInactivityTtl <= 0) return;
+                        // .NET 9's JsonWebTokenHandler exposes the raw token string
+                        // on JsonWebToken.EncodedToken; older code paths use
+                        // JwtSecurityToken.RawData. Try both.
+                        var raw = ctx.SecurityToken is Microsoft.IdentityModel.JsonWebTokens.JsonWebToken jwt
+                            ? jwt.EncodedToken
+                            : (ctx.SecurityToken as System.IdentityModel.Tokens.Jwt.JwtSecurityToken)?.RawData;
+                        if (string.IsNullOrEmpty(raw)) return;
+                        var users = ctx.HttpContext.RequestServices
+                            .GetRequiredService<DataAdapters.Sql.UserRepository>();
+                        var touched = await users.TouchSessionAsync(
+                            raw, settings.SessionInactivityTtl, ctx.HttpContext.RequestAborted);
+                        if (!touched)
+                            ctx.Fail(new SecurityTokenException("session expired due to inactivity"));
+                    },
                     // Return a JSON error body matching Python's api.Response shape:
                     // {"status":"failed","error":{"type":"jwtauth","code":N,"message":"..."}}
                     OnChallenge = async ctx =>

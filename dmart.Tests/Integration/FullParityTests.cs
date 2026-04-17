@@ -380,4 +380,102 @@ public class FullParityTests : IClassFixture<DmartFactory>
             await users.DeleteAsync(sn.ToString()!);
         }
     }
+
+    // ==================== is_otp_for_create_required enforcement ====================
+
+    [Fact]
+    public async Task Create_User_With_Email_And_No_Otp_Is_Rejected_When_Required()
+    {
+        // Default config has IsOtpForCreateRequired=true. Supplying email
+        // without email_otp must produce a structured bad_request.
+        if (!DmartFactory.HasPg) return;
+        var client = _factory.CreateClient();
+        var shortname = "otpreq_" + Guid.NewGuid().ToString("N")[..6];
+        var body = "{\"shortname\":\"" + shortname + "\",\"email\":\"a@b.c\",\"password\":\"testtest1234\"}";
+        var resp = await client.PostAsync("/user/create",
+            new StringContent(body, Encoding.UTF8, "application/json"));
+        var result = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
+        result!.Status.ShouldBe(Status.Failed);
+        result.Error!.Message.ShouldContain("email_otp");
+    }
+
+    [Fact]
+    public async Task Create_User_With_Valid_Email_Otp_Succeeds()
+    {
+        // Pre-store an OTP against the email, then /user/create consumes it.
+        if (!DmartFactory.HasPg) return;
+        var otpRepo = _factory.Services.GetRequiredService<OtpRepository>();
+        var shortname = "otpok_" + Guid.NewGuid().ToString("N")[..6];
+        var email = shortname + "@example.test";
+        var code = "654321";
+        await otpRepo.StoreAsync(email, code, DateTime.UtcNow.AddMinutes(5));
+
+        var client = _factory.CreateClient();
+        var body = "{\"shortname\":\"" + shortname + "\",\"email\":\"" + email + "\",\"password\":\"testtest1234\",\"email_otp\":\"" + code + "\"}";
+        var resp = await client.PostAsync("/user/create",
+            new StringContent(body, Encoding.UTF8, "application/json"));
+        var result = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
+        result!.Status.ShouldBe(Status.Success);
+
+        // Cleanup
+        var users = _factory.Services.GetRequiredService<UserRepository>();
+        await users.DeleteAsync(shortname);
+    }
+
+    // ==================== session_inactivity_ttl enforcement ====================
+
+    [Fact]
+    public async Task Session_Expires_After_Inactivity_Ttl()
+    {
+        // With SessionInactivityTtl set to 1 second, a login-issued token is
+        // accepted, then rejected after the session row ages past 1 second.
+        if (!DmartFactory.HasPg) return;
+        var factory = _factory.WithWebHostBuilder(b => b.ConfigureServices(svcs =>
+        {
+            svcs.Configure<Dmart.Config.DmartSettings>(s => s.SessionInactivityTtl = 1);
+        }));
+        var client = factory.CreateClient();
+        var login = new UserLoginRequest(_factory.AdminShortname, null, null, _factory.AdminPassword, null);
+        var resp = await client.PostAsJsonAsync("/user/login", login, DmartJsonContext.Default.UserLoginRequest);
+        var raw = await resp.Content.ReadAsStringAsync();
+        var body = JsonSerializer.Deserialize(raw, DmartJsonContext.Default.Response);
+        var token = body?.Records?.FirstOrDefault()?.Attributes?["access_token"]?.ToString()
+            ?? throw new InvalidOperationException("login failed");
+        client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+
+        // Works right after login — session is fresh.
+        var ok = await client.GetAsync("/info/manifest");
+        ok.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        // Sleep past the 1-second TTL without touching the session.
+        // DB sessions table won't be updated because we're making no requests.
+        await Task.Delay(2000);
+
+        // Now the session is stale → TouchSessionAsync evicts it, OnTokenValidated
+        // fails the auth context, and JwtBearer returns 401.
+        var expired = await client.GetAsync("/info/manifest");
+        expired.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
+    public async Task Create_User_With_Email_Succeeds_When_Otp_Check_Disabled()
+    {
+        // With IsOtpForCreateRequired=false, registration must proceed
+        // without any OTP present.
+        if (!DmartFactory.HasPg) return;
+        var factory = _factory.WithWebHostBuilder(b => b.ConfigureServices(svcs =>
+        {
+            svcs.Configure<Dmart.Config.DmartSettings>(s => s.IsOtpForCreateRequired = false);
+        }));
+        var client = factory.CreateClient();
+        var shortname = "otpoff_" + Guid.NewGuid().ToString("N")[..6];
+        var body = "{\"shortname\":\"" + shortname + "\",\"email\":\"" + shortname + "@x.y\",\"password\":\"testtest1234\"}";
+        var resp = await client.PostAsync("/user/create",
+            new StringContent(body, Encoding.UTF8, "application/json"));
+        var result = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
+        result!.Status.ShouldBe(Status.Success);
+
+        var users = factory.Services.GetRequiredService<UserRepository>();
+        await users.DeleteAsync(shortname);
+    }
 }

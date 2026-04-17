@@ -209,6 +209,34 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher)
         return await cmd.ExecuteScalarAsync(ct) is not null;
     }
 
+    // Atomic session activity check + touch. When SessionInactivityTtl > 0:
+    //   * UPDATE bumps the session's timestamp to NOW() iff it exists AND is
+    //     not older than `inactivityTtlSeconds`. Returns 1 row on success.
+    //   * If the UPDATE affected 0 rows, the session is either missing OR
+    //     stale — we then DELETE any stale row so the caller can't continue
+    //     under an expired token.
+    // Returns true if the session is live (and was just touched), false if
+    // it was missing or evicted. Called from the JwtBearer OnTokenValidated
+    // hook so every authenticated request resets the inactivity clock.
+    public async Task<bool> TouchSessionAsync(string token, int inactivityTtlSeconds, CancellationToken ct = default)
+    {
+        await using var conn = await db.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand("""
+            UPDATE sessions SET timestamp = NOW()
+            WHERE token = $1
+              AND timestamp >= NOW() - ($2 || ' seconds')::interval
+            """, conn);
+        cmd.Parameters.Add(new() { Value = token });
+        cmd.Parameters.Add(new() { Value = inactivityTtlSeconds.ToString() });
+        var touched = await cmd.ExecuteNonQueryAsync(ct);
+        if (touched > 0) return true;
+        // Not touched — evict any stale row so SELECTs see the session gone.
+        await using var purge = new NpgsqlCommand("DELETE FROM sessions WHERE token = $1", conn);
+        purge.Parameters.Add(new() { Value = token });
+        await purge.ExecuteNonQueryAsync(ct);
+        return false;
+    }
+
     public async Task DeleteSessionAsync(string token, CancellationToken ct = default)
     {
         await using var conn = await db.OpenAsync(ct);

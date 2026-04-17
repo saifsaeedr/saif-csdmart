@@ -146,7 +146,6 @@ switch (subcommand)
             w.WriteString("database_name", s.DatabaseName);
             w.WriteString("listening_host", s.ListeningHost);
             w.WriteNumber("listening_port", s.ListeningPort);
-            w.WriteString("app_name", s.AppName);
             w.WriteString("app_url", s.AppUrl);
             w.WriteString("management_space", s.ManagementSpace);
             w.WriteString("spaces_root", s.SpacesRoot);
@@ -159,7 +158,6 @@ switch (subcommand)
             w.WriteNumber("max_failed_login_attempts", s.MaxFailedLoginAttempts);
             w.WriteNumber("max_sessions_per_user", s.MaxSessionsPerUser);
             w.WriteNumber("max_query_limit", s.MaxQueryLimit);
-            w.WriteNumber("lock_period", s.LockPeriod);
             w.WriteString("log_format", s.LogFormat);
             w.WriteString("log_level", s.LogLevel);
             w.WriteString("allowed_cors_origins", s.AllowedCorsOrigins ?? "");

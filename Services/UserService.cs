@@ -24,7 +24,10 @@ public sealed class UserService(
     public Task<User?> GetByShortnameAsync(string shortname, CancellationToken ct = default)
         => users.GetByShortnameAsync(shortname, ct);
 
-    public async Task<Result<User>> CreateAsync(string shortname, string? email, string? msisdn, string? password, string? language, CancellationToken ct = default)
+    public async Task<Result<User>> CreateAsync(
+        string shortname, string? email, string? msisdn, string? password, string? language,
+        string? emailOtp = null, string? msisdnOtp = null,
+        CancellationToken ct = default)
     {
         // Python: check is_registrable setting before allowing self-registration.
         if (!settings.Value.IsRegistrable)
@@ -34,6 +37,27 @@ public sealed class UserService(
             return Result<User>.Fail("invalid_shortname", "shortname required");
         if (await users.ExistsAsync(shortname, email, msisdn, ct))
             return Result<User>.Fail("conflict", "user already exists");
+
+        // Python: is_otp_for_create_required — every supplied channel (email or
+        // msisdn) must carry an OTP that was issued via /user/otp-request and
+        // still valid. The OTP is consumed on success so it can't be reused.
+        if (settings.Value.IsOtpForCreateRequired)
+        {
+            if (!string.IsNullOrEmpty(email))
+            {
+                if (string.IsNullOrEmpty(emailOtp))
+                    return Result<User>.Fail("bad_request", "email_otp is required");
+                if (!await otp.VerifyAndConsumeAsync(email, emailOtp, ct))
+                    return Result<User>.Fail("invalid_otp", "email_otp is invalid or expired");
+            }
+            if (!string.IsNullOrEmpty(msisdn))
+            {
+                if (string.IsNullOrEmpty(msisdnOtp))
+                    return Result<User>.Fail("bad_request", "msisdn_otp is required");
+                if (!await otp.VerifyAndConsumeAsync(msisdn, msisdnOtp, ct))
+                    return Result<User>.Fail("invalid_otp", "msisdn_otp is invalid or expired");
+            }
+        }
 
         var user = new User
         {
@@ -48,6 +72,10 @@ public sealed class UserService(
             Language = ParseLanguage(language),
             Type = UserType.Web,
             IsActive = true,
+            // Mark channels as verified when they were proven via a valid OTP
+            // during registration — saves the user a separate /otp-confirm round.
+            IsEmailVerified = !string.IsNullOrEmpty(email) && settings.Value.IsOtpForCreateRequired,
+            IsMsisdnVerified = !string.IsNullOrEmpty(msisdn) && settings.Value.IsOtpForCreateRequired,
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow,
         };

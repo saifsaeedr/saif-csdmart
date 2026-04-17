@@ -5,6 +5,7 @@ using System.Text.Json;
 using Dmart.Models.Api;
 using Dmart.Models.Enums;
 using Dmart.Models.Json;
+using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
 using Xunit;
 
@@ -43,6 +44,72 @@ public class LockDbTests : IClassFixture<DmartFactory>
 
         var unlockResp = await client.DeleteAsync($"/managed/lock/{space}/{subpath}/{shortname}");
         unlockResp.StatusCode.ShouldBe(HttpStatusCode.OK);
+    }
+
+    [Fact]
+    public async Task Lock_Response_Includes_LockPeriod()
+    {
+        // /managed/lock must echo the configured lock_period so clients can
+        // schedule a refresh before the lock auto-expires. Mirrors Python.
+        if (!DmartFactory.HasPg) return;
+
+        var client = _factory.CreateClient();
+        var token = await GetTokenAsync(client);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var space = "test";
+        var subpath = "lock-period-test";
+        var shortname = $"lockp-{Guid.NewGuid():N}".Substring(0, 14);
+
+        try
+        {
+            var lockResp = await client.PutAsync($"/managed/lock/content/{space}/{subpath}/{shortname}", null);
+            lockResp.StatusCode.ShouldBe(HttpStatusCode.OK);
+            var body = await lockResp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
+            body!.Status.ShouldBe(Status.Success);
+            body.Attributes.ShouldNotBeNull();
+            body.Attributes!.ShouldContainKey("lock_period");
+            // Default is 300 seconds — the value must be an integer > 0.
+            var periodObj = body.Attributes["lock_period"];
+            var period = periodObj is JsonElement je ? je.GetInt32() : Convert.ToInt32(periodObj);
+            period.ShouldBeGreaterThan(0);
+        }
+        finally
+        {
+            await client.DeleteAsync($"/managed/lock/{space}/{subpath}/{shortname}");
+        }
+    }
+
+    [Fact]
+    public async Task Lock_Expires_After_Very_Short_Period()
+    {
+        // With LockPeriod overridden to 1 second, a lock acquired by user A
+        // is treated as absent 2 seconds later, so user B (or A again) can
+        // take it. Exercises the inline TTL check in LockRepository.
+        if (!DmartFactory.HasPg) return;
+
+        var factory = _factory.WithWebHostBuilder(b => b.ConfigureServices(svcs =>
+        {
+            svcs.Configure<Dmart.Config.DmartSettings>(s => s.LockPeriod = 1);
+        }));
+        var client = factory.CreateClient();
+        var token = await GetTokenAsync(client);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var space = "test";
+        var subpath = "lock-expiry-test";
+        var shortname = $"locke-{Guid.NewGuid():N}".Substring(0, 14);
+
+        var first = await client.PutAsync($"/managed/lock/content/{space}/{subpath}/{shortname}", null);
+        first.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        // Wait past the 1-second TTL.
+        await Task.Delay(1500);
+
+        var refreshed = await client.PutAsync($"/managed/lock/content/{space}/{subpath}/{shortname}", null);
+        refreshed.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        await client.DeleteAsync($"/managed/lock/{space}/{subpath}/{shortname}");
     }
 
     private async Task<string> GetTokenAsync(HttpClient client)
