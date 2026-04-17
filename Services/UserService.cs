@@ -17,7 +17,9 @@ public sealed class UserService(
     JwtIssuer jwt,
     IOptions<DmartSettings> settings)
 {
-    private const string MgmtSpace = "management";
+    // Management space name — comes from DmartSettings.ManagementSpace so the
+    // caller can rename it uniformly via config. Default is "management".
+    private string MgmtSpace => settings.Value.ManagementSpace;
 
     public Task<User?> GetByShortnameAsync(string shortname, CancellationToken ct = default)
         => users.GetByShortnameAsync(shortname, ct);

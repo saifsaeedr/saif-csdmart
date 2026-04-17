@@ -13,14 +13,16 @@ public static class AttachHandler
     {
         g.MapPost("/resource_with_payload",
             async Task<Response> (HttpRequest req, EntryService entries,
-                                  AttachmentRepository attachments, CancellationToken ct) =>
-                await ResourceWithPayloadHandler.HandleAsync(req, entries, attachments, "anonymous", ct))
+                                  AttachmentRepository attachments,
+                                  ILogger<ResourceWithPayloadMarker> log, CancellationToken ct) =>
+                await ResourceWithPayloadHandler.HandleAsync(req, entries, attachments, "anonymous", log, ct))
           .DisableAntiforgery();
 
         g.MapPost("/attach/{space_name}",
             async Task<Response> (string space_name, HttpRequest req, EntryService entries,
-                                  AttachmentRepository attachments, CancellationToken ct) =>
-                await ResourceWithPayloadHandler.HandleAsync(req, entries, attachments, "anonymous", ct))
+                                  AttachmentRepository attachments,
+                                  ILogger<ResourceWithPayloadMarker> log, CancellationToken ct) =>
+                await ResourceWithPayloadHandler.HandleAsync(req, entries, attachments, "anonymous", log, ct))
           .DisableAntiforgery();
     }
 }

@@ -950,8 +950,8 @@ fi
 # ============================================================================
 # 55. WebSocket /ws-info endpoint
 # ============================================================================
-printf '%-45s' "WebSocket /ws-info:" >&2
-WS_INFO=$(curl -s "$API_URL/ws-info")
+printf '%-45s' "WebSocket /ws-info (authenticated):" >&2
+WS_INFO=$(curl -s -H "$AUTH_HEADER" "$API_URL/ws-info")
 if echo "$WS_INFO" | grep -q 'connected_clients'; then
     ok
 else
@@ -959,10 +959,21 @@ else
 fi
 
 # ============================================================================
-# 56. WebSocket /broadcast-to-channels endpoint
+# 55b. WebSocket /ws-info requires authorization
+# ============================================================================
+printf '%-45s' "WebSocket /ws-info rejects anon:" >&2
+WS_INFO_ANON_CODE=$(curl -s -o /dev/null -w '%{http_code}' "$API_URL/ws-info")
+if [ "$WS_INFO_ANON_CODE" = "401" ]; then
+    ok
+else
+    nope "expected 401, got $WS_INFO_ANON_CODE"
+fi
+
+# ============================================================================
+# 56. WebSocket /broadcast-to-channels endpoint (authenticated)
 # ============================================================================
 printf '%-45s' "WebSocket broadcast endpoint:" >&2
-BC_RESP=$(curl -s -H "$CT" -d '{"type":"test","message":{"x":1},"channels":["test:/:__ALL__:__ALL__:__ALL__"]}' "$API_URL/broadcast-to-channels")
+BC_RESP=$(curl -s -H "$CT" -H "$AUTH_HEADER" -d '{"type":"test","message":{"x":1},"channels":["test:/:__ALL__:__ALL__:__ALL__"]}' "$API_URL/broadcast-to-channels")
 if echo "$BC_RESP" | grep -q 'success'; then
     ok
 else
@@ -970,14 +981,26 @@ else
 fi
 
 # ============================================================================
-# 57. WebSocket /send-message endpoint
+# 57. WebSocket /send-message endpoint (authenticated)
 # ============================================================================
 printf '%-45s' "WebSocket send-message endpoint:" >&2
-SM_RESP=$(curl -s -H "$CT" -d '{"type":"test","message":{"x":1}}' "$API_URL/send-message/nobody")
+SM_RESP=$(curl -s -H "$CT" -H "$AUTH_HEADER" -d '{"type":"test","message":{"x":1}}' "$API_URL/send-message/nobody")
 if echo "$SM_RESP" | grep -q 'message_sent'; then
     ok
 else
     nope "$SM_RESP"
+fi
+
+# ============================================================================
+# 57b. WebSocket /send-message rejects JSON injection in msgType
+# ============================================================================
+printf '%-45s' "WebSocket msgType is JSON-escaped:" >&2
+# Attacker puts a quote inside the type field — must NOT break the response JSON.
+INJ_RESP=$(curl -s -H "$CT" -H "$AUTH_HEADER" -d '{"type":"evil\",\"injected\":\"x","message":{}}' "$API_URL/send-message/nobody")
+if echo "$INJ_RESP" | jq -e '.status == "success"' > /dev/null 2>&1; then
+    ok
+else
+    nope "injection broke response JSON: $INJ_RESP"
 fi
 
 # ============================================================================

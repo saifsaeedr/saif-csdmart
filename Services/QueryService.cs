@@ -111,15 +111,11 @@ public sealed class QueryService(
                 $"spaces query requires space_name=\"{managementSpace}\" and subpath=\"/\"");
 
         var all = await spaces.ListAsync(ct);
-        var visible = new List<Space>(all.Count);
-        foreach (var space in all)
-        {
-            // A user can see a space if they have ANY permission referencing it —
-            // not just resource_type=space. Most permissions list content/folder/etc.
-            // but not "space", yet the user should still see the space in the list.
-            if (await perms.HasAnyAccessToSpaceAsync(actor, space.Shortname, ct))
-                visible.Add(space);
-        }
+        // Batched: walk the user's permissions ONCE and intersect with the space
+        // list, rather than N separate permission lookups (the old N+1 pattern).
+        var allowed = await perms.GetAccessibleSpacesAsync(
+            actor, all.Select(s => s.Shortname), ct);
+        var visible = all.Where(s => allowed.Contains(s.Shortname)).ToList();
 
         var total = visible.Count;
         var page = visible.Skip(Math.Max(0, q.Offset)).Take(Math.Max(1, q.Limit)).ToList();
@@ -302,29 +298,38 @@ public sealed class QueryService(
             .ToList();
 
         // If retrieve_attachments, fetch and attach for each record.
+        // Process in fixed-size batches rather than creating all N tasks upfront
+        // so large result sets (e.g. 10k records at MaxQueryLimit) don't allocate
+        // N pending Task objects — each batch of 5 runs concurrently then the
+        // next batch starts. This also keeps DB connection-pool pressure bounded.
         if (q.RetrieveAttachments && records.Count > 0)
         {
-            // Limit concurrency to avoid exhausting the DB connection pool
-            var semaphore = new SemaphoreSlim(5);
-            var tasks = records.Select(async (rec, _) =>
+            const int BatchSize = 5;
+            for (var offset = 0; offset < records.Count; offset += BatchSize)
             {
-                await semaphore.WaitAsync(ct);
-                try { return await attachments.ListForParentAsync(q.SpaceName, rec.Subpath, rec.Shortname, ct); }
-                finally { semaphore.Release(); }
-            }).ToArray();
-            var allAttachments = await Task.WhenAll(tasks);
-            for (var i = 0; i < records.Count; i++)
-            {
-                if (allAttachments[i].Count > 0)
+                var end = Math.Min(offset + BatchSize, records.Count);
+                var batchTasks = new Task<List<Models.Core.Attachment>>[end - offset];
+                for (var j = offset; j < end; j++)
                 {
-                    records[i] = records[i] with
+                    var rec = records[j];
+                    batchTasks[j - offset] = attachments.ListForParentAsync(
+                        q.SpaceName, rec.Subpath, rec.Shortname, ct);
+                }
+                var batchResults = await Task.WhenAll(batchTasks);
+                for (var j = offset; j < end; j++)
+                {
+                    var result = batchResults[j - offset];
+                    if (result.Count > 0)
                     {
-                        Attachments = allAttachments[i]
-                            .GroupBy(a => DataAdapters.Sql.JsonbHelpers.EnumMember(a.ResourceType))
-                            .ToDictionary(
-                                g => g.Key,
-                                g => g.Select(a => AttachmentMapper.ToEntryRecord(a)).ToList())
-                    };
+                        records[j] = records[j] with
+                        {
+                            Attachments = result
+                                .GroupBy(a => DataAdapters.Sql.JsonbHelpers.EnumMember(a.ResourceType))
+                                .ToDictionary(
+                                    g => g.Key,
+                                    g => g.Select(a => AttachmentMapper.ToEntryRecord(a)).ToList())
+                        };
+                    }
                 }
             }
         }

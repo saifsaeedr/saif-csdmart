@@ -74,7 +74,7 @@ public static class AuthHandler
 
             return Results.Json(Response.Ok(new[] { loginRecord }),
                 DmartJsonContext.Default.Response);
-        });
+        }).RequireRateLimiting("auth-by-ip");
 
         g.MapPost("/logout", async Task<Response> (HttpContext http, UserService svc, CancellationToken ct) =>
         {

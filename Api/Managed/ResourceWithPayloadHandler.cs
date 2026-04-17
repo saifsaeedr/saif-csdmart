@@ -9,6 +9,10 @@ using Dmart.Services;
 
 namespace Dmart.Api.Managed;
 
+// Marker used as the TCategory for ILogger<T> on this handler. The handler itself
+// is a static class, so it can't be used directly as a generic type argument.
+public sealed class ResourceWithPayloadMarker { }
+
 // Mirrors dmart's POST /managed/resource_with_payload (api/managed/router.py +
 // api/managed/utils.py::create_or_update_resource_with_payload_handler).
 //
@@ -33,9 +37,10 @@ public static class ResourceWithPayloadHandler
     {
         g.MapPost("/resource_with_payload",
             async Task<Response> (HttpRequest req, EntryService entries,
-                                  AttachmentRepository attachments, HttpContext http,
+                                  AttachmentRepository attachments,
+                                  ILogger<ResourceWithPayloadMarker> log, HttpContext http,
                                   CancellationToken ct) =>
-                await HandleAsync(req, entries, attachments, http.User.Identity?.Name ?? "anonymous", ct))
+                await HandleAsync(req, entries, attachments, http.User.Identity?.Name ?? "anonymous", log, ct))
           .DisableAntiforgery();
 
         g.MapPost("/resources_from_csv/{resource_type}/{space}/{subpath}/{schema}",
@@ -62,7 +67,7 @@ public static class ResourceWithPayloadHandler
 
     public static async Task<Response> HandleAsync(
         HttpRequest req, EntryService entries, AttachmentRepository attachments,
-        string actor, CancellationToken ct)
+        string actor, ILogger log, CancellationToken ct)
     {
         if (!req.HasFormContentType)
             return Response.Fail(InternalErrorCode.INVALID_DATA, "expected multipart/form-data", "request");
@@ -120,7 +125,7 @@ public static class ResourceWithPayloadHandler
 
         if (IsAttachmentResourceType(record.ResourceType))
             return await StoreAttachmentAsync(record, spaceName, actor, fileBytes, ext,
-                resourceContentType, checksum, sha, schemaShortname, attachments, ct);
+                resourceContentType, checksum, sha, schemaShortname, attachments, log, ct);
 
         return await StoreEntryAsync(record, spaceName, actor, fileBytes, ext,
             resourceContentType, checksum, sha, schemaShortname, entries, ct);
@@ -129,7 +134,7 @@ public static class ResourceWithPayloadHandler
     private static async Task<Response> StoreAttachmentAsync(
         Record record, string spaceName, string actor, byte[] fileBytes, string ext,
         ContentType contentType, string checksum, string? clientChecksum, string? schemaShortname,
-        AttachmentRepository attachments, CancellationToken ct)
+        AttachmentRepository attachments, ILogger log, CancellationToken ct)
     {
         var bodyRef = $"{record.Shortname}.{ext}";
         var attachment = new Attachment
@@ -160,8 +165,10 @@ public static class ResourceWithPayloadHandler
         {
             await attachments.UpsertAsync(attachment, ct);
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            log.LogError(ex, "failed to save attachment {Space}/{Subpath}/{Shortname}",
+                spaceName, record.Subpath, record.Shortname);
             return Response.Fail(InternalErrorCode.OBJECT_NOT_SAVED,
                 "failed to save attachment", "attachment");
         }

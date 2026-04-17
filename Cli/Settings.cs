@@ -45,7 +45,17 @@ public sealed class CliSettings
         // Env vars override ini
         if (Environment.GetEnvironmentVariable("DMART_URL") is { Length: > 0 } url) s.Url = url;
         if (Environment.GetEnvironmentVariable("DMART_SHORTNAME") is { Length: > 0 } sn) s.Shortname = sn;
-        if (Environment.GetEnvironmentVariable("DMART_PASSWORD") is { Length: > 0 } pw) s.Password = pw;
+        if (Environment.GetEnvironmentVariable("DMART_PASSWORD") is { Length: > 0 } pw)
+        {
+            s.Password = pw;
+            // Passwords in env vars are visible in `ps`, shell history, and
+            // /proc/{pid}/environ on multi-user systems. Warn interactively —
+            // scripts running in CI will see the warning in stderr but proceed.
+            if (Environment.UserInteractive && !Console.IsInputRedirected)
+                Console.Error.WriteLine(
+                    "warning: DMART_PASSWORD is set in the environment. " +
+                    "Prefer ~/.dmart/cli.ini with 0600 permissions for interactive use.");
+        }
 
         return s;
     }

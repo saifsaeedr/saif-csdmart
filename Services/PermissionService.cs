@@ -190,6 +190,38 @@ public sealed class PermissionService(UserRepository users, AccessRepository acc
         return false;
     }
 
+    // Batched version of HasAnyAccessToSpaceAsync for listing endpoints. Walks the
+    // user's permissions once and intersects with the candidate space names,
+    // instead of N calls that each re-iterate the permissions (the original N+1).
+    public async Task<HashSet<string>> GetAccessibleSpacesAsync(
+        string? actorShortname, IEnumerable<string> candidates, CancellationToken ct = default)
+    {
+        var result = new HashSet<string>(StringComparer.Ordinal);
+        if (actorShortname is null) return result;
+        var (user, perms) = await ResolvePermissionsAsync(actorShortname, ct);
+        if (user is null || !user.IsActive) return result;
+
+        // If any permission carries __all_spaces__, every candidate is visible.
+        var hasGlobal = perms.Any(p => p.IsActive && p.Subpaths.ContainsKey(AllSpacesMw));
+        if (hasGlobal)
+        {
+            foreach (var c in candidates) result.Add(c);
+            return result;
+        }
+
+        // Otherwise collect the explicit space-name keys from active permissions
+        // and intersect with the candidate list.
+        var named = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var p in perms)
+        {
+            if (!p.IsActive) continue;
+            foreach (var key in p.Subpaths.Keys) named.Add(key);
+        }
+        foreach (var c in candidates)
+            if (named.Contains(c)) result.Add(c);
+        return result;
+    }
+
     // ----- back-compat convenience overloads (keep old call sites compiling) -----
 
     public Task<bool> CanReadAsync(string? actor, Locator l, CancellationToken ct = default)

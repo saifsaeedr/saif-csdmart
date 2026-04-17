@@ -16,7 +16,8 @@ public sealed class EntryService(
     PermissionService perms,
     PluginManager plugins,
     SchemaValidator schemas,
-    WorkflowEngine workflows)
+    WorkflowEngine workflows,
+    ILogger<EntryService> log)
 {
     public async Task<Entry?> GetAsync(Locator l, string? actor, CancellationToken ct = default)
     {
@@ -84,8 +85,10 @@ public sealed class EntryService(
         // caller can surface a structured error without leaking the stack.
         var beforeEvent = BuildEvent(toSave, ActionType.Create, actor);
         try { await plugins.BeforeActionAsync(beforeEvent, ct); }
-        catch (Exception)
+        catch (Exception ex)
         {
+            log.LogWarning(ex, "before-create plugin hook rejected {Space}/{Subpath}/{Shortname}",
+                toSave.SpaceName, toSave.Subpath, toSave.Shortname);
             return Result<Entry>.Fail("bad_request", "plugin rejected create");
         }
 
@@ -130,12 +133,17 @@ public sealed class EntryService(
 
         var beforeEvent = BuildEvent(merged, ActionType.Update, actor);
         try { await plugins.BeforeActionAsync(beforeEvent, ct); }
-        catch (Exception)
+        catch (Exception ex)
         {
+            log.LogWarning(ex, "before-update plugin hook rejected {Space}/{Subpath}/{Shortname}",
+                locator.SpaceName, locator.Subpath, locator.Shortname);
             return Result<Entry>.Fail("bad_request", "plugin rejected update");
         }
 
         await entries.UpsertAsync(merged, ct);
+        // Invalidate compiled-schema cache if this entry IS a schema. A stale
+        // cached schema would validate payloads against the pre-update definition.
+        if (merged.ResourceType == ResourceType.Schema) schemas.ClearCache();
         await history.AppendAsync(locator.SpaceName, locator.Subpath, locator.Shortname, actor, null,
             new() { ["action"] = "update", ["patch"] = patch }, ct);
         await plugins.AfterActionAsync(BuildEvent(merged, ActionType.Update, actor), ct);
@@ -169,14 +177,18 @@ public sealed class EntryService(
             };
 
         try { await plugins.BeforeActionAsync(deleteEvent, ct); }
-        catch (Exception)
+        catch (Exception ex)
         {
+            log.LogWarning(ex, "before-delete plugin hook rejected {Space}/{Subpath}/{Shortname}",
+                locator.SpaceName, locator.Subpath, locator.Shortname);
             return Result<bool>.Fail("bad_request", "plugin rejected delete");
         }
 
         var ok = await entries.DeleteAsync(locator.SpaceName, locator.Subpath, locator.Shortname, locator.Type, ct);
         if (ok)
         {
+            // Schema entry removed → drop any compiled instance from the in-memory cache.
+            if (locator.Type == ResourceType.Schema) schemas.ClearCache();
             await history.AppendAsync(locator.SpaceName, locator.Subpath, locator.Shortname, actor, null,
                 new() { ["action"] = "delete" }, ct);
             await plugins.AfterActionAsync(deleteEvent, ct);
@@ -209,8 +221,10 @@ public sealed class EntryService(
             Attributes = new() { ["src_shortname"] = from.Shortname, ["src_subpath"] = from.Subpath },
         };
         try { await plugins.BeforeActionAsync(moveEvent, ct); }
-        catch (Exception)
+        catch (Exception ex)
         {
+            log.LogWarning(ex, "before-move plugin hook rejected {FromSpace}/{FromSubpath}/{FromShortname} → {ToSpace}/{ToSubpath}/{ToShortname}",
+                from.SpaceName, from.Subpath, from.Shortname, to.SpaceName, to.Subpath, to.Shortname);
             return Result<Entry>.Fail("bad_request", "plugin rejected move");
         }
 

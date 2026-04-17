@@ -81,10 +81,11 @@ if [[ "$TARGET" == "el9" || "$TARGET" == "rhel9" ]]; then
         VERSION="${BASE_VER}${MINOR:+.$MINOR}"
     fi
     echo "Building dmart-${VERSION} RPM for RHEL 9 via ${ENGINE}..."
-    # Build CXB locally (static files, no platform dependency)
+    # Build CXB locally (static files, no platform dependency). Fail the whole
+    # RPM build if CXB fails — otherwise the RPM ships with a stale frontend.
     if [ -f cxb/package.json ] && [ ! -f cxb/dist/client/index.html ]; then
         echo "Building CXB frontend locally..."
-        ./build-cxb.sh
+        ./build-cxb.sh || { echo "CXB build failed" >&2; exit 1; }
     fi
     mkdir -p dist/out
     CONTAINER_NAME="dmart-el9-builder"

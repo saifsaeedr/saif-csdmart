@@ -124,25 +124,22 @@ public static class WebSocketHandler
 
         // POST /send-message/{user_shortname} — push to a specific user.
         // Used by plugins (local_notification) to notify a single user.
+        // Authenticated: plugin-to-server calls need a service token.
         app.MapPost("/send-message/{user_shortname}", async (
             string user_shortname, HttpRequest req, WsConnectionManager mgr) =>
         {
             var body = await JsonSerializer.DeserializeAsync(req.Body, DmartJsonContext.Default.JsonElement);
-            var msgType = body.TryGetProperty("type", out var t) ? t.GetString() ?? "" : "";
-            var message = body.TryGetProperty("message", out var m) ? m.GetRawText() : "{}";
-            var formatted = $"{{\"type\":\"{msgType}\",\"message\":{message}}}";
+            var formatted = BuildWsMessageJson(body);
             var sent = await mgr.SendMessageAsync(user_shortname, formatted);
-            return Results.Text($"{{\"status\":\"success\",\"message_sent\":{sent.ToString().ToLower()}}}", "application/json");
-        }).WithTags("WebSocket");
+            return Results.Text(BuildSendResult(sent), "application/json");
+        }).WithTags("WebSocket").RequireAuthorization();
 
         // POST /broadcast-to-channels — broadcast to subscribed clients.
         // Used by realtime_updates_notifier plugin after CRUD events.
         app.MapPost("/broadcast-to-channels", async (HttpRequest req, WsConnectionManager mgr) =>
         {
             var body = await JsonSerializer.DeserializeAsync(req.Body, DmartJsonContext.Default.JsonElement);
-            var msgType = body.TryGetProperty("type", out var t) ? t.GetString() ?? "" : "";
-            var message = body.TryGetProperty("message", out var m) ? m.GetRawText() : "{}";
-            var formatted = $"{{\"type\":\"{msgType}\",\"message\":{message}}}";
+            var formatted = BuildWsMessageJson(body);
 
             var sent = false;
             if (body.TryGetProperty("channels", out var channels) && channels.ValueKind == JsonValueKind.Array)
@@ -154,17 +151,70 @@ public static class WebSocketHandler
                         sent |= await mgr.BroadcastToChannelAsync(channelName, formatted);
                 }
             }
-            return Results.Text($"{{\"status\":\"success\",\"message_sent\":{sent.ToString().ToLower()}}}", "application/json");
-        }).WithTags("WebSocket");
+            return Results.Text(BuildSendResult(sent), "application/json");
+        }).WithTags("WebSocket").RequireAuthorization();
 
         // GET /ws-info — list connected clients + channels (admin debugging).
         app.MapGet("/ws-info", (WsConnectionManager mgr) =>
         {
-            var channelsJson = string.Join(",", mgr.Channels.Select(kv =>
-                $"\"{kv.Key}\":[{string.Join(",", kv.Value.Select(u => $"\"{u}\""))}]"));
-            return Results.Text(
-                $"{{\"status\":\"success\",\"data\":{{\"connected_clients\":{mgr.ConnectionCount},\"channels\":{{{channelsJson}}}}}}}",
-                "application/json");
-        }).WithTags("WebSocket");
+            using var stream = new MemoryStream();
+            using (var writer = new Utf8JsonWriter(stream))
+            {
+                writer.WriteStartObject();
+                writer.WriteString("status", "success");
+                writer.WriteStartObject("data");
+                writer.WriteNumber("connected_clients", mgr.ConnectionCount);
+                writer.WriteStartObject("channels");
+                foreach (var kv in mgr.Channels)
+                {
+                    writer.WriteStartArray(kv.Key);
+                    foreach (var user in kv.Value) writer.WriteStringValue(user);
+                    writer.WriteEndArray();
+                }
+                writer.WriteEndObject();
+                writer.WriteEndObject();
+                writer.WriteEndObject();
+            }
+            return Results.Text(Encoding.UTF8.GetString(stream.ToArray()), "application/json");
+        }).WithTags("WebSocket").RequireAuthorization();
+    }
+
+    // Builds the outgoing WebSocket payload { type, message } using safe JSON writing.
+    // The msgType is user-controlled; without escaping, quotes in it break the JSON
+    // structure (e.g. type=`"evil","injected":"x` would inject a sibling key).
+    private static string BuildWsMessageJson(JsonElement body)
+    {
+        var msgType = body.TryGetProperty("type", out var t) ? t.GetString() ?? "" : "";
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("type", msgType);
+            if (body.TryGetProperty("message", out var m))
+            {
+                writer.WritePropertyName("message");
+                m.WriteTo(writer);
+            }
+            else
+            {
+                writer.WriteStartObject("message");
+                writer.WriteEndObject();
+            }
+            writer.WriteEndObject();
+        }
+        return Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    private static string BuildSendResult(bool sent)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("status", "success");
+            writer.WriteBoolean("message_sent", sent);
+            writer.WriteEndObject();
+        }
+        return Encoding.UTF8.GetString(stream.ToArray());
     }
 }

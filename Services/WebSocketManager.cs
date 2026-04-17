@@ -12,7 +12,11 @@ namespace Dmart.Services;
 public sealed class WsConnectionManager
 {
     private readonly ConcurrentDictionary<string, WebSocket> _connections = new();
-    private readonly ConcurrentDictionary<string, ConcurrentBag<string>> _channels = new();
+    // Channels are protected by _channelsLock on all writes because subscribe,
+    // unsubscribe, and disconnect all need to walk and mutate multiple keys
+    // atomically — a ConcurrentBag replacement pattern isn't enough.
+    private readonly Dictionary<string, HashSet<string>> _channels = new();
+    private readonly object _channelsLock = new();
 
     public async Task ConnectAsync(WebSocket ws, string userShortname)
     {
@@ -46,7 +50,14 @@ public sealed class WsConnectionManager
 
     public async Task<bool> BroadcastToChannelAsync(string channelName, string message)
     {
-        if (!_channels.TryGetValue(channelName, out var users)) return false;
+        // Snapshot subscribers under the lock so the iteration below doesn't race
+        // with concurrent subscribe/unsubscribe calls.
+        string[] users;
+        lock (_channelsLock)
+        {
+            if (!_channels.TryGetValue(channelName, out var set)) return false;
+            users = set.ToArray();
+        }
         var sent = false;
         foreach (var user in users)
             sent |= await SendMessageAsync(user, message);
@@ -55,19 +66,39 @@ public sealed class WsConnectionManager
 
     public void Subscribe(string userShortname, string channelName)
     {
-        RemoveAllSubscriptions(userShortname);
-        var bag = _channels.GetOrAdd(channelName, _ => new ConcurrentBag<string>());
-        bag.Add(userShortname);
+        lock (_channelsLock)
+        {
+            RemoveAllSubscriptionsLocked(userShortname);
+            if (!_channels.TryGetValue(channelName, out var set))
+            {
+                set = new HashSet<string>(StringComparer.Ordinal);
+                _channels[channelName] = set;
+            }
+            set.Add(userShortname);
+        }
     }
 
     public void RemoveAllSubscriptions(string userShortname)
     {
-        foreach (var key in _channels.Keys.ToArray())
+        lock (_channelsLock)
         {
-            _channels.AddOrUpdate(key,
-                _ => new ConcurrentBag<string>(),
-                (_, users) => new ConcurrentBag<string>(users.Where(u => u != userShortname)));
+            RemoveAllSubscriptionsLocked(userShortname);
         }
+    }
+
+    // Caller must hold _channelsLock.
+    private void RemoveAllSubscriptionsLocked(string userShortname)
+    {
+        // Collect empty channels so we can delete them after the walk — modifying
+        // the dictionary inside the foreach would throw.
+        List<string>? empties = null;
+        foreach (var (key, users) in _channels)
+        {
+            if (users.Remove(userShortname) && users.Count == 0)
+                (empties ??= new List<string>()).Add(key);
+        }
+        if (empties is not null)
+            foreach (var key in empties) _channels.Remove(key);
     }
 
     // Python's generate_channel_name: "space:subpath:schema:action:state"
@@ -82,5 +113,20 @@ public sealed class WsConnectionManager
     }
 
     public int ConnectionCount => _connections.Count;
-    public IReadOnlyDictionary<string, ConcurrentBag<string>> Channels => _channels;
+
+    // Returns a snapshot of (channel → subscribers) for read-only callers
+    // (WebSocketHandler's /ws-info). Copied under the lock so iteration by the
+    // caller can't race with mutations.
+    public IReadOnlyDictionary<string, IReadOnlyCollection<string>> Channels
+    {
+        get
+        {
+            lock (_channelsLock)
+            {
+                return _channels.ToDictionary(
+                    kv => kv.Key,
+                    kv => (IReadOnlyCollection<string>)kv.Value.ToArray());
+            }
+        }
+    }
 }

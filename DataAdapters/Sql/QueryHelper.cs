@@ -729,9 +729,18 @@ public static class QueryHelper
             var likeConditions = new List<string>();
             for (var i = 0; i < queryPolicies.Count; i++)
             {
-                var pattern = queryPolicies[i].Replace("%", "\\%").Replace("_", "\\_").Replace("*", "%");
+                // Build a LIKE pattern from the dmart wildcard ('*' → '%').
+                // Order matters: escape backslash FIRST (otherwise the replacements
+                // below introduce new backslashes that get double-escaped), then
+                // the LIKE metacharacters %, _, finally expand '*'.
+                var pattern = queryPolicies[i]
+                    .Replace("\\", "\\\\")
+                    .Replace("%", "\\%")
+                    .Replace("_", "\\_")
+                    .Replace("*", "%");
                 args.Add(new() { Value = pattern });
-                likeConditions.Add($"qp LIKE ${args.Count}");
+                // ESCAPE '\' so the backslash escapes above are honored by LIKE.
+                likeConditions.Add($"qp LIKE ${args.Count} ESCAPE '\\'");
             }
             if (likeConditions.Count > 0)
             {
@@ -886,8 +895,11 @@ public static class QueryHelper
             var row = new Dictionary<string, object>(StringComparer.Ordinal);
             for (var i = 0; i < reader.FieldCount; i++)
             {
-                var name = reader.GetName(i);
-                row[name] = reader.IsDBNull(i) ? null! : reader.GetValue(i);
+                // Skip null columns rather than packing `null!` into a non-null
+                // dictionary value — callers use TryGetValue and treat missing
+                // keys the same as null.
+                if (reader.IsDBNull(i)) continue;
+                row[reader.GetName(i)] = reader.GetValue(i);
             }
             results.Add(row);
         }

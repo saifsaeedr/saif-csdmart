@@ -27,9 +27,10 @@ public static class PayloadHandler
                    AttachmentRepository attachments, EntryService entries, CancellationToken ct) =>
             {
                 if (!Enum.TryParse<ResourceType>(resource_type, true, out var rt))
-                    return Results.BadRequest();
+                    return Results.BadRequest($"unknown resource_type '{resource_type}'");
                 var parts = RouteParts.SplitPayloadParts(rest);
-                if (parts is null) return Results.BadRequest();
+                if (parts is null)
+                    return Results.BadRequest($"invalid payload path '{rest}' — expected {{subpath}}/{{shortname}}.{{ext}}");
                 var (subpath, shortname, _schema, ext) = parts.Value;
                 return await ServePayloadAsync(rt, space, subpath, shortname, ext, attachments, entries, ct);
             });

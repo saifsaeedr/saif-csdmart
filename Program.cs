@@ -292,7 +292,8 @@ switch (subcommand)
             new PluginManager(Array.Empty<IHookPlugin>(), Array.Empty<IApiPlugin>(),
                 new SpaceRepository(dbInst), nlog.CreateLogger<PluginManager>()),
             new SchemaValidator(entryRepo, nlog.CreateLogger<SchemaValidator>()),
-            new WorkflowEngine(entryRepo, nlog.CreateLogger<WorkflowEngine>()));
+            new WorkflowEngine(entryRepo, nlog.CreateLogger<WorkflowEngine>()),
+            nlog.CreateLogger<EntryService>());
         var exportService = new ImportExportService(entryRepo, entryService, nlog.CreateLogger<ImportExportService>());
 
         var spaceRepo = new SpaceRepository(dbInst);
@@ -515,7 +516,11 @@ builder.Services.ConfigureHttpJsonOptions(o =>
 }
 
 // Config
-builder.Services.Configure<DmartSettings>(builder.Configuration.GetSection("Dmart"));
+builder.Services.AddOptions<DmartSettings>()
+    .Bind(builder.Configuration.GetSection("Dmart"))
+    .Services.AddSingleton<IValidateOptions<DmartSettings>, DmartSettingsValidator>();
+// Force validation at startup — otherwise misconfig only surfaces on first access.
+builder.Services.AddOptions<DmartSettings>().ValidateOnStart();
 builder.Services.Configure<SpacesOptions>(builder.Configuration.GetSection("Spaces"));
 
 // SQL backend
@@ -538,6 +543,37 @@ builder.Services.AddHostedService<CountHistorySnapshotter>();
 // SchemaInitializer — IHostedServices run StartAsync sequentially in registration order.
 builder.Services.AddHostedService<SchemaInitializer>();
 builder.Services.AddHostedService<AdminBootstrap>();
+
+// IP-based rate limiter for authentication endpoints. Account lockout (on the
+// user row) limits attempts per-account; this limits attempts per-IP so an
+// attacker can't enumerate accounts by slowly cycling shortnames at the
+// per-account threshold. 10 req/min/IP is a safe default — a legitimate user
+// retyping a password hits this much rarer than a scripted attack.
+builder.Services.AddRateLimiter(opts =>
+{
+    opts.AddPolicy("auth-by-ip", ctx =>
+    {
+        var ip = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        return System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(
+            ip,
+            _ => new System.Threading.RateLimiting.FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 10,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+            });
+    });
+    // Rejected requests get HTTP 429 with a short JSON body matching our
+    // Response.Fail shape, not the default empty 429.
+    opts.OnRejected = async (ctx, ct) =>
+    {
+        ctx.HttpContext.Response.StatusCode = 429;
+        ctx.HttpContext.Response.ContentType = "application/json";
+        await ctx.HttpContext.Response.WriteAsync(
+            "{\"status\":\"failed\",\"error\":{\"type\":\"rate_limit\",\"code\":429,\"message\":\"too many requests\"}}",
+            ct);
+    };
+});
 
 // Domain services
 builder.Services.AddSingleton<PermissionService>();
@@ -586,6 +622,13 @@ builder.Services.AddResponseCompression(o => { o.EnableForHttps = true; });
 
 // Global request body size limit (50 MB)
 builder.WebHost.ConfigureKestrel(k => k.Limits.MaxRequestBodySize = 50 * 1024 * 1024);
+// Kestrel's body limit applies to raw POST bodies; multipart form-data has a
+// separate limit (128 MB by default) that can otherwise bypass the 50 MB cap.
+builder.Services.Configure<Microsoft.AspNetCore.Http.Features.FormOptions>(o =>
+{
+    o.MultipartBodyLengthLimit = 50 * 1024 * 1024;
+    o.ValueLengthLimit = 50 * 1024 * 1024;
+});
 
 var app = builder.Build();
 
@@ -641,6 +684,7 @@ app.UseCxb();
 
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseRateLimiter();
 
 // Structured per-request logging (after auth so ctx.User is populated).
 // Mirrors Python's set_logging() — logs method, path, status, duration, user.

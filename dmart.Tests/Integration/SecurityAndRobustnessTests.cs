@@ -104,7 +104,8 @@ public class SecurityAndRobustnessTests : IClassFixture<DmartFactory>
     [Fact]
     public async Task WsInfo_Returns_Connected_Clients()
     {
-        var client = _factory.CreateClient();
+        if (!DmartFactory.HasPg) return;
+        var (client, _) = await LoginAsync();
         var resp = await client.GetAsync("/ws-info");
         resp.StatusCode.ShouldBe(HttpStatusCode.OK);
         var json = await resp.Content.ReadAsStringAsync();
@@ -112,12 +113,23 @@ public class SecurityAndRobustnessTests : IClassFixture<DmartFactory>
         json.ShouldContain("channels");
     }
 
+    [Fact]
+    public async Task WsInfo_Requires_Authorization()
+    {
+        // Anonymous access to /ws-info would leak the list of connected users
+        // and channel subscriptions. Must return 401 without a token.
+        var client = _factory.CreateClient();
+        var resp = await client.GetAsync("/ws-info");
+        resp.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+    }
+
     // ==================== WebSocket broadcast endpoint ====================
 
     [Fact]
     public async Task Broadcast_Endpoint_Returns_Success()
     {
-        var client = _factory.CreateClient();
+        if (!DmartFactory.HasPg) return;
+        var (client, _) = await LoginAsync();
         var body = new StringContent(
             "{\"type\":\"test\",\"message\":{\"hello\":\"world\"},\"channels\":[\"test:/:__ALL__:__ALL__:__ALL__\"]}",
             Encoding.UTF8, "application/json");
@@ -127,12 +139,24 @@ public class SecurityAndRobustnessTests : IClassFixture<DmartFactory>
         json.ShouldContain("success");
     }
 
+    [Fact]
+    public async Task Broadcast_Endpoint_Requires_Authorization()
+    {
+        var client = _factory.CreateClient();
+        var body = new StringContent(
+            "{\"type\":\"test\",\"message\":{},\"channels\":[\"x\"]}",
+            Encoding.UTF8, "application/json");
+        var resp = await client.PostAsync("/broadcast-to-channels", body);
+        resp.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+    }
+
     // ==================== Send-message endpoint ====================
 
     [Fact]
     public async Task SendMessage_Endpoint_Returns_Success()
     {
-        var client = _factory.CreateClient();
+        if (!DmartFactory.HasPg) return;
+        var (client, _) = await LoginAsync();
         var body = new StringContent(
             "{\"type\":\"test\",\"message\":{\"data\":\"hello\"}}",
             Encoding.UTF8, "application/json");
@@ -142,6 +166,36 @@ public class SecurityAndRobustnessTests : IClassFixture<DmartFactory>
         json.ShouldContain("message_sent");
         // User doesn't exist → message_sent should be false.
         json.ShouldContain("false");
+    }
+
+    [Fact]
+    public async Task SendMessage_Endpoint_Requires_Authorization()
+    {
+        var client = _factory.CreateClient();
+        var body = new StringContent(
+            "{\"type\":\"test\",\"message\":{}}",
+            Encoding.UTF8, "application/json");
+        var resp = await client.PostAsync("/send-message/anyone", body);
+        resp.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
+    public async Task SendMessage_Escapes_MsgType_With_Quotes()
+    {
+        // An attacker-supplied msgType containing quotes must not break the JSON
+        // structure of the broadcast payload (JSON injection).
+        if (!DmartFactory.HasPg) return;
+        var (client, _) = await LoginAsync();
+        var body = new StringContent(
+            "{\"type\":\"evil\\\",\\\"injected\\\":\\\"x\",\"message\":{}}",
+            Encoding.UTF8, "application/json");
+        var resp = await client.PostAsync("/send-message/nonexistent_user", body);
+        resp.StatusCode.ShouldBe(HttpStatusCode.OK);
+        // Response itself must be parseable JSON with the expected shape.
+        var json = await resp.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(json);
+        doc.RootElement.GetProperty("status").GetString().ShouldBe("success");
+        doc.RootElement.GetProperty("message_sent").GetBoolean().ShouldBe(false);
     }
 
     // Upload size limit (50MB) is enforced in ResourceWithPayloadHandler.

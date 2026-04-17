@@ -73,8 +73,12 @@ public sealed class SchemaValidator(EntryRepository entries, ILogger<SchemaValid
 
         if (schemaEntry?.Payload?.Body is null)
         {
+            // Don't cache misses — callers supply schema_shortname intentionally,
+            // and caching null would pin the "not found" result until process
+            // restart even after the schema is created externally (e.g. via
+            // dmart Python or direct SQL). The cost is a repeat DB lookup per
+            // payload that references a missing schema, which should be rare.
             log.LogDebug("schema {Space}/{Shortname} not found", spaceName, shortname);
-            _cache[key] = null;
             return null;
         }
 
@@ -87,8 +91,9 @@ public sealed class SchemaValidator(EntryRepository entries, ILogger<SchemaValid
         }
         catch (Exception ex)
         {
+            // Compile failure is (probably) a programming error in the schema itself;
+            // still don't cache it — the author may fix and re-upsert.
             log.LogWarning(ex, "failed to compile schema {Space}/{Shortname}", spaceName, shortname);
-            _cache[key] = null;
             return null;
         }
     }

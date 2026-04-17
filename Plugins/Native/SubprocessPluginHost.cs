@@ -50,8 +50,9 @@ internal sealed class SubprocessPluginHost : IDisposable
                     // null = process died, retry
                     Kill();
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
+                    Console.Error.WriteLine($"SUBPROCESS_PLUGIN_ERROR: {Shortname} attempt={attempt + 1}/2 {ex.GetType().Name}: {ex.Message}");
                     Kill();
                     if (attempt == 1) throw;
                 }

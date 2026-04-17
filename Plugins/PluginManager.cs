@@ -55,8 +55,8 @@ public sealed class PluginManager(
     // Short-lived cache for space lookups, matching Python's 2-second cache so
     // a before+after pair for the same request doesn't double-fetch the space
     // row. Keyed by space name.
-    private readonly Dictionary<string, (long Ticks, Space? Space)> _spaceCache = new(StringComparer.Ordinal);
-    private const long SpaceCacheTtlTicks = 2 * TimeSpan.TicksPerSecond;
+    private readonly Dictionary<string, (DateTime At, Space? Space)> _spaceCache = new(StringComparer.Ordinal);
+    private static readonly TimeSpan SpaceCacheTtl = TimeSpan.FromSeconds(2);
 
     public IReadOnlyList<string> ActivePlugins => _activePlugins;
 
@@ -348,10 +348,10 @@ public sealed class PluginManager(
 
     private async Task<Space?> GetSpaceCachedAsync(string spaceName, CancellationToken ct)
     {
-        var now = Environment.TickCount64 * TimeSpan.TicksPerMillisecond;
+        var now = DateTime.UtcNow;
         lock (_spaceCache)
         {
-            if (_spaceCache.TryGetValue(spaceName, out var cached) && now - cached.Ticks < SpaceCacheTtlTicks)
+            if (_spaceCache.TryGetValue(spaceName, out var cached) && (now - cached.At) < SpaceCacheTtl)
                 return cached.Space;
         }
         var space = await spaces.GetAsync(spaceName, ct);
@@ -362,7 +362,7 @@ public sealed class PluginManager(
         {
             lock (_spaceCache)
             {
-                _spaceCache[spaceName] = (Environment.TickCount64 * TimeSpan.TicksPerMillisecond, space);
+                _spaceCache[spaceName] = (DateTime.UtcNow, space);
             }
         }
         return space;

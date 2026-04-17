@@ -31,9 +31,12 @@ public static class HealthHandler
             });
 
         g.MapGet("/reload-security-data",
-            async (PermissionService perms, CancellationToken ct) =>
+            async (PermissionService perms, SchemaValidator schemas, CancellationToken ct) =>
             {
                 await perms.ReloadAsync(ct);
+                // Also drop any compiled schemas — a permission refresh is a
+                // reasonable operator-level signal to rebuild in-memory state.
+                schemas.ClearCache();
                 return Response.Ok();
             });
     }

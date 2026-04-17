@@ -134,7 +134,7 @@ public static class RequestHandler
         switch (rec.ResourceType)
         {
             case ResourceType.User:
-                return await CreateUserAsync(rec, actor, users, hasher, ct);
+                return await CreateUserAsync(rec, space, actor, users, hasher, ct);
             case ResourceType.Role:
                 return await CreateRoleAsync(rec, space, actor, access, ct);
             case ResourceType.Permission:
@@ -168,7 +168,7 @@ public static class RequestHandler
     }
 
     private static async Task<(Response Response, Record UpdatedRecord)> CreateUserAsync(
-        Record rec, string actor, UserRepository users, PasswordHasher hasher, CancellationToken ct)
+        Record rec, string space, string actor, UserRepository users, PasswordHasher hasher, CancellationToken ct)
     {
         var attrs = rec.Attributes ?? new();
         var existing = await users.GetByShortnameAsync(rec.Shortname, ct);
@@ -186,7 +186,7 @@ public static class RequestHandler
         {
             Uuid = string.IsNullOrEmpty(rec.Uuid) ? Guid.NewGuid().ToString() : rec.Uuid,
             Shortname = rec.Shortname,
-            SpaceName = "management",
+            SpaceName = space,
             Subpath = "/" + rec.Subpath.TrimStart('/'),
             OwnerShortname = actor,
             Email = attrs.TryGetValue("email", out var e) ? ConvertToString(e) : null,

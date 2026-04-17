@@ -89,6 +89,9 @@ public static class AlterationHandler
             });
 
     // Convert a JsonElement object into a Dictionary<string, object> for the patch.
+    // JSON null is represented as a JsonElement of ValueKind.Null so the dict
+    // stays type-safe (no `null!` escape hatch) and ApplyPatch can detect the
+    // intent to unset a field.
     private static Dictionary<string, object> JsonElementToDict(JsonElement el)
     {
         var dict = new Dictionary<string, object>();
@@ -100,7 +103,9 @@ public static class AlterationHandler
                 JsonValueKind.Number => prop.Value.TryGetInt64(out var l) ? l : (object)prop.Value.GetDouble(),
                 JsonValueKind.True   => true,
                 JsonValueKind.False  => false,
-                JsonValueKind.Null   => null!,
+                // Pass JSON null through as the JsonElement itself — callers
+                // already handle JsonElement with ValueKind.Null via FlattenAttrs.
+                JsonValueKind.Null   => prop.Value.Clone(),
                 _                    => prop.Value.Clone(),  // arrays/objects → JsonElement
             };
         }
