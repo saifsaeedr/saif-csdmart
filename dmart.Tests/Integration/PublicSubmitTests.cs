@@ -50,7 +50,9 @@ public class PublicSubmitTests : IClassFixture<DmartFactory>
         // Submission against a space.schema NOT in the allowlist must fail.
         var body = new StringContent("{\"note\":\"hi\"}", Encoding.UTF8, "application/json");
         var resp = await client.PostAsync("/public/submit/test/content/some_other_schema/sub1", body);
-        resp.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+        // Whitelist rejection emits NOT_ALLOWED (401) via the FailedResponseFilter,
+        // matching Python's auth-type response for restricted resources.
+        resp.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
         var respText = await resp.Content.ReadAsStringAsync();
         respText.ShouldContain("not allowed");
     }

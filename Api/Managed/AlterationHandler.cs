@@ -74,7 +74,8 @@ public static class AlterationHandler
                     {
                         ["shortname"] = entry.Shortname,
                         ["subpath"] = entry.Subpath,
-                        ["error"] = result.ErrorMessage ?? result.ErrorCode ?? "unknown",
+                        ["error"] = result.ErrorMessage ?? "unknown",
+                        ["code"] = result.ErrorCode,
                     });
                 }
 

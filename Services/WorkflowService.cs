@@ -67,7 +67,7 @@ public sealed class WorkflowService(
                 ["state"] = transition.NewState!,
                 ["is_open"] = transition.IsOpen ?? true,
             })
-            : Response.Fail(result.ErrorCode!, result.ErrorMessage!);
+            : Response.Fail(result.ErrorCode, result.ErrorMessage!, result.ErrorType ?? "request");
     }
 
     private async Task<IReadOnlyCollection<string>> GetActorRolesAsync(string? actor, CancellationToken ct)

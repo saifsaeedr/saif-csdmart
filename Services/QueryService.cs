@@ -59,7 +59,7 @@ public sealed class QueryService(
         q = q with { Limit = limit };
 
         if (string.IsNullOrEmpty(q.SpaceName))
-            return Response.Fail("bad_query", "space_name is required");
+            return Response.Fail(InternalErrorCode.INVALID_DATA, "space_name is required", "request");
 
         return q.Type switch
         {
@@ -107,8 +107,9 @@ public sealed class QueryService(
         var managementSpace = settings.Value.ManagementSpace;
         var normalizedSubpath = string.IsNullOrEmpty(q.Subpath) ? "/" : q.Subpath;
         if (!string.Equals(q.SpaceName, managementSpace, StringComparison.Ordinal) || normalizedSubpath != "/")
-            return Response.Fail("bad_query",
-                $"spaces query requires space_name=\"{managementSpace}\" and subpath=\"/\"");
+            return Response.Fail(InternalErrorCode.INVALID_DATA,
+                $"spaces query requires space_name=\"{managementSpace}\" and subpath=\"/\"",
+                "request");
 
         var all = await spaces.ListAsync(ct);
         // Batched: walk the user's permissions ONCE and intersect with the space
@@ -209,7 +210,8 @@ public sealed class QueryService(
     {
         // Python blocks anonymous users for history queries.
         if (actor is null)
-            return Response.Fail("unauthorized", "history queries require authentication");
+            return Response.Fail(InternalErrorCode.NOT_AUTHENTICATED,
+                "history queries require authentication", "auth");
 
         if (!await CanQueryAsync(actor, ResourceType.Content, q.SpaceName, q.Subpath ?? "/", ct))
             return EmptyQueryResponse();
@@ -347,7 +349,8 @@ public sealed class QueryService(
             return EmptyQueryResponse();
 
         if (q.AggregationData is null)
-            return Response.Fail("bad_query", "aggregation_data required for aggregation queries");
+            return Response.Fail(InternalErrorCode.MISSING_DATA,
+                "aggregation_data required for aggregation queries", "request");
 
         var rows = await QueryHelper.RunAggregationAsync(db, tableName, q, ct);
 
@@ -446,7 +449,8 @@ public sealed class QueryService(
     private async Task<Response> QueryEventsAsync(Query q, string? actor, CancellationToken ct)
     {
         if (actor is null)
-            return Response.Fail("unauthorized", "events queries require authentication");
+            return Response.Fail(InternalErrorCode.NOT_AUTHENTICATED,
+                "events queries require authentication", "auth");
 
         var spacesRoot = settings.Value.SpacesRoot;
         var eventsFile = Path.Combine(spacesRoot, q.SpaceName, ".dm", "events.jsonl");

@@ -12,7 +12,8 @@ public static class RegistrationHandler
         g.MapPost("/create", async (HttpRequest req, UserService svc, CancellationToken ct) =>
         {
             var body = await JsonSerializer.DeserializeAsync(req.Body, DmartJsonContext.Default.DictionaryStringObject, ct);
-            if (body is null) return Response.Fail("bad_request", "missing body");
+            if (body is null)
+                return Response.Fail(InternalErrorCode.INVALID_DATA, "missing body", "request");
             var shortname = body.TryGetValue("shortname", out var sn) ? sn?.ToString() ?? "" : "";
             var email = body.TryGetValue("email", out var e) ? e?.ToString() : null;
             var msisdn = body.TryGetValue("msisdn", out var m) ? m?.ToString() : null;
@@ -24,7 +25,7 @@ public static class RegistrationHandler
             var msisdnOtp = body.TryGetValue("msisdn_otp", out var mo) ? mo?.ToString() : null;
             var result = await svc.CreateAsync(shortname, email, msisdn, password, language, emailOtp, msisdnOtp, ct);
             if (!result.IsOk)
-                return Response.Fail(result.ErrorCode!, result.ErrorMessage!);
+                return Response.Fail(result.ErrorCode, result.ErrorMessage!, result.ErrorType ?? "request");
 
             var (user, invitations) = result.Value;
             var attrs = new Dictionary<string, object>

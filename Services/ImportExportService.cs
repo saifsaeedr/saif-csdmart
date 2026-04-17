@@ -105,7 +105,8 @@ public sealed class ImportExportService(
                 {
                     ["path"] = entry.FullName,
                     ["shortname"] = loaded.Shortname,
-                    ["error"] = result.ErrorMessage ?? result.ErrorCode ?? "unknown",
+                    ["error"] = result.ErrorMessage ?? "unknown",
+                    ["code"] = result.ErrorCode,
                 });
             }
             catch (Exception ex)

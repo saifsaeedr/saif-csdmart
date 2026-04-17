@@ -672,7 +672,8 @@ app.Use(async (ctx, next) =>
         {
             ctx.Response.StatusCode = StatusCodes.Status500InternalServerError;
             ctx.Response.ContentType = "application/json";
-            var body = Dmart.Models.Api.Response.Fail("internal_error",
+            var body = Dmart.Models.Api.Response.Fail(
+                Dmart.Models.Api.InternalErrorCode.SOMETHING_WRONG,
                 $"An internal error occurred. Reference: {cid}", "exception");
             await ctx.Response.WriteAsJsonAsync(body, DmartJsonContext.Default.Response);
         }

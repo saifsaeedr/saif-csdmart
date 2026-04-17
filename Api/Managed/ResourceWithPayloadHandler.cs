@@ -221,7 +221,7 @@ public static class ResourceWithPayloadHandler
 
         var result = await entries.CreateAsync(entry, actor, ct);
         if (!result.IsOk)
-            return Response.Fail(result.ErrorCode!, result.ErrorMessage!);
+            return Response.Fail(result.ErrorCode, result.ErrorMessage!, result.ErrorType ?? "request");
         return Response.Ok(records: new[] { record with { Uuid = result.Value!.Uuid } });
     }
 

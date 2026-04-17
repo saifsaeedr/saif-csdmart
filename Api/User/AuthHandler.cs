@@ -36,7 +36,8 @@ public static class AuthHandler
                     : await svc.LoginAsync(req, headers, ct);
 
             if (!result.IsOk)
-                return Results.Json(Response.Fail(result.ErrorCode!, result.ErrorMessage!, type: "auth"),
+                return Results.Json(
+                    Response.Fail(result.ErrorCode, result.ErrorMessage!, result.ErrorType ?? "auth"),
                     DmartJsonContext.Default.Response, statusCode: 401);
 
             var (access, refresh, user) = result.Value;

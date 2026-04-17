@@ -20,9 +20,11 @@ public static class QueryHandler
             }
             catch (JsonException ex)
             {
-                return Response.Fail("bad_request", $"invalid Query JSON: {ex.Message}");
+                return Response.Fail(InternalErrorCode.INVALID_DATA,
+                    $"invalid Query JSON: {ex.Message}", "request");
             }
-            if (q is null) return Response.Fail("bad_request", "empty body");
+            if (q is null)
+                return Response.Fail(InternalErrorCode.INVALID_DATA, "empty body", "request");
             return await svc.ExecuteAsync(q, actor: null, ct);
         });
 
@@ -34,7 +36,8 @@ public static class QueryHandler
             QueryService svc, CancellationToken ct) =>
         {
             if (!Enum.TryParse<Dmart.Models.Enums.QueryType>(type, ignoreCase: true, out var qt))
-                return Response.Fail("bad_request", $"unknown query type: {type}");
+                return Response.Fail(InternalErrorCode.NOT_SUPPORTED_TYPE,
+                    $"unknown query type: {type}", "request");
             var q = new Query
             {
                 Type = qt,

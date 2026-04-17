@@ -34,12 +34,15 @@ public sealed class UserService(
     {
         // Python: check is_registrable setting before allowing self-registration.
         if (!settings.Value.IsRegistrable)
-            return Result<(User, Dictionary<string, string>)>.Fail("forbidden", "registration is disabled");
+            return Result<(User, Dictionary<string, string>)>.Fail(
+                InternalErrorCode.NOT_ALLOWED, "registration is disabled", "auth");
 
         if (string.IsNullOrWhiteSpace(shortname))
-            return Result<(User, Dictionary<string, string>)>.Fail("invalid_shortname", "shortname required");
+            return Result<(User, Dictionary<string, string>)>.Fail(
+                InternalErrorCode.INVALID_IDENTIFIER, "shortname required", "request");
         if (await users.ExistsAsync(shortname, email, msisdn, ct))
-            return Result<(User, Dictionary<string, string>)>.Fail("conflict", "user already exists");
+            return Result<(User, Dictionary<string, string>)>.Fail(
+                InternalErrorCode.SHORTNAME_ALREADY_EXIST, "user already exists", "db");
 
         // Python: is_otp_for_create_required — every supplied channel (email or
         // msisdn) must carry an OTP that was issued via /user/otp-request and
@@ -49,16 +52,20 @@ public sealed class UserService(
             if (!string.IsNullOrEmpty(email))
             {
                 if (string.IsNullOrEmpty(emailOtp))
-                    return Result<(User, Dictionary<string, string>)>.Fail("bad_request", "email_otp is required");
+                    return Result<(User, Dictionary<string, string>)>.Fail(
+                        InternalErrorCode.MISSING_DATA, "email_otp is required", "request");
                 if (!await otp.VerifyAndConsumeAsync(email, emailOtp, ct))
-                    return Result<(User, Dictionary<string, string>)>.Fail("invalid_otp", "email_otp is invalid or expired");
+                    return Result<(User, Dictionary<string, string>)>.Fail(
+                        InternalErrorCode.OTP_INVALID, "email_otp is invalid or expired", "auth");
             }
             if (!string.IsNullOrEmpty(msisdn))
             {
                 if (string.IsNullOrEmpty(msisdnOtp))
-                    return Result<(User, Dictionary<string, string>)>.Fail("bad_request", "msisdn_otp is required");
+                    return Result<(User, Dictionary<string, string>)>.Fail(
+                        InternalErrorCode.MISSING_DATA, "msisdn_otp is required", "request");
                 if (!await otp.VerifyAndConsumeAsync(msisdn, msisdnOtp, ct))
-                    return Result<(User, Dictionary<string, string>)>.Fail("invalid_otp", "msisdn_otp is invalid or expired");
+                    return Result<(User, Dictionary<string, string>)>.Fail(
+                        InternalErrorCode.OTP_INVALID, "msisdn_otp is invalid or expired", "auth");
             }
         }
 
@@ -110,33 +117,43 @@ public sealed class UserService(
     {
         var user = await ResolveUserAsync(req, ct);
         if (user is null)
-            return Result<(string, string, User)>.Fail("not_found", "user not found");
+            return Result<(string, string, User)>.Fail(
+                InternalErrorCode.USERNAME_NOT_EXIST, "Invalid username or password", "auth");
         if (!user.IsActive)
-            return Result<(string, string, User)>.Fail("inactive", "user is inactive");
+            return Result<(string, string, User)>.Fail(
+                InternalErrorCode.USER_ACCOUNT_LOCKED, "Account has been locked.", "auth");
 
         // Account lockout after max_failed_login_attempts (Python: handle_failed_login_attempt).
         var maxAttempts = settings.Value.MaxFailedLoginAttempts;
         if (maxAttempts > 0 && user.AttemptCount is not null && user.AttemptCount >= maxAttempts)
-            return Result<(string, string, User)>.Fail("inactive", "account locked due to too many failed attempts");
+            return Result<(string, string, User)>.Fail(
+                InternalErrorCode.USER_ACCOUNT_LOCKED,
+                "Account has been locked due to too many failed login attempts.", "auth");
 
         if (string.IsNullOrEmpty(user.Password) || req.Password is null
             || !hasher.Verify(req.Password, user.Password))
         {
             await users.IncrementAttemptAsync(user.Shortname, ct);
-            return Result<(string, string, User)>.Fail("invalid_credentials", "incorrect password");
+            return Result<(string, string, User)>.Fail(
+                InternalErrorCode.PASSWORD_NOT_VALIDATED, "Invalid username or password", "auth");
         }
 
         // Device lock check — applies regardless of user type.
         if (user.LockedToDevice && !string.IsNullOrEmpty(user.DeviceId)
             && (string.IsNullOrEmpty(req.DeviceId) || req.DeviceId != user.DeviceId))
         {
-            return Result<(string, string, User)>.Fail("inactive", "account locked to a unique device");
+            return Result<(string, string, User)>.Fail(
+                InternalErrorCode.USER_ACCOUNT_LOCKED,
+                "This account is locked to a unique device !", "auth");
         }
-        // New device detection for mobile users (OTP required).
+        // New device detection for mobile users (OTP required). Python uses
+        // OTP_NEEDED (115) — clients inspect the numeric code to route the
+        // user to the OTP screen on first-device login.
         if (user.Type == UserType.Mobile && !string.IsNullOrEmpty(user.DeviceId)
             && !string.IsNullOrEmpty(req.DeviceId) && req.DeviceId != user.DeviceId)
         {
-            return Result<(string, string, User)>.Fail("invalid_otp", "new device detected, login with otp");
+            return Result<(string, string, User)>.Fail(
+                InternalErrorCode.OTP_NEEDED, "New device detected, login with otp", "auth");
         }
 
         return await ProcessLoginAsync(user, req, requestHeaders, ct);
@@ -146,23 +163,40 @@ public sealed class UserService(
     public async Task<Result<(string Access, string Refresh, User User)>> LoginWithOtpAsync(
         UserLoginRequest req, Dictionary<string, string>? requestHeaders = null, CancellationToken ct = default)
     {
+        // Python parity: OTP login must carry exactly one identifier.
+        var identifierCount = (req.Shortname is not null ? 1 : 0)
+                            + (req.Email is not null ? 1 : 0)
+                            + (req.Msisdn is not null ? 1 : 0);
+        if (identifierCount > 1)
+            return Result<(string, string, User)>.Fail(
+                InternalErrorCode.OTP_ISSUE,
+                "Provide either msisdn, email or shortname, not both.", "auth");
+        if (identifierCount == 0)
+            return Result<(string, string, User)>.Fail(
+                InternalErrorCode.OTP_ISSUE,
+                "Either msisdn, email or shortname must be provided.", "auth");
+
         var user = await ResolveUserAsync(req, ct);
         if (user is null)
-            return Result<(string, string, User)>.Fail("not_found", "user not found");
+            return Result<(string, string, User)>.Fail(
+                InternalErrorCode.USERNAME_NOT_EXIST, "Invalid username or password", "auth");
         if (!user.IsActive)
-            return Result<(string, string, User)>.Fail("inactive", "user is inactive");
+            return Result<(string, string, User)>.Fail(
+                InternalErrorCode.USER_ACCOUNT_LOCKED, "Account has been locked.", "auth");
 
         // Validate OTP code.
         var dest = user.Msisdn ?? user.Email ?? user.Shortname;
         if (string.IsNullOrEmpty(req.Otp) || !await otp.VerifyAndConsumeAsync(dest, req.Otp, ct))
-            return Result<(string, string, User)>.Fail("invalid_otp", "invalid or expired OTP");
+            return Result<(string, string, User)>.Fail(
+                InternalErrorCode.OTP_INVALID, "Wrong OTP", "auth");
 
         // Python also optionally verifies password if provided alongside OTP.
         if (!string.IsNullOrEmpty(req.Password)
             && !string.IsNullOrEmpty(user.Password)
             && !hasher.Verify(req.Password, user.Password))
         {
-            return Result<(string, string, User)>.Fail("invalid_credentials", "incorrect password");
+            return Result<(string, string, User)>.Fail(
+                InternalErrorCode.PASSWORD_NOT_VALIDATED, "Invalid username or password", "auth");
         }
 
         return await ProcessLoginAsync(user, req, requestHeaders, ct);
@@ -184,23 +218,30 @@ public sealed class UserService(
     public async Task<Result<(string Access, string Refresh, User User)>> LoginWithInvitationAsync(
         UserLoginRequest req, Dictionary<string, string>? requestHeaders = null, CancellationToken ct = default)
     {
+        // Python emits `type=jwtauth` for every invitation failure so clients
+        // can distinguish token problems from plain auth failures.
         if (string.IsNullOrWhiteSpace(req.Invitation))
-            return Result<(string, string, User)>.Fail("invalid_invitation", "invitation token is required");
+            return Result<(string, string, User)>.Fail(
+                InternalErrorCode.INVALID_INVITATION, "Expired or invalid invitation", "jwtauth");
 
         if (!invitationJwt.TryVerify(req.Invitation, out var shortname, out var channel))
-            return Result<(string, string, User)>.Fail("invalid_invitation", "invitation token is invalid or expired");
+            return Result<(string, string, User)>.Fail(
+                InternalErrorCode.INVALID_INVITATION, "Expired or invalid invitation", "jwtauth");
 
         // DB row is the single-use enforcement — a consumed or never-minted
         // JWT is rejected even if the signature and expiry check out.
         var storedValue = await invitations.GetValueAsync(req.Invitation, ct);
         if (storedValue is null)
-            return Result<(string, string, User)>.Fail("invalid_invitation", "invitation token is invalid or expired");
+            return Result<(string, string, User)>.Fail(
+                InternalErrorCode.INVALID_INVITATION, "Expired or invalid invitation", "jwtauth");
 
         var user = await users.GetByShortnameAsync(shortname, ct);
         if (user is null)
-            return Result<(string, string, User)>.Fail("invalid_invitation", "invitation token is invalid or expired");
+            return Result<(string, string, User)>.Fail(
+                InternalErrorCode.INVALID_INVITATION, "Expired or invalid invitation", "jwtauth");
         if (!user.IsActive)
-            return Result<(string, string, User)>.Fail("inactive", "user is inactive");
+            return Result<(string, string, User)>.Fail(
+                InternalErrorCode.USER_ACCOUNT_LOCKED, "Account has been locked.", "auth");
 
         // Optional body-level cross-check: if the client passed shortname/email/msisdn
         // alongside the JWT, at least one must line up with the resolved user.
@@ -210,13 +251,16 @@ public sealed class UserService(
             || (req.Msisdn is not null && string.Equals(req.Msisdn, user.Msisdn, StringComparison.Ordinal));
         var anyProvided = req.Shortname is not null || req.Email is not null || req.Msisdn is not null;
         if (anyProvided && !anyMatch)
-            return Result<(string, string, User)>.Fail("invalid_invitation", "invitation does not match the supplied identity");
+            return Result<(string, string, User)>.Fail(
+                InternalErrorCode.INVALID_INVITATION, "Invalid invitation or data provided", "jwtauth");
 
         // Device lock checks — same enforcement as password login.
         if (user.LockedToDevice && !string.IsNullOrEmpty(user.DeviceId)
             && (string.IsNullOrEmpty(req.DeviceId) || req.DeviceId != user.DeviceId))
         {
-            return Result<(string, string, User)>.Fail("inactive", "account locked to a unique device");
+            return Result<(string, string, User)>.Fail(
+                InternalErrorCode.USER_ACCOUNT_LOCKED,
+                "This account is locked to a unique device !", "auth");
         }
 
         var updated = user with
@@ -307,7 +351,9 @@ public sealed class UserService(
         string? sessionToken = null, CancellationToken ct = default)
     {
         var user = await users.GetByShortnameAsync(shortname, ct);
-        if (user is null) return Result<User>.Fail("not_found", "user missing");
+        if (user is null)
+            return Result<User>.Fail(
+                InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "user missing", "db");
 
         // Reject patches targeting protected payload fields.
         var protectedCsv = settings.Value.UserProfilePayloadProtectedFields;
@@ -317,7 +363,9 @@ public sealed class UserService(
             foreach (var key in patch.Keys)
             {
                 if (protectedFields.Contains(key, StringComparer.OrdinalIgnoreCase))
-                    return Result<User>.Fail("bad_request", $"field '{key}' is protected and cannot be updated");
+                    return Result<User>.Fail(
+                        InternalErrorCode.PROTECTED_FIELD,
+                        $"field '{key}' is protected and cannot be updated", "request");
             }
         }
 
@@ -329,9 +377,11 @@ public sealed class UserService(
             if (!user.ForcePasswordChange)
             {
                 if (!patch.TryGetValue("old_password", out var oldPwObj) || oldPwObj is null)
-                    return Result<User>.Fail("bad_request", "old_password required to change password");
+                    return Result<User>.Fail(
+                        InternalErrorCode.MISSING_DATA, "old_password required to change password", "request");
                 if (string.IsNullOrEmpty(user.Password) || !hasher.Verify(oldPwObj.ToString()!, user.Password))
-                    return Result<User>.Fail("invalid_credentials", "old password is incorrect");
+                    return Result<User>.Fail(
+                        InternalErrorCode.PASSWORD_NOT_VALIDATED, "old password is incorrect", "auth");
             }
             newPasswordHash = string.IsNullOrEmpty(newPw) ? null : hasher.Hash(newPw!);
         }

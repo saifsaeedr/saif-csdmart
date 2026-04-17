@@ -23,7 +23,8 @@ public static class SubmitHandler
             async (string space, string resource_type, string schema, string subpath, HttpRequest req, EntryService entries, IOptions<DmartSettings> settings, CancellationToken ct) =>
             {
                 if (!Enum.TryParse<ResourceType>(resource_type, true, out var rt))
-                    return Response.Fail("bad_type", "unknown resource type");
+                    return Response.Fail(InternalErrorCode.NOT_SUPPORTED_TYPE,
+                        "unknown resource type", "request");
                 return await SubmitAsync(space, rt, schema, subpath, workflow: null, req, entries, settings, ct);
             });
 
@@ -32,7 +33,8 @@ public static class SubmitHandler
             async (string space, string resource_type, string workflow, string schema, string subpath, HttpRequest req, EntryService entries, IOptions<DmartSettings> settings, CancellationToken ct) =>
             {
                 if (!Enum.TryParse<ResourceType>(resource_type, true, out var rt))
-                    return Response.Fail("bad_type", "unknown resource type");
+                    return Response.Fail(InternalErrorCode.NOT_SUPPORTED_TYPE,
+                        "unknown resource type", "request");
                 return await SubmitAsync(space, rt, schema, subpath, workflow, req, entries, settings, ct);
             });
     }
@@ -48,7 +50,8 @@ public static class SubmitHandler
             var pairs = allowed.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             var key = $"{space}.{schema}";
             if (!pairs.Contains(key, StringComparer.OrdinalIgnoreCase))
-                return Response.Fail("not_allowed", $"submit not allowed for {key}");
+                return Response.Fail(InternalErrorCode.NOT_ALLOWED,
+                    $"submit not allowed for {key}", "auth");
         }
 
         // Read the body as a raw JsonElement so we can carry it into Payload.Body losslessly.
@@ -80,6 +83,6 @@ public static class SubmitHandler
         var result = await entries.CreateAsync(entry, actor: "anonymous", ct);
         return result.IsOk
             ? Response.Ok(attributes: new() { ["uuid"] = result.Value!.Uuid, ["shortname"] = result.Value.Shortname })
-            : Response.Fail(result.ErrorCode!, result.ErrorMessage!);
+            : Response.Fail(result.ErrorCode, result.ErrorMessage!, result.ErrorType ?? "request");
     }
 }

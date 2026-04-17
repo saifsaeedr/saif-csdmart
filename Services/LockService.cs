@@ -10,7 +10,8 @@ public sealed class LockService(LockRepository locks, IOptions<DmartSettings> se
 {
     public async Task<Response> LockAsync(Locator l, string? actor, CancellationToken ct = default)
     {
-        if (string.IsNullOrEmpty(actor)) return Response.Fail("unauthorized", "login required");
+        if (string.IsNullOrEmpty(actor))
+            return Response.Fail(InternalErrorCode.NOT_AUTHENTICATED, "login required", "auth");
         var period = settings.Value.LockPeriod;
         var ok = await locks.TryLockAsync(l.SpaceName, l.Subpath, l.Shortname, actor, period, ct);
         if (ok)
@@ -24,14 +25,17 @@ public sealed class LockService(LockRepository locks, IOptions<DmartSettings> se
             });
         }
         var holder = await locks.GetLockerAsync(l.SpaceName, l.Subpath, l.Shortname, period, ct);
-        return Response.Fail("locked", $"already locked by {holder}");
+        return Response.Fail(InternalErrorCode.LOCKED_ENTRY, $"already locked by {holder}", "db");
     }
 
     public async Task<Response> UnlockAsync(Locator l, string? actor, CancellationToken ct = default)
     {
-        if (string.IsNullOrEmpty(actor)) return Response.Fail("unauthorized", "login required");
+        if (string.IsNullOrEmpty(actor))
+            return Response.Fail(InternalErrorCode.NOT_AUTHENTICATED, "login required", "auth");
         var ok = await locks.UnlockAsync(l.SpaceName, l.Subpath, l.Shortname, actor, ct);
-        return ok ? Response.Ok() : Response.Fail("not_owner", "you don't hold this lock");
+        return ok
+            ? Response.Ok()
+            : Response.Fail(InternalErrorCode.NOT_ALLOWED, "you don't hold this lock", "auth");
     }
 
     public Task<string?> GetLockerAsync(Locator l, CancellationToken ct = default)

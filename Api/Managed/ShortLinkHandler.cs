@@ -24,7 +24,8 @@ public static class ShortLinkHandler
             HttpContext http, CancellationToken ct) =>
         {
             var parts = rest.Split('/');
-            if (parts.Length < 1) return Response.Fail("bad_request", "shortname required");
+            if (parts.Length < 1)
+                return Response.Fail(InternalErrorCode.MISSING_DATA, "shortname required", "request");
             var shortname = parts[^1];
             var subpath = parts.Length > 1 ? string.Join("/", parts[..^1]) : "/";
             var token = Guid.NewGuid().ToString("N")[..8];

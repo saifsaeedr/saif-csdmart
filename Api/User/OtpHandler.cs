@@ -21,7 +21,9 @@ public static class OtpHandler
             IOptions<DmartSettings> settings, CancellationToken ct) =>
         {
             var dest = req.Msisdn ?? req.Email ?? "";
-            if (string.IsNullOrEmpty(dest)) return Response.Fail("bad_request", "destination required");
+            if (string.IsNullOrEmpty(dest))
+                return Response.Fail(InternalErrorCode.EMAIL_OR_MSISDN_REQUIRED,
+                    "destination required", "request");
             var code = otp.Generate();
             var expiresAt = DateTime.UtcNow.AddSeconds(settings.Value.OtpTokenTtl);
             await repo.StoreAsync(dest, code, expiresAt, ct);
@@ -56,7 +58,9 @@ public static class OtpHandler
         {
             var dest = req.Msisdn ?? req.Email ?? "";
             var ok = await repo.VerifyAndConsumeAsync(dest, req.Code, ct);
-            if (!ok) return Response.Fail("invalid_otp", "code mismatch or expired");
+            if (!ok)
+                return Response.Fail(InternalErrorCode.OTP_INVALID,
+                    "code mismatch or expired", "auth");
 
             // If the caller is authenticated, update their verified flags.
             var actor = http.User.Identity?.Name;

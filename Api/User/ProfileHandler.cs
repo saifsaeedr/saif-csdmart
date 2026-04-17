@@ -16,9 +16,11 @@ public static class ProfileHandler
             DataAdapters.Sql.AccessRepository access, CancellationToken ct) =>
         {
             var actor = http.User.Identity?.Name;
-            if (actor is null) return Response.Fail("unauthorized", "login required");
+            if (actor is null)
+                return Response.Fail(InternalErrorCode.NOT_AUTHENTICATED, "login required", "auth");
             var user = await svc.GetByShortnameAsync(actor, ct);
-            if (user is null) return Response.Fail("not_found", "user missing");
+            if (user is null)
+                return Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "user missing", "db");
 
             // Python: attributes["permissions"] = await db.get_user_permissions(shortname)
             // Resolves user → roles → permissions into a dict keyed by
@@ -53,9 +55,11 @@ public static class ProfileHandler
         g.MapPost("/profile", async (HttpRequest req, HttpContext http, UserService svc, CancellationToken ct) =>
         {
             var actor = http.User.Identity?.Name;
-            if (actor is null) return Response.Fail("unauthorized", "login required");
+            if (actor is null)
+                return Response.Fail(InternalErrorCode.NOT_AUTHENTICATED, "login required", "auth");
             var patch = await JsonSerializer.DeserializeAsync(req.Body, DmartJsonContext.Default.DictionaryStringObject, ct);
-            if (patch is null) return Response.Fail("bad_request", "missing body");
+            if (patch is null)
+                return Response.Fail(InternalErrorCode.INVALID_DATA, "missing body", "request");
             // Python threads `auth_token` into set_user_profile so a
             // firebase_token update lands on the caller's session row only.
             // Pull from Authorization bearer first, fall back to cookie.
@@ -63,13 +67,14 @@ public static class ProfileHandler
             var result = await svc.UpdateProfileAsync(actor, patch, sessionToken, ct);
             return result.IsOk
                 ? Response.Ok(attributes: new() { ["shortname"] = result.Value!.Shortname })
-                : Response.Fail(result.ErrorCode!, result.ErrorMessage!);
+                : Response.Fail(result.ErrorCode, result.ErrorMessage!, result.ErrorType ?? "request");
         });
 
         g.MapPost("/delete", async (HttpContext http, UserService svc, CancellationToken ct) =>
         {
             var actor = http.User.Identity?.Name;
-            if (actor is null) return Response.Fail("unauthorized", "login required");
+            if (actor is null)
+                return Response.Fail(InternalErrorCode.NOT_AUTHENTICATED, "login required", "auth");
             await svc.DeleteAsync(actor, ct);
             return Response.Ok();
         });
@@ -136,7 +141,7 @@ public static class ProfileHandler
         {
             var actor = http.User.Identity?.Name;
             if (actor is null)
-                return Response.Fail("unauthorized", "login required");
+                return Response.Fail(InternalErrorCode.NOT_AUTHENTICATED, "login required", "auth");
 
             Dictionary<string, object>? body;
             try
@@ -149,7 +154,7 @@ public static class ProfileHandler
             }
             var password = body?.TryGetValue("password", out var pw) == true ? pw?.ToString() : null;
             if (string.IsNullOrEmpty(password))
-                return Response.Fail("bad_request", "password required");
+                return Response.Fail(InternalErrorCode.MISSING_DATA, "password required", "request");
 
             var valid = await svc.ValidatePasswordAsync(actor, password, ct);
             return Response.Ok(attributes: new() { ["valid"] = valid });

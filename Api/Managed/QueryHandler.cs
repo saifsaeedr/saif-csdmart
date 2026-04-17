@@ -17,9 +17,10 @@ public static class QueryHandler
             }
             catch (JsonException)
             {
-                return Response.Fail("bad_request", "invalid request body");
+                return Response.Fail(InternalErrorCode.INVALID_DATA, "invalid request body", "request");
             }
-            if (q is null) return Response.Fail("bad_request", "empty body");
+            if (q is null)
+                return Response.Fail(InternalErrorCode.INVALID_DATA, "empty body", "request");
             return await svc.ExecuteAsync(q, http.User.Identity?.Name, ct);
         });
 }

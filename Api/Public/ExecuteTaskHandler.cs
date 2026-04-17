@@ -14,7 +14,8 @@ public static class ExecuteTaskHandler
             Query q, QueryService queryService, CancellationToken ct) =>
         {
             if (task_type != "query")
-                return Response.Fail("not_implemented", $"public task type '{task_type}' not supported");
+                return Response.Fail(InternalErrorCode.NOT_SUPPORTED_TYPE,
+                    $"public task type '{task_type}' not supported", "request");
             var adjusted = q with { SpaceName = space_name };
             return await queryService.ExecuteAsync(adjusted, null, ct);
         });
