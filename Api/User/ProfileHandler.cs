@@ -56,7 +56,11 @@ public static class ProfileHandler
             if (actor is null) return Response.Fail("unauthorized", "login required");
             var patch = await JsonSerializer.DeserializeAsync(req.Body, DmartJsonContext.Default.DictionaryStringObject, ct);
             if (patch is null) return Response.Fail("bad_request", "missing body");
-            var result = await svc.UpdateProfileAsync(actor, patch, ct);
+            // Python threads `auth_token` into set_user_profile so a
+            // firebase_token update lands on the caller's session row only.
+            // Pull from Authorization bearer first, fall back to cookie.
+            var sessionToken = TryExtractSessionToken(http);
+            var result = await svc.UpdateProfileAsync(actor, patch, sessionToken, ct);
             return result.IsOk
                 ? Response.Ok(attributes: new() { ["shortname"] = result.Value!.Shortname })
                 : Response.Fail(result.ErrorCode!, result.ErrorMessage!);
@@ -170,5 +174,23 @@ public static class ProfileHandler
                 ["msisdn"] = msisdnExists,
             });
         });
+    }
+
+    // Extract the caller's access token so UserService can update the exact
+    // session row they're authenticated under (Python parity — `auth_token`
+    // threaded through set_user_profile). Authorization header wins; fall
+    // back to the auth_token cookie issued by /user/login. Returns null when
+    // neither source is present (e.g. during anonymous access).
+    private static string? TryExtractSessionToken(HttpContext http)
+    {
+        var auth = http.Request.Headers.Authorization.ToString();
+        if (!string.IsNullOrEmpty(auth))
+        {
+            const string bearer = "Bearer ";
+            if (auth.StartsWith(bearer, StringComparison.OrdinalIgnoreCase))
+                return auth.Substring(bearer.Length).Trim();
+        }
+        var cookie = http.Request.Cookies["auth_token"];
+        return string.IsNullOrEmpty(cookie) ? null : cookie;
     }
 }

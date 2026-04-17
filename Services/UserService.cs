@@ -285,8 +285,11 @@ public sealed class UserService(
         var access = jwt.IssueAccess(updatedUser.Shortname, updatedUser.Roles, updatedUser.Type);
         var refresh = jwt.IssueRefresh(updatedUser.Shortname, updatedUser.Type);
 
-        // Create session row (Python: db.set_user_session).
-        await users.CreateSessionAsync(updatedUser.Shortname, access, ct);
+        // Create session row (Python: db.set_user_session). If the client
+        // supplied a firebase_token on the login body, persist it on the
+        // session row so a future push plugin can discover it via
+        // UserRepository.GetSessionFirebaseTokensAsync. Python parity.
+        await users.CreateSessionAsync(updatedUser.Shortname, access, req.FirebaseToken, ct);
 
         return Result<(string, string, User)>.Ok((access, refresh, updatedUser));
     }
@@ -299,7 +302,9 @@ public sealed class UserService(
         return hasher.Verify(password, user.Password);
     }
 
-    public async Task<Result<User>> UpdateProfileAsync(string shortname, Dictionary<string, object> patch, CancellationToken ct = default)
+    public async Task<Result<User>> UpdateProfileAsync(
+        string shortname, Dictionary<string, object> patch,
+        string? sessionToken = null, CancellationToken ct = default)
     {
         var user = await users.GetByShortnameAsync(shortname, ct);
         if (user is null) return Result<User>.Fail("not_found", "user missing");
@@ -379,6 +384,19 @@ public sealed class UserService(
         // Python: if is_active set to false, delete all sessions.
         if (patch.TryGetValue("is_active", out var ia) && ia is false)
             await users.DeleteAllSessionsAsync(shortname, ct);
+
+        // Python parity: `firebase_token` on the patch body writes onto the
+        // caller's CURRENT session row (matched by shortname+token), not onto
+        // every session. Without the caller's token we can't identify the
+        // session, so a missing sessionToken is just a silent skip — same
+        // outcome as Python when no auth_token is threaded through.
+        if (patch.TryGetValue("firebase_token", out var ft) && ft is not null
+            && !string.IsNullOrEmpty(sessionToken))
+        {
+            var ftStr = ft.ToString();
+            if (!string.IsNullOrEmpty(ftStr))
+                await users.UpdateSessionFirebaseTokenAsync(shortname, sessionToken, ftStr, ct);
+        }
 
         return Result<User>.Ok(updated);
     }

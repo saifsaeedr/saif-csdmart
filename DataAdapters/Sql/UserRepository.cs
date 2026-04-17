@@ -189,16 +189,81 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher)
     }
 
     // ----- sessions -----
-    public async Task CreateSessionAsync(string shortname, string token, CancellationToken ct = default)
+    // `firebaseToken` is optional — Python persists it on the session row at
+    // login time so downstream push-notification code can fan out to every
+    // active session without a per-session update cycle. The C# port doesn't
+    // ship a push sender (out of scope), but the row must still be written so
+    // a future plugin has data to read via GetSessionFirebaseTokensAsync.
+    public async Task CreateSessionAsync(
+        string shortname, string token, string? firebaseToken = null, CancellationToken ct = default)
     {
         await using var conn = await db.OpenAsync(ct);
         await using var cmd = new NpgsqlCommand("""
-            INSERT INTO sessions (uuid, shortname, token, timestamp)
-            VALUES (gen_random_uuid(), $1, $2, NOW())
+            INSERT INTO sessions (uuid, shortname, token, firebase_token, timestamp)
+            VALUES (gen_random_uuid(), $1, $2, $3, NOW())
             """, conn);
         cmd.Parameters.Add(new() { Value = shortname });
         cmd.Parameters.Add(new() { Value = token });
+        cmd.Parameters.Add(new() { Value = (object?)firebaseToken ?? DBNull.Value });
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    // Update the firebase_token on exactly one session row — identified by
+    // (shortname, token). Mirrors Python's db.update_session_firebase_token()
+    // in backend/data_adapters/sql/adapter.py. Called from the profile update
+    // flow when the caller PATCHes `firebase_token` on /user/profile.
+    public async Task UpdateSessionFirebaseTokenAsync(
+        string shortname, string token, string firebaseToken, CancellationToken ct = default)
+    {
+        await using var conn = await db.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand("""
+            UPDATE sessions SET firebase_token = $3
+            WHERE shortname = $1 AND token = $2
+            """, conn);
+        cmd.Parameters.Add(new() { Value = shortname });
+        cmd.Parameters.Add(new() { Value = token });
+        cmd.Parameters.Add(new() { Value = firebaseToken });
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    // Returns every non-null firebase_token across the user's active sessions.
+    // Optionally filters out sessions whose timestamp is older than
+    // `inactivityTtlSeconds` so callers don't push to stale devices. Mirrors
+    // Python's db.get_user_session_firebase_tokens() — shipped now so a future
+    // push plugin has a stable API to call.
+    public async Task<List<string>> GetSessionFirebaseTokensAsync(
+        string shortname, int? inactivityTtlSeconds = null, CancellationToken ct = default)
+    {
+        var result = new List<string>();
+        await using var conn = await db.OpenAsync(ct);
+        NpgsqlCommand cmd;
+        if (inactivityTtlSeconds is int ttl && ttl > 0)
+        {
+            cmd = new NpgsqlCommand("""
+                SELECT firebase_token FROM sessions
+                WHERE shortname = $1
+                  AND firebase_token IS NOT NULL
+                  AND timestamp >= NOW() - ($2 || ' seconds')::interval
+                """, conn);
+            cmd.Parameters.Add(new() { Value = shortname });
+            cmd.Parameters.Add(new() { Value = ttl.ToString() });
+        }
+        else
+        {
+            cmd = new NpgsqlCommand(
+                "SELECT firebase_token FROM sessions WHERE shortname = $1 AND firebase_token IS NOT NULL",
+                conn);
+            cmd.Parameters.Add(new() { Value = shortname });
+        }
+        await using (cmd)
+        await using (var reader = await cmd.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                if (!reader.IsDBNull(0)) result.Add(reader.GetString(0));
+            }
+        }
+        return result;
     }
 
     public async Task<bool> IsSessionValidAsync(string token, CancellationToken ct = default)
