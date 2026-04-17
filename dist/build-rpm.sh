@@ -103,6 +103,14 @@ if [[ "$TARGET" == "el9" || "$TARGET" == "rhel9" ]]; then
             $ENGINE rm -f "$CONTAINER_NAME" 2>/dev/null || true
         fi
     fi
+    # Persistent NuGet cache on the host. Without this, container rebuilds
+    # (or a cleared /tmp inside the container) force a full re-download of
+    # every package on the next build. Sharing the host's ~/.nuget/packages
+    # also means host-side `dotnet build` and container `dotnet publish`
+    # reuse each other's downloads.
+    HOST_NUGET_CACHE="${HOME}/.nuget/packages"
+    mkdir -p "$HOST_NUGET_CACHE"
+
     if [ "$NEED_CREATE" = true ]; then
         echo "Creating $CONTAINER_NAME container (first time — installs SDK)..."
         $ENGINE run -d \
@@ -110,6 +118,7 @@ if [[ "$TARGET" == "el9" || "$TARGET" == "rhel9" ]]; then
             --userns=keep-id \
             --network=host \
             -v "${SRCDIR}:/src:Z" \
+            -v "${HOST_NUGET_CACHE}:/nuget-packages:Z" \
             -w /src \
             almalinux:9 \
             tail -f /dev/null
@@ -123,6 +132,7 @@ if [[ "$TARGET" == "el9" || "$TARGET" == "rhel9" ]]; then
     $ENGINE exec \
         -e VERSION="$VERSION" \
         -e HOME=/tmp \
+        -e NUGET_PACKAGES=/nuget-packages \
         -w /src \
         "$CONTAINER_NAME" \
         bash /src/dist/build-rpm.sh

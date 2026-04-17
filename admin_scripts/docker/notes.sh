@@ -34,6 +34,11 @@ if podman container exists "$BUILDER" 2>/dev/null; then
     fi
 fi
 
+# Persistent NuGet cache on the host — without this, a recreated builder
+# or a wiped /tmp forces a full re-download of every package.
+HOST_NUGET_CACHE="${HOME}/.nuget/packages"
+mkdir -p "$HOST_NUGET_CACHE"
+
 if [ "$NEED_CREATE" = true ]; then
     echo "Creating $BUILDER container (first time — installs SDK + build deps)..."
     podman run -d \
@@ -41,6 +46,7 @@ if [ "$NEED_CREATE" = true ]; then
         --userns=keep-id \
         --network=host \
         -v "$(pwd):/src:Z" \
+        -v "${HOST_NUGET_CACHE}:/nuget-packages:Z" \
         -w /src \
         "$BUILDER_IMAGE" \
         tail -f /dev/null
@@ -49,7 +55,7 @@ fi
 
 # 2. Build AOT binary for musl (Alpine)
 echo "Building dmart AOT binary (linux-musl-x64)..."
-podman exec -e HOME=/tmp -w /src "$BUILDER" \
+podman exec -e HOME=/tmp -e NUGET_PACKAGES=/nuget-packages -w /src "$BUILDER" \
     dotnet publish dmart.csproj -r linux-musl-x64 \
         -p:PublishAot=true -p:StripSymbols=true -c Release \
         -p:InformationalVersion="$VERSION" \

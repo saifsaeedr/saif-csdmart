@@ -64,6 +64,24 @@ if (args.Length > 0)
 AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
 var (dotenvPath, dotenvValues) = DotEnv.Load();
 
+// Strict config.env validation — refuse to start on unknown keys so typos
+// (DATABAE_HOST vs DATABASE_HOST) and stale keys from renamed/removed settings
+// don't silently fall through to defaults. Mirrors pydantic-settings'
+// `extra = "forbid"` behavior.
+if (dotenvPath is not null)
+{
+    var rawKeys = DotEnv.Parse(dotenvPath);
+    var keyErrors = DotEnvStrictCheck.ValidateKeys(dotenvPath, rawKeys);
+    if (keyErrors.Count > 0)
+    {
+        Console.Error.WriteLine("Error: config.env contains unrecognized keys:");
+        foreach (var err in keyErrors) Console.Error.WriteLine($"  - {err}");
+        Console.Error.WriteLine();
+        Console.Error.WriteLine("Fix or remove these keys and retry. See config.env.sample for the valid set.");
+        Environment.Exit(1);
+    }
+}
+
 switch (subcommand)
 {
     case "version":
