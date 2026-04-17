@@ -26,12 +26,21 @@ public sealed class SchemaInitializer(Db db, ILogger<SchemaInitializer> log) : I
                     await using var cmd = new NpgsqlCommand(SqlSchema.CreateAll, conn);
                     await cmd.ExecuteNonQueryAsync(ct);
                     log.LogInformation("dmart schema ready");
+                    // If the `hstore` extension was just created by CreateAll,
+                    // connections opened BEFORE this point cached the server's
+                    // type map without hstore and will throw
+                    // "data type name 'hstore' could not be found" when
+                    // OtpRepository tries to bind a parameter. Reload the
+                    // current connection's types and clear the pool so every
+                    // subsequent connection re-fetches the type map.
+                    await conn.ReloadTypesAsync(ct);
                 }
                 finally
                 {
                     await using var ul = new NpgsqlCommand("SELECT pg_advisory_unlock(1)", conn);
                     await ul.ExecuteNonQueryAsync(ct);
                 }
+                NpgsqlConnection.ClearAllPools();
                 return; // success
             }
             catch (Npgsql.PostgresException ex) when (ex.SqlState == "40P01") // deadlock

@@ -81,7 +81,7 @@ public class PluginManagerIntegrationTests : IClassFixture<DmartFactory>
                 Shortname = spaceName,
                 SpaceName = spaceName,
                 Subpath = "/",
-                OwnerShortname = "cstest",
+                OwnerShortname = "dmart",
                 IsActive = true,
                 Languages = new() { Language.En },
                 ActivePlugins = new() { "resource_folders_creation" },
@@ -100,11 +100,11 @@ public class PluginManagerIntegrationTests : IClassFixture<DmartFactory>
                 Subpath = "/",
                 ResourceType = ResourceType.Folder,
                 IsActive = true,
-                OwnerShortname = "cstest",
+                OwnerShortname = "dmart",
                 CreatedAt = DateTime.UtcNow,
                 UpdatedAt = DateTime.UtcNow,
             };
-            var result = await entries.CreateAsync(probe, "cstest");
+            var result = await entries.CreateAsync(probe, "dmart");
             result.IsOk.ShouldBeTrue($"probe folder create failed: {result.ErrorMessage}");
 
             // The /schema follow-up is triggered by Space creates — since we
@@ -119,7 +119,7 @@ public class PluginManagerIntegrationTests : IClassFixture<DmartFactory>
                 Shortname = spaceName,
                 ActionType = ActionType.Create,
                 ResourceType = ResourceType.Space,
-                UserShortname = "cstest",
+                UserShortname = "dmart",
             });
             // AfterActionAsync fires concurrent hooks as fire-and-forget — give
             // the background task a moment to land before we check. A small
@@ -169,7 +169,7 @@ public class PluginManagerIntegrationTests : IClassFixture<DmartFactory>
                 Shortname = spaceName,
                 SpaceName = spaceName,
                 Subpath = "/",
-                OwnerShortname = "cstest",
+                OwnerShortname = "dmart",
                 IsActive = true,
                 Languages = new() { Language.En },
                 ActivePlugins = new(),
@@ -184,7 +184,7 @@ public class PluginManagerIntegrationTests : IClassFixture<DmartFactory>
                 Shortname = spaceName,
                 ActionType = ActionType.Create,
                 ResourceType = ResourceType.Space,
-                UserShortname = "cstest",
+                UserShortname = "dmart",
             });
             // Give any fire-and-forget tasks time to land — we want to verify
             // they DID NOT land, so waiting is load-bearing here.

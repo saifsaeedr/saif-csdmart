@@ -540,9 +540,11 @@ internal static class EntryMapper
             ["updated_at"] = e.UpdatedAt,
             ["owner_shortname"] = e.OwnerShortname,
             ["owner_group_shortname"] = e.OwnerGroupShortname,
-            ["acl"] = e.Acl,
+            // acl / relationships are always emitted — null collapses to an
+            // empty array so clients get a stable shape (Python does the same).
+            ["acl"] = e.Acl ?? new List<AclEntry>(),
             ["payload"] = includePayloadBody ? e.Payload : StripPayloadBody(e.Payload),
-            ["relationships"] = e.Relationships,
+            ["relationships"] = e.Relationships ?? new List<Dictionary<string, object>>(),
             ["last_checksum_history"] = e.LastChecksumHistory,
             ["state"] = e.State,
             ["is_open"] = e.IsOpen,
@@ -584,9 +586,10 @@ internal static class SpaceMapper
             ["updated_at"] = s.UpdatedAt,
             ["owner_shortname"] = s.OwnerShortname,
             ["owner_group_shortname"] = s.OwnerGroupShortname,
-            ["acl"] = s.Acl,
+            // Always-present shape keys — null collapses to empty collection.
+            ["acl"] = s.Acl ?? new List<AclEntry>(),
             ["payload"] = s.Payload,
-            ["relationships"] = s.Relationships,
+            ["relationships"] = s.Relationships ?? new List<Dictionary<string, object>>(),
             ["last_checksum_history"] = s.LastChecksumHistory,
             ["root_registration_signature"] = s.RootRegistrationSignature,
             ["primary_website"] = s.PrimaryWebsite,
