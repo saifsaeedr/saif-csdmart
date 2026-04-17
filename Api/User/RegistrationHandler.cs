@@ -23,9 +23,21 @@ public static class RegistrationHandler
             var emailOtp = body.TryGetValue("email_otp", out var eo) ? eo?.ToString() : null;
             var msisdnOtp = body.TryGetValue("msisdn_otp", out var mo) ? mo?.ToString() : null;
             var result = await svc.CreateAsync(shortname, email, msisdn, password, language, emailOtp, msisdnOtp, ct);
-            return result.IsOk
-                ? Response.Ok(attributes: new() { ["uuid"] = result.Value!.Uuid, ["shortname"] = result.Value.Shortname })
-                : Response.Fail(result.ErrorCode!, result.ErrorMessage!);
+            if (!result.IsOk)
+                return Response.Fail(result.ErrorCode!, result.ErrorMessage!);
+
+            var (user, invitations) = result.Value;
+            var attrs = new Dictionary<string, object>
+            {
+                ["uuid"] = user.Uuid,
+                ["shortname"] = user.Shortname,
+            };
+            // Invitation JWTs for unverified channels — included on the
+            // creation response so callers have something to hand back to
+            // the new user while SMTP/SMS delivery is not yet wired up.
+            if (invitations.Count > 0)
+                attrs["invitations"] = invitations;
+            return Response.Ok(attributes: attrs);
         });
     }
 }

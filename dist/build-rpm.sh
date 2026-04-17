@@ -96,8 +96,17 @@ if [[ "$TARGET" == "el9" || "$TARGET" == "rhel9" ]]; then
         $ENGINE start "$CONTAINER_NAME" 2>/dev/null || true
         sleep 1
         if $ENGINE exec "$CONTAINER_NAME" true 2>/dev/null; then
-            echo "Reusing existing $CONTAINER_NAME container..."
-            NEED_CREATE=false
+            # Verify DNS works — a stale container created under a different
+            # host network config can have a broken /etc/resolv.conf that
+            # survives restarts. If DNS is dead we recreate rather than hand
+            # the user a cryptic NuGet restore failure downstream.
+            if $ENGINE exec "$CONTAINER_NAME" getent hosts api.nuget.org >/dev/null 2>&1; then
+                echo "Reusing existing $CONTAINER_NAME container..."
+                NEED_CREATE=false
+            else
+                echo "Container $CONTAINER_NAME has broken DNS, recreating..."
+                $ENGINE rm -f "$CONTAINER_NAME" 2>/dev/null || true
+            fi
         else
             echo "Container $CONTAINER_NAME is dead, recreating..."
             $ENGINE rm -f "$CONTAINER_NAME" 2>/dev/null || true
@@ -113,12 +122,18 @@ if [[ "$TARGET" == "el9" || "$TARGET" == "rhel9" ]]; then
 
     if [ "$NEED_CREATE" = true ]; then
         echo "Creating $CONTAINER_NAME container (first time — installs SDK)..."
+        # Bind-mount /etc/resolv.conf read-only so the container's DNS
+        # tracks the host live instead of whatever was baked at creation
+        # time — otherwise a long-lived builder container keeps a stale
+        # resolver list and NuGet restore starts failing with "Name or
+        # service not known" after the host's DNS changes.
         $ENGINE run -d \
             --name "$CONTAINER_NAME" \
             --userns=keep-id \
             --network=host \
             -v "${SRCDIR}:/src:Z" \
             -v "${HOST_NUGET_CACHE}:/nuget-packages:Z" \
+            -v /etc/resolv.conf:/etc/resolv.conf:ro \
             -w /src \
             almalinux:9 \
             tail -f /dev/null

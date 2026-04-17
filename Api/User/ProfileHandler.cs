@@ -70,8 +70,15 @@ public static class ProfileHandler
             return Response.Ok();
         });
 
-        // POST /user/reset — admin clears another user's failed-login attempt counter.
-        g.MapPost("/reset", async (HttpRequest req, HttpContext http, UserRepository users, CancellationToken ct) =>
+        // POST /user/reset — Python parity: mints a fresh invitation for the
+        // target user (so they can log in without their old password) AND
+        // clears failed-login attempts. The invitation JWTs are returned in
+        // the response body since the C# port has no SMTP/SMS delivery.
+        // Flips ForcePasswordChange=true so the target must set a new
+        // password on first /profile update after invitation login.
+        g.MapPost("/reset", async (HttpRequest req, HttpContext http,
+            UserRepository users, InvitationService invitationService,
+            CancellationToken ct) =>
         {
             var actor = http.User.Identity?.Name;
             if (actor is null)
@@ -95,7 +102,28 @@ public static class ProfileHandler
                 return Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "user not found", "request");
 
             await users.ResetAttemptsAsync(target, ct);
-            return Response.Ok(attributes: new() { ["shortname"] = target });
+            // Flip the flag so the next login forces a fresh password choice.
+            await users.UpsertAsync(existing with
+            {
+                ForcePasswordChange = true,
+                UpdatedAt = DateTime.UtcNow,
+            }, ct);
+
+            var minted = new Dictionary<string, string>();
+            if (!string.IsNullOrWhiteSpace(existing.Email))
+            {
+                var t = await invitationService.MintAsync(existing, Dmart.Models.Enums.InvitationChannel.Email, ct);
+                if (t is not null) minted["email"] = t;
+            }
+            if (!string.IsNullOrWhiteSpace(existing.Msisdn))
+            {
+                var t = await invitationService.MintAsync(existing, Dmart.Models.Enums.InvitationChannel.Sms, ct);
+                if (t is not null) minted["msisdn"] = t;
+            }
+
+            var attrs = new Dictionary<string, object> { ["shortname"] = target };
+            if (minted.Count > 0) attrs["invitations"] = minted;
+            return Response.Ok(attributes: attrs);
         });
 
         // POST /user/validate_password — Python verifies against stored hash,

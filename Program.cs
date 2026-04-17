@@ -547,6 +547,7 @@ builder.Services.AddSingleton<HistoryRepository>();
 builder.Services.AddSingleton<LockRepository>();
 builder.Services.AddSingleton<LinkRepository>();
 builder.Services.AddSingleton<OtpRepository>();
+builder.Services.AddSingleton<InvitationRepository>();
 builder.Services.AddSingleton<CountHistoryRepository>();
 builder.Services.AddSingleton<HealthCheckRepository>();
 builder.Services.AddSingleton<SpaceRepository>();
@@ -606,6 +607,8 @@ builder.Services.AddSingleton<WsConnectionManager>();
 
 // Auth
 builder.Services.AddSingleton<JwtIssuer>();
+builder.Services.AddSingleton<InvitationJwt>();
+builder.Services.AddSingleton<InvitationService>();
 builder.Services.AddSingleton<PasswordHasher>();
 builder.Services.AddSingleton<OtpProvider>();
 builder.Services.AddSingleton<Dmart.Auth.OAuth.GoogleProvider>();

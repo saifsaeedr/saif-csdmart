@@ -15,6 +15,9 @@ public sealed class UserService(
     OtpRepository otp,
     PasswordHasher hasher,
     JwtIssuer jwt,
+    InvitationJwt invitationJwt,
+    InvitationRepository invitations,
+    InvitationService invitationService,
     IOptions<DmartSettings> settings)
 {
     // Management space name — comes from DmartSettings.ManagementSpace so the
@@ -24,19 +27,19 @@ public sealed class UserService(
     public Task<User?> GetByShortnameAsync(string shortname, CancellationToken ct = default)
         => users.GetByShortnameAsync(shortname, ct);
 
-    public async Task<Result<User>> CreateAsync(
+    public async Task<Result<(User User, Dictionary<string, string> Invitations)>> CreateAsync(
         string shortname, string? email, string? msisdn, string? password, string? language,
         string? emailOtp = null, string? msisdnOtp = null,
         CancellationToken ct = default)
     {
         // Python: check is_registrable setting before allowing self-registration.
         if (!settings.Value.IsRegistrable)
-            return Result<User>.Fail("forbidden", "registration is disabled");
+            return Result<(User, Dictionary<string, string>)>.Fail("forbidden", "registration is disabled");
 
         if (string.IsNullOrWhiteSpace(shortname))
-            return Result<User>.Fail("invalid_shortname", "shortname required");
+            return Result<(User, Dictionary<string, string>)>.Fail("invalid_shortname", "shortname required");
         if (await users.ExistsAsync(shortname, email, msisdn, ct))
-            return Result<User>.Fail("conflict", "user already exists");
+            return Result<(User, Dictionary<string, string>)>.Fail("conflict", "user already exists");
 
         // Python: is_otp_for_create_required — every supplied channel (email or
         // msisdn) must carry an OTP that was issued via /user/otp-request and
@@ -46,16 +49,16 @@ public sealed class UserService(
             if (!string.IsNullOrEmpty(email))
             {
                 if (string.IsNullOrEmpty(emailOtp))
-                    return Result<User>.Fail("bad_request", "email_otp is required");
+                    return Result<(User, Dictionary<string, string>)>.Fail("bad_request", "email_otp is required");
                 if (!await otp.VerifyAndConsumeAsync(email, emailOtp, ct))
-                    return Result<User>.Fail("invalid_otp", "email_otp is invalid or expired");
+                    return Result<(User, Dictionary<string, string>)>.Fail("invalid_otp", "email_otp is invalid or expired");
             }
             if (!string.IsNullOrEmpty(msisdn))
             {
                 if (string.IsNullOrEmpty(msisdnOtp))
-                    return Result<User>.Fail("bad_request", "msisdn_otp is required");
+                    return Result<(User, Dictionary<string, string>)>.Fail("bad_request", "msisdn_otp is required");
                 if (!await otp.VerifyAndConsumeAsync(msisdn, msisdnOtp, ct))
-                    return Result<User>.Fail("invalid_otp", "msisdn_otp is invalid or expired");
+                    return Result<(User, Dictionary<string, string>)>.Fail("invalid_otp", "msisdn_otp is invalid or expired");
             }
         }
 
@@ -80,7 +83,25 @@ public sealed class UserService(
             UpdatedAt = DateTime.UtcNow,
         };
         await users.UpsertAsync(user, ct);
-        return Result<User>.Ok(user);
+
+        // Mint invitation JWTs for every unverified channel so the user can
+        // complete first-login via POST /user/login (invitation path). When
+        // IsOtpForCreateRequired=true, channels are already verified above and
+        // no invitation is needed — matches Python's send_sms_email_invitation
+        // which only triggers for unverified channels.
+        var minted = new Dictionary<string, string>();
+        if (!user.IsEmailVerified && !string.IsNullOrWhiteSpace(user.Email))
+        {
+            var t = await invitationService.MintAsync(user, InvitationChannel.Email, ct);
+            if (t is not null) minted["email"] = t;
+        }
+        if (!user.IsMsisdnVerified && !string.IsNullOrWhiteSpace(user.Msisdn))
+        {
+            var t = await invitationService.MintAsync(user, InvitationChannel.Sms, ct);
+            if (t is not null) minted["msisdn"] = t;
+        }
+
+        return Result<(User, Dictionary<string, string>)>.Ok((user, minted));
     }
 
     // Standard password-based login. Mirrors Python's login() PATH C (password).
@@ -145,6 +166,74 @@ public sealed class UserService(
         }
 
         return await ProcessLoginAsync(user, req, requestHeaders, ct);
+    }
+
+    // Invitation-token login. Mirrors Python's login() PATH A (invitation).
+    //
+    // Wire contract (Python parity):
+    //   * Body carries `invitation` = full JWT string minted earlier. No password.
+    //   * JWT payload is `{data:{shortname, channel}, expires:<unix>}` — see
+    //     InvitationJwt for the exact encoding.
+    //   * The JWT MUST correspond to a live row in the invitations table —
+    //     replays after consumption fail with INVALID_INVITATION.
+    //   * If the body includes shortname/email/msisdn cross-checks, at least
+    //     one must match the user record resolved from the JWT's shortname claim.
+    //   * On success: set ForcePasswordChange=true; set IsEmailVerified or
+    //     IsMsisdnVerified based on the JWT's channel claim; delete the
+    //     invitation row; issue access/refresh tokens via ProcessLoginAsync.
+    public async Task<Result<(string Access, string Refresh, User User)>> LoginWithInvitationAsync(
+        UserLoginRequest req, Dictionary<string, string>? requestHeaders = null, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(req.Invitation))
+            return Result<(string, string, User)>.Fail("invalid_invitation", "invitation token is required");
+
+        if (!invitationJwt.TryVerify(req.Invitation, out var shortname, out var channel))
+            return Result<(string, string, User)>.Fail("invalid_invitation", "invitation token is invalid or expired");
+
+        // DB row is the single-use enforcement — a consumed or never-minted
+        // JWT is rejected even if the signature and expiry check out.
+        var storedValue = await invitations.GetValueAsync(req.Invitation, ct);
+        if (storedValue is null)
+            return Result<(string, string, User)>.Fail("invalid_invitation", "invitation token is invalid or expired");
+
+        var user = await users.GetByShortnameAsync(shortname, ct);
+        if (user is null)
+            return Result<(string, string, User)>.Fail("invalid_invitation", "invitation token is invalid or expired");
+        if (!user.IsActive)
+            return Result<(string, string, User)>.Fail("inactive", "user is inactive");
+
+        // Optional body-level cross-check: if the client passed shortname/email/msisdn
+        // alongside the JWT, at least one must line up with the resolved user.
+        var anyMatch =
+               (req.Shortname is not null && string.Equals(req.Shortname, user.Shortname, StringComparison.Ordinal))
+            || (req.Email is not null && string.Equals(req.Email, user.Email, StringComparison.OrdinalIgnoreCase))
+            || (req.Msisdn is not null && string.Equals(req.Msisdn, user.Msisdn, StringComparison.Ordinal));
+        var anyProvided = req.Shortname is not null || req.Email is not null || req.Msisdn is not null;
+        if (anyProvided && !anyMatch)
+            return Result<(string, string, User)>.Fail("invalid_invitation", "invitation does not match the supplied identity");
+
+        // Device lock checks — same enforcement as password login.
+        if (user.LockedToDevice && !string.IsNullOrEmpty(user.DeviceId)
+            && (string.IsNullOrEmpty(req.DeviceId) || req.DeviceId != user.DeviceId))
+        {
+            return Result<(string, string, User)>.Fail("inactive", "account locked to a unique device");
+        }
+
+        var updated = user with
+        {
+            ForcePasswordChange = true,
+            IsEmailVerified = channel == InvitationChannel.Email ? true : user.IsEmailVerified,
+            IsMsisdnVerified = channel == InvitationChannel.Sms   ? true : user.IsMsisdnVerified,
+            UpdatedAt = DateTime.UtcNow,
+        };
+        await users.UpsertAsync(updated, ct);
+
+        // Single-use — delete BEFORE ProcessLoginAsync so a crash in session
+        // setup still consumes the invitation (safer to re-auth with a new
+        // invitation than to allow a replay).
+        await invitations.DeleteAsync(req.Invitation, ct);
+
+        return await ProcessLoginAsync(updated, req, requestHeaders, ct);
     }
 
     // Shared post-authentication flow. Mirrors Python's process_user_login().
@@ -245,6 +334,24 @@ public sealed class UserService(
         static string? Str(Dictionary<string, object> d, string k, string? fallback)
             => d.TryGetValue(k, out var v) ? v?.ToString() : fallback;
 
+        // If the password was updated, clear the force-change flag — Python
+        // does the same inside set_user_profile. The flag is only meaningful
+        // until the user picks their own password; keeping it true afterwards
+        // would force them to change it again on next login.
+        bool resolvedForcePasswordChange;
+        if (newPasswordHash is not null)
+        {
+            resolvedForcePasswordChange = false;
+        }
+        else if (patch.TryGetValue("force_password_change", out var fpc))
+        {
+            resolvedForcePasswordChange = fpc is true || (fpc is bool b && b);
+        }
+        else
+        {
+            resolvedForcePasswordChange = user.ForcePasswordChange;
+        }
+
         var updated = user with
         {
             Email = Str(patch, "email", user.Email),
@@ -259,9 +366,7 @@ public sealed class UserService(
                 ? new Translation(En: desc.ToString())
                 : user.Description,
             DeviceId = Str(patch, "device_id", user.DeviceId),
-            ForcePasswordChange = patch.TryGetValue("force_password_change", out var fpc)
-                ? fpc is true || (fpc is bool b && b)
-                : user.ForcePasswordChange,
+            ForcePasswordChange = resolvedForcePasswordChange,
             Password = newPasswordHash ?? user.Password,
             UpdatedAt = DateTime.UtcNow,
         };

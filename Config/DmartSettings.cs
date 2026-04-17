@@ -15,6 +15,10 @@ public sealed class DmartSettings
     public string JwtAudience { get; set; } = "dmart";
     public int JwtAccessMinutes { get; set; } = 15;
     public int JwtRefreshDays { get; set; } = 30;
+    // Invitation tokens (minted via /user/reset or on user creation) live for
+    // this many days. Python's jwt_access_expires default is 30 days for the
+    // same payload, so we match.
+    public int JwtInvitationDays { get; set; } = 30;
 
     // Full Npgsql connection string. If unset, Db builds one from the
     // individual DATABASE_* components below (matching Python's behavior

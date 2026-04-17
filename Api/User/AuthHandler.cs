@@ -27,10 +27,13 @@ public static class AuthHandler
                 headers[h.Key] = h.Value.ToString();
             }
 
-            // Route to OTP or password login based on whether otp field is present.
-            var result = !string.IsNullOrEmpty(req.Otp)
-                ? await svc.LoginWithOtpAsync(req, headers, ct)
-                : await svc.LoginAsync(req, headers, ct);
+            // Route dispatch — invitation takes precedence over OTP over password.
+            // Matches Python's `/user/login` path-selection order in user/router.py.
+            var result = !string.IsNullOrEmpty(req.Invitation)
+                ? await svc.LoginWithInvitationAsync(req, headers, ct)
+                : !string.IsNullOrEmpty(req.Otp)
+                    ? await svc.LoginWithOtpAsync(req, headers, ct)
+                    : await svc.LoginAsync(req, headers, ct);
 
             if (!result.IsOk)
                 return Results.Json(Response.Fail(result.ErrorCode!, result.ErrorMessage!, type: "auth"),

@@ -297,7 +297,7 @@ public static class SqlSchema
     -- ============================================================
     CREATE TABLE IF NOT EXISTS invitations (
         uuid              UUID PRIMARY KEY,
-        invitation_token  TEXT NOT NULL,
+        invitation_token  TEXT NOT NULL UNIQUE,
         invitation_value  TEXT NOT NULL,
         timestamp         TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
@@ -456,5 +456,17 @@ public static class SqlSchema
     ALTER TABLE spaces      ADD COLUMN IF NOT EXISTS hide_space            BOOLEAN;
     ALTER TABLE spaces      ADD COLUMN IF NOT EXISTS ordinal               INTEGER;
     ALTER TABLE spaces      ADD COLUMN IF NOT EXISTS mirrors               JSONB;
+
+    -- Ensure invitations.invitation_token is UNIQUE even on DBs created
+    -- before the constraint was added to the CREATE TABLE above.
+    DO $$ BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'invitations_invitation_token_key'
+        ) THEN
+            ALTER TABLE invitations ADD CONSTRAINT invitations_invitation_token_key
+                UNIQUE (invitation_token);
+        END IF;
+    END $$;
     """;
 }
