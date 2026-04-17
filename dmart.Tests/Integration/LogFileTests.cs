@@ -80,12 +80,16 @@ public sealed class LogFileTests
         var path = NewTempLog();
         try
         {
-            using var factory = new LogFileFactory(path);
+            // Resolve the bootstrap admin password the same way DmartFactory
+            // does, so this test works whether the runner has DMART_TEST_PWD
+            // set, a config.env ADMIN_PASSWORD, or neither.
+            var adminPassword = ResolveAdminPassword();
+            using var factory = new LogFileFactory(path, adminPassword);
             using var client = factory.CreateClient();
 
             // Successful login — body has password that MUST be redacted.
             var okResp = await client.PostAsJsonAsync("/user/login",
-                new UserLoginRequest("dmart", null, null, "Test1234", null),
+                new UserLoginRequest("dmart", null, null, adminPassword, null),
                 DmartJsonContext.Default.UserLoginRequest);
             okResp.IsSuccessStatusCode.ShouldBeTrue();
 
@@ -158,6 +162,23 @@ public sealed class LogFileTests
         try { if (File.Exists(path)) File.Delete(path); } catch { /* best effort */ }
     }
 
+    // Matches DmartFactory's lookup so the test uses whichever password the
+    // bootstrap admin was actually created with on this runner (varies
+    // between dev laptop, CI runner, and local config.env).
+    private static string ResolveAdminPassword()
+    {
+        var fromEnv = Environment.GetEnvironmentVariable("DMART_TEST_PWD");
+        if (!string.IsNullOrEmpty(fromEnv)) return fromEnv;
+        var configFile = DotEnv.FindConfigFile();
+        if (configFile is not null)
+        {
+            var raw = DotEnv.Parse(configFile);
+            if (raw.TryGetValue("ADMIN_PASSWORD", out var pw) && !string.IsNullOrEmpty(pw))
+                return pw;
+        }
+        return "testpassword12345";
+    }
+
     // Dedicated factory that mirrors DmartFactory's config overrides and
     // adds a LOG_FILE override. Each test creates its own so the file
     // handle lifetime is scoped to the test and isn't shared with the
@@ -165,7 +186,12 @@ public sealed class LogFileTests
     private sealed class LogFileFactory : WebApplicationFactory<Program>
     {
         private readonly string _logFilePath;
-        public LogFileFactory(string logFilePath) => _logFilePath = logFilePath;
+        private readonly string _adminPassword;
+        public LogFileFactory(string logFilePath, string adminPassword)
+        {
+            _logFilePath = logFilePath;
+            _adminPassword = adminPassword;
+        }
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
@@ -180,7 +206,7 @@ public sealed class LogFileTests
                     ["Dmart:JwtIssuer"] = "dmart",
                     ["Dmart:JwtAudience"] = "dmart",
                     ["Dmart:JwtAccessMinutes"] = "5",
-                    ["Dmart:AdminPassword"] = "Test1234",
+                    ["Dmart:AdminPassword"] = _adminPassword,
                     ["Dmart:AdminEmail"] = "admin@test.local",
                     ["Dmart:LogFile"] = _logFilePath,
                 };
