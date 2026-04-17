@@ -3,8 +3,6 @@
     "module": "es2022",
     "moduleResolution": "node",
     "target": "es2022",
-    "strict": true,
-    "isolatedModules": true,
     "lib": ["es2022", "dom", "dom.iterable"],
     "allowJs": true,
     "checkJs": true,
@@ -22,11 +20,8 @@
         "./src/*"
       ]
     },
-    "noImplicitAny": false,
-    "types": [
-      "vitest/globals"
-    ]
-
+    "strict": true,
+    "noImplicitAny": false
   },
   "include": [
     "vite-env.d.ts",
@@ -37,10 +32,5 @@
     ".routify/**.js",
     "test/**/*.ts",
     "test/**/*.js"
-  ],
-  "exclude": [
-    ".routify/**/*.svelte",
-    "node_modules/**/*.svelte",
-    "node_modules/**/*.ts"
   ]
 }
