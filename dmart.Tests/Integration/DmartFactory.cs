@@ -81,22 +81,32 @@ public sealed class DmartFactory : WebApplicationFactory<Program>
 
         builder.ConfigureAppConfiguration((_, cfg) =>
         {
-            cfg.AddInMemoryCollection(new Dictionary<string, string?>
+            var overrides = new Dictionary<string, string?>
             {
-                // Use the resolved connection string (env var or config.env).
-                ["Dmart:PostgresConnection"] = PgConn,
-                // Null out individual components so Db.BuildConnectionString
-                // doesn't assemble from stale/partial dotenv leftovers.
-                ["Dmart:DatabaseHost"] = null,
-                ["Dmart:DatabasePassword"] = null,
-                ["Dmart:DatabaseName"] = null,
                 ["Dmart:JwtSecret"] = "test-secret-test-secret-test-secret-32-bytes",
                 ["Dmart:JwtIssuer"] = "dmart",
                 ["Dmart:JwtAudience"] = "dmart",
                 ["Dmart:JwtAccessMinutes"] = "5",
                 ["Dmart:AdminPassword"] = AdminPassword,
                 ["Dmart:AdminEmail"] = "admin@test.local",
-            });
+            };
+
+            // If a PostgresConnection is resolved (from env var or config.env),
+            // route the app at it and null out the individual DATABASE_*
+            // components so Db.BuildConnectionString doesn't mix the new
+            // connection string with stale/partial dotenv leftovers. If PgConn
+            // is null, leave the individual components alone so the values
+            // loaded from config.env by Program.cs remain authoritative (and
+            // the settings validator sees a populated DatabaseHost).
+            if (!string.IsNullOrEmpty(PgConn))
+            {
+                overrides["Dmart:PostgresConnection"] = PgConn;
+                overrides["Dmart:DatabaseHost"] = null;
+                overrides["Dmart:DatabasePassword"] = null;
+                overrides["Dmart:DatabaseName"] = null;
+            }
+
+            cfg.AddInMemoryCollection(overrides);
         });
     }
 }
