@@ -17,17 +17,61 @@ public static class OtpHandler
         // All endpoints also share a single TTL (settings.OtpTokenTtl, default
         // 300s) — Python uses one global value rather than per-endpoint
         // minutes.
+        // Python parity: SendOTPRequest.check_fields() requires exactly one of
+        // {shortname, msisdn, email}. Handler then looks up the user, enforces
+        // a per-destination resend cooldown (allow_otp_resend_after), and
+        // dispatches the OTP over SMS (msisdn) or email. Shortname-only
+        // requests currently no-op on the send side — matches get_otp_key()
+        // returning "" for shortname.
         g.MapPost("/otp-request", async (SendOTPRequest req, OtpProvider otp, OtpRepository repo,
-            IOptions<DmartSettings> settings, CancellationToken ct) =>
+            UserRepository users, IOptions<DmartSettings> settings, CancellationToken ct) =>
         {
-            var dest = req.Msisdn ?? req.Email ?? "";
-            if (string.IsNullOrEmpty(dest))
+            var provided = (string.IsNullOrEmpty(req.Shortname) ? 0 : 1)
+                         + (string.IsNullOrEmpty(req.Msisdn) ? 0 : 1)
+                         + (string.IsNullOrEmpty(req.Email) ? 0 : 1);
+            if (provided == 0)
                 return Response.Fail(InternalErrorCode.EMAIL_OR_MSISDN_REQUIRED,
-                    "destination required", "request");
-            var code = otp.Generate();
-            var expiresAt = DateTime.UtcNow.AddSeconds(settings.Value.OtpTokenTtl);
-            await repo.StoreAsync(dest, code, expiresAt, ct);
-            await otp.SendAsync(dest, code, ct);
+                    "One of these [email, msisdn, shortname] should be set!", "OTP");
+            if (provided > 1)
+                return Response.Fail(InternalErrorCode.INVALID_STANDALONE_DATA,
+                    "Too many input has been passed", "OTP");
+
+            Models.Core.User? user;
+            string? dest = null;
+            if (!string.IsNullOrEmpty(req.Shortname))
+            {
+                user = await users.GetByShortnameAsync(req.Shortname, ct);
+            }
+            else if (!string.IsNullOrEmpty(req.Msisdn))
+            {
+                user = await users.GetByMsisdnAsync(req.Msisdn, ct);
+                dest = req.Msisdn;
+            }
+            else
+            {
+                var lower = req.Email!.ToLowerInvariant();
+                user = await users.GetByEmailAsync(lower, ct);
+                dest = lower;
+            }
+
+            var s = settings.Value;
+            if (user is null && !s.IsRegistrable)
+                return Response.Fail(InternalErrorCode.USERNAME_NOT_EXIST,
+                    "No user found with the provided information", "request");
+
+            if (dest is not null)
+            {
+                var since = await repo.GetCreatedSinceAsync(dest, ct);
+                if (since is int elapsed && elapsed < s.AllowOtpResendAfter)
+                    return Response.Fail(InternalErrorCode.OTP_RESEND_BLOCKED,
+                        $"Resend OTP is allowed after {s.AllowOtpResendAfter - elapsed} seconds", "request");
+
+                var code = otp.Generate();
+                var expiresAt = DateTime.UtcNow.AddSeconds(s.OtpTokenTtl);
+                await repo.StoreAsync(dest, code, expiresAt, ct);
+                await otp.SendAsync(dest, code, ct);
+            }
+
             return Response.Ok();
         }).RequireRateLimiting("auth-by-ip");
 

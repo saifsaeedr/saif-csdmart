@@ -50,6 +50,9 @@ public sealed class FailedResponseFilter : IEndpointFilter
         InternalErrorCode.ALREADY_EXIST_SPACE_NAME => 409,
         InternalErrorCode.DATA_SHOULD_BE_UNIQUE => 409,
 
+        // Forbidden — HTTP 403 (Python parity: /user/otp-request resend cooldown).
+        InternalErrorCode.OTP_RESEND_BLOCKED => 403,
+
         // Locked — HTTP 423
         InternalErrorCode.LOCKED_ENTRY => 423,
         InternalErrorCode.LOCK_UNAVAILABLE => 423,

@@ -16,7 +16,8 @@ public sealed record UserLoginRequest(
 
 public sealed record SendOTPRequest(
     string? Msisdn,
-    string? Email);
+    string? Email,
+    string? Shortname = null);
 
 public sealed record ConfirmOTPRequest(
     string Code,

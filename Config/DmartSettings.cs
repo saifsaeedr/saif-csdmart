@@ -79,6 +79,12 @@ public sealed class DmartSettings
     // that was stored at creation time. Mirrors Python's `otp_token_ttl`.
     public int OtpTokenTtl { get; set; } = 60 * 5;
 
+    // Minimum seconds between OTP re-sends for the same destination. Mirrors
+    // Python's `allow_otp_resend_after`. /user/otp-request returns
+    // OTP_RESEND_BLOCKED (HTTP 403) when a prior OTP was issued within this
+    // window.
+    public int AllowOtpResendAfter { get; set; } = 60;
+
     // If > 0, sessions that haven't been touched for this many seconds are
     // rejected at JWT validation time (and the session row is deleted). 0
     // disables the check. Mirrors Python's `session_inactivity_ttl`.

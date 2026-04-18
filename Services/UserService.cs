@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Dmart.Auth;
 using Dmart.Config;
 using Dmart.DataAdapters.Sql;
@@ -17,7 +18,6 @@ public sealed class UserService(
     JwtIssuer jwt,
     InvitationJwt invitationJwt,
     InvitationRepository invitations,
-    InvitationService invitationService,
     IOptions<DmartSettings> settings)
 {
     // Management space name — comes from DmartSettings.ManagementSpace so the
@@ -27,88 +27,205 @@ public sealed class UserService(
     public Task<User?> GetByShortnameAsync(string shortname, CancellationToken ct = default)
         => users.GetByShortnameAsync(shortname, ct);
 
-    public async Task<Result<(User User, Dictionary<string, string> Invitations)>> CreateAsync(
-        string shortname, string? email, string? msisdn, string? password, string? language,
-        string? emailOtp = null, string? msisdnOtp = null,
+    // Python-parity password regex (utils/regex.py::PASSWORD). Requires at
+    // least one digit (Latin or Arabic-Indic), one uppercase letter (Latin
+    // A-Z or Arabic ا-ي), length 8-64 from a specific character class.
+    private const string PasswordPattern =
+        "^(?=.*[0-9\u0660-\u0669])(?=.*[A-Z\u0621-\u064a])" +
+        "[a-zA-Z\u0621-\u064a0-9\u0660-\u0669 _#@%*!?$^&()+={}\\[\\]~|;:,.<>/-]{8,64}$";
+
+    // Python's /user/create takes a core.Record body and returns a Record with
+    // {access_token, type} — i.e. it auto-logs-in the new user. This mirrors
+    // that flow:
+    //   1. Validate is_registrable + email/msisdn + OTPs + password regex
+    //   2. Verify OTPs via peek (Python's verify_user doesn't consume)
+    //   3. Build User from rec.Attributes (email, msisdn, password, roles,
+    //      displayname, description, payload, language)
+    //   4. Persist + auto-login (issue access/refresh + create session row)
+    public async Task<Result<(User User, string Access, string Refresh)>> CreateAsync(
+        Record rec, Dictionary<string, string>? requestHeaders = null,
         CancellationToken ct = default)
     {
-        // Python: check is_registrable setting before allowing self-registration.
-        if (!settings.Value.IsRegistrable)
-            return Result<(User, Dictionary<string, string>)>.Fail(
-                InternalErrorCode.NOT_ALLOWED, "registration is disabled", "auth");
+        var s = settings.Value;
+        if (!s.IsRegistrable)
+            return Result<(User, string, string)>.Fail(
+                InternalErrorCode.SESSION, "Register API is disabled", "create");
 
-        if (string.IsNullOrWhiteSpace(shortname))
-            return Result<(User, Dictionary<string, string>)>.Fail(
+        if (string.IsNullOrWhiteSpace(rec.Shortname))
+            return Result<(User, string, string)>.Fail(
                 InternalErrorCode.INVALID_IDENTIFIER, "shortname required", "request");
-        if (await users.ExistsAsync(shortname, email, msisdn, ct))
-            return Result<(User, Dictionary<string, string>)>.Fail(
+
+        var attrs = rec.Attributes ?? new();
+        var email = ConvertToString(attrs.GetValueOrDefault("email"))?.ToLowerInvariant();
+        var msisdn = ConvertToString(attrs.GetValueOrDefault("msisdn"));
+        var password = ConvertToString(attrs.GetValueOrDefault("password"));
+        var emailOtp = ConvertToString(attrs.GetValueOrDefault("email_otp"));
+        var msisdnOtp = ConvertToString(attrs.GetValueOrDefault("msisdn_otp"));
+
+        // Python-parity validation chain (last-match wins — mirrors the
+        // sequential `validation_message = …` assignments in router.py).
+        string? validationMessage = null;
+        if (string.IsNullOrEmpty(email) && string.IsNullOrEmpty(msisdn))
+            validationMessage = "Email or MSISDN is required";
+        if (!string.IsNullOrEmpty(email) && s.IsOtpForCreateRequired && string.IsNullOrEmpty(emailOtp))
+            validationMessage = "Email OTP is required";
+        if (!string.IsNullOrEmpty(msisdn) && s.IsOtpForCreateRequired && string.IsNullOrEmpty(msisdnOtp))
+            validationMessage = "MSISDN OTP is required";
+        if (!string.IsNullOrEmpty(password) && !Regex.IsMatch(password, PasswordPattern))
+            validationMessage = "password dose not match required rules";
+        if (validationMessage is not null)
+            return Result<(User, string, string)>.Fail(
+                InternalErrorCode.SESSION, validationMessage, "create");
+
+        if (await users.ExistsAsync(rec.Shortname, email, msisdn, ct))
+            return Result<(User, string, string)>.Fail(
                 InternalErrorCode.SHORTNAME_ALREADY_EXIST, "user already exists", "db");
 
-        // Python: is_otp_for_create_required — every supplied channel (email or
-        // msisdn) must carry an OTP that was issued via /user/otp-request and
-        // still valid. The OTP is consumed on success so it can't be reused.
-        if (settings.Value.IsOtpForCreateRequired)
+        // OTP verification (Python uses verify_user = peek; OTP is NOT consumed
+        // so a subsequent /otp-confirm can still use it). Skipped entirely when
+        // is_otp_for_create_required=false — both channels are then treated as
+        // verified by fiat, mirroring Python's `is_valid_otp = True` branch.
+        var emailVerified = false;
+        var msisdnVerified = false;
+        if (!string.IsNullOrEmpty(msisdn))
         {
-            if (!string.IsNullOrEmpty(email))
+            if (s.IsOtpForCreateRequired)
             {
-                if (string.IsNullOrEmpty(emailOtp))
-                    return Result<(User, Dictionary<string, string>)>.Fail(
-                        InternalErrorCode.MISSING_DATA, "email_otp is required", "request");
-                if (!await otp.VerifyAndConsumeAsync(email, emailOtp, ct))
-                    return Result<(User, Dictionary<string, string>)>.Fail(
-                        InternalErrorCode.OTP_INVALID, "email_otp is invalid or expired", "auth");
+                var stored = await otp.GetCodeAsync(msisdn, ct);
+                if (stored is null || stored != msisdnOtp)
+                    return Result<(User, string, string)>.Fail(
+                        InternalErrorCode.SESSION, "Invalid MSISDN OTP", "create");
             }
-            if (!string.IsNullOrEmpty(msisdn))
-            {
-                if (string.IsNullOrEmpty(msisdnOtp))
-                    return Result<(User, Dictionary<string, string>)>.Fail(
-                        InternalErrorCode.MISSING_DATA, "msisdn_otp is required", "request");
-                if (!await otp.VerifyAndConsumeAsync(msisdn, msisdnOtp, ct))
-                    return Result<(User, Dictionary<string, string>)>.Fail(
-                        InternalErrorCode.OTP_INVALID, "msisdn_otp is invalid or expired", "auth");
-            }
+            msisdnVerified = true;
         }
+        if (!string.IsNullOrEmpty(email))
+        {
+            if (s.IsOtpForCreateRequired)
+            {
+                var stored = await otp.GetCodeAsync(email, ct);
+                if (stored is null || stored != emailOtp)
+                    return Result<(User, string, string)>.Fail(
+                        InternalErrorCode.SESSION, "Invalid Email OTP", "create");
+            }
+            emailVerified = true;
+        }
+
+        var rolesList = ExtractStringList(attrs, "roles");
+        var groupsList = ExtractStringList(attrs, "groups");
+        var language = ParseLanguage(ConvertToString(attrs.GetValueOrDefault("language")));
+        var displayname = attrs.TryGetValue("displayname", out var dn) ? ParseTranslation(dn) : null;
+        var description = attrs.TryGetValue("description", out var desc) ? ParseTranslation(desc) : null;
+        var payload = ExtractPayload(attrs);
 
         var user = new User
         {
-            Uuid = Guid.NewGuid().ToString(),
-            Shortname = shortname,
+            Uuid = string.IsNullOrEmpty(rec.Uuid) ? Guid.NewGuid().ToString() : rec.Uuid,
+            Shortname = rec.Shortname,
             SpaceName = MgmtSpace,
             Subpath = "users",
-            OwnerShortname = shortname,
+            OwnerShortname = "dmart",
             Email = email,
             Msisdn = msisdn,
             Password = string.IsNullOrEmpty(password) ? null : hasher.Hash(password),
-            Language = ParseLanguage(language),
+            Language = language,
+            Displayname = displayname,
+            Description = description,
+            Payload = payload,
+            Roles = rolesList ?? new(),
+            Groups = groupsList ?? new(),
             Type = UserType.Web,
             IsActive = true,
-            // Mark channels as verified when they were proven via a valid OTP
-            // during registration — saves the user a separate /otp-confirm round.
-            IsEmailVerified = !string.IsNullOrEmpty(email) && settings.Value.IsOtpForCreateRequired,
-            IsMsisdnVerified = !string.IsNullOrEmpty(msisdn) && settings.Value.IsOtpForCreateRequired,
+            IsEmailVerified = emailVerified,
+            IsMsisdnVerified = msisdnVerified,
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow,
         };
         await users.UpsertAsync(user, ct);
 
-        // Mint invitation JWTs for every unverified channel so the user can
-        // complete first-login via POST /user/login (invitation path). When
-        // IsOtpForCreateRequired=true, channels are already verified above and
-        // no invitation is needed — matches Python's send_sms_email_invitation
-        // which only triggers for unverified channels.
-        var minted = new Dictionary<string, string>();
-        if (!user.IsEmailVerified && !string.IsNullOrWhiteSpace(user.Email))
+        // Auto-login (Python: process_user_login at the end of create_user).
+        var access = jwt.IssueAccess(user.Shortname, user.Roles, user.Type);
+        var refresh = jwt.IssueRefresh(user.Shortname, user.Type);
+        await users.CreateSessionAsync(user.Shortname, access, null, ct);
+
+        if (requestHeaders is not null)
         {
-            var t = await invitationService.MintAsync(user, InvitationChannel.Email, ct);
-            if (t is not null) minted["email"] = t;
-        }
-        if (!user.IsMsisdnVerified && !string.IsNullOrWhiteSpace(user.Msisdn))
-        {
-            var t = await invitationService.MintAsync(user, InvitationChannel.Sms, ct);
-            if (t is not null) minted["msisdn"] = t;
+            var loginInfo = new Dictionary<string, object>
+            {
+                ["timestamp"] = (int)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                ["headers"] = requestHeaders,
+            };
+            var updated = user with { LastLogin = loginInfo, UpdatedAt = DateTime.UtcNow };
+            await users.UpsertAsync(updated, ct);
+            user = updated;
         }
 
-        return Result<(User, Dictionary<string, string>)>.Ok((user, minted));
+        return Result<(User, string, string)>.Ok((user, access, refresh));
+    }
+
+    private static string? ConvertToString(object? v) => v switch
+    {
+        null => null,
+        string s => s,
+        JsonElement el => el.ValueKind switch
+        {
+            JsonValueKind.String => el.GetString(),
+            JsonValueKind.Null => null,
+            _ => el.GetRawText(),
+        },
+        _ => v.ToString(),
+    };
+
+    private static List<string>? ExtractStringList(Dictionary<string, object> attrs, string key)
+    {
+        if (!attrs.TryGetValue(key, out var raw) || raw is null) return null;
+        if (raw is JsonElement el && el.ValueKind == JsonValueKind.Array)
+        {
+            var list = new List<string>();
+            foreach (var item in el.EnumerateArray())
+                if (item.ValueKind == JsonValueKind.String) list.Add(item.GetString()!);
+            return list;
+        }
+        if (raw is List<string> stringList) return stringList;
+        if (raw is IEnumerable<object> objs)
+            return objs.Select(o => o?.ToString() ?? "").ToList();
+        return null;
+    }
+
+    private static Translation? ParseTranslation(object? value)
+    {
+        if (value is null) return null;
+        if (value is JsonElement el)
+        {
+            if (el.ValueKind == JsonValueKind.Object)
+            {
+                // Empty object → null, not an empty Translation (matches what
+                // Python's `{}` passes through — no localized strings set).
+                if (!el.EnumerateObject().Any()) return null;
+                return new Translation(
+                    En: el.TryGetProperty("en", out var en) ? en.GetString() : null,
+                    Ar: el.TryGetProperty("ar", out var ar) ? ar.GetString() : null,
+                    Ku: el.TryGetProperty("ku", out var ku) ? ku.GetString() : null);
+            }
+            if (el.ValueKind == JsonValueKind.String) return new Translation(En: el.GetString());
+            return null;
+        }
+        return new Translation(En: value.ToString());
+    }
+
+    private static Payload? ExtractPayload(Dictionary<string, object> attrs)
+    {
+        if (!attrs.TryGetValue("payload", out var raw) || raw is null) return null;
+        if (raw is not JsonElement el || el.ValueKind != JsonValueKind.Object) return null;
+        return new Payload
+        {
+            ContentType = el.TryGetProperty("content_type", out var ct)
+                && ct.ValueKind == JsonValueKind.String
+                && Enum.TryParse<ContentType>(ct.GetString(), true, out var cte)
+                    ? cte : ContentType.Json,
+            SchemaShortname = el.TryGetProperty("schema_shortname", out var ss)
+                && ss.ValueKind == JsonValueKind.String ? ss.GetString() : null,
+            Body = el.TryGetProperty("body", out var b) ? b.Clone() : null,
+        };
     }
 
     // Standard password-based login. Mirrors Python's login() PATH C (password).

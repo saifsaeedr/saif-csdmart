@@ -26,6 +26,36 @@ public sealed class OtpRepository(Db db)
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    // Seconds elapsed since the OTP row at `key` was last written. Null when
+    // no row exists. Mirrors Python's `otp_created_since` — used by
+    // /user/otp-request to enforce the resend cooldown.
+    public async Task<int?> GetCreatedSinceAsync(string key, CancellationToken ct = default)
+    {
+        await using var conn = await db.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(
+            "SELECT EXTRACT(EPOCH FROM (NOW() - timestamp))::int FROM otp WHERE key = $1", conn);
+        cmd.Parameters.Add(new() { Value = key });
+        var raw = await cmd.ExecuteScalarAsync(ct);
+        if (raw is null || raw is DBNull) return null;
+        return Convert.ToInt32(raw);
+    }
+
+    // Python parity: verify_user uses db.get_otp (peek, doesn't consume).
+    // Used by /user/create so a failed OTP-enabled create still leaves the
+    // OTP usable for another try within its TTL.
+    public async Task<string?> GetCodeAsync(string key, CancellationToken ct = default)
+    {
+        await using var conn = await db.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand("SELECT value FROM otp WHERE key = $1", conn);
+        cmd.Parameters.Add(new() { Value = key });
+        var raw = await cmd.ExecuteScalarAsync(ct);
+        if (raw is not IDictionary<string, string?> dict) return null;
+        if (!dict.TryGetValue("code", out var code)) return null;
+        if (dict.TryGetValue("expires_at", out var expRaw)
+            && DateTime.TryParse(expRaw, out var exp) && exp < DateTime.UtcNow) return null;
+        return code;
+    }
+
     public async Task<bool> VerifyAndConsumeAsync(string key, string code, CancellationToken ct = default)
     {
         await using var conn = await db.OpenAsync(ct);

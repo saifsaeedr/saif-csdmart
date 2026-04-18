@@ -1,7 +1,9 @@
 using System.Text.Json;
+using Dmart.Config;
 using Dmart.Models.Api;
 using Dmart.Models.Json;
 using Dmart.Services;
+using Microsoft.Extensions.Options;
 
 namespace Dmart.Api.User;
 
@@ -9,36 +11,79 @@ public static class RegistrationHandler
 {
     public static void Map(RouteGroupBuilder g)
     {
-        g.MapPost("/create", async (HttpRequest req, UserService svc, CancellationToken ct) =>
+        // Python parity: POST /user/create takes a core.Record body
+        //   {shortname, subpath, resource_type, attributes:{email, msisdn,
+        //    password, email_otp, msisdn_otp, roles, displayname, description,
+        //    payload:{content_type, body}, ...}}
+        // and returns a Record with session attributes (access_token, type,
+        // displayname?) after auto-logging the user in.
+        g.MapPost("/create", async Task<IResult> (HttpContext http, UserService svc,
+            IOptions<DmartSettings> settings, CancellationToken ct) =>
         {
-            var body = await JsonSerializer.DeserializeAsync(req.Body, DmartJsonContext.Default.DictionaryStringObject, ct);
-            if (body is null)
-                return Response.Fail(InternalErrorCode.INVALID_DATA, "missing body", "request");
-            var shortname = body.TryGetValue("shortname", out var sn) ? sn?.ToString() ?? "" : "";
-            var email = body.TryGetValue("email", out var e) ? e?.ToString() : null;
-            var msisdn = body.TryGetValue("msisdn", out var m) ? m?.ToString() : null;
-            var password = body.TryGetValue("password", out var p) ? p?.ToString() : null;
-            var language = body.TryGetValue("language", out var l) ? l?.ToString() : null;
-            // Optional OTP fields — enforced only when IsOtpForCreateRequired=true.
-            // The caller obtains these via POST /user/otp-request before registering.
-            var emailOtp = body.TryGetValue("email_otp", out var eo) ? eo?.ToString() : null;
-            var msisdnOtp = body.TryGetValue("msisdn_otp", out var mo) ? mo?.ToString() : null;
-            var result = await svc.CreateAsync(shortname, email, msisdn, password, language, emailOtp, msisdnOtp, ct);
-            if (!result.IsOk)
-                return Response.Fail(result.ErrorCode, result.ErrorMessage!, result.ErrorType ?? "request");
-
-            var (user, invitations) = result.Value;
-            var attrs = new Dictionary<string, object>
+            Record? record;
+            try
             {
-                ["uuid"] = user.Uuid,
-                ["shortname"] = user.Shortname,
+                record = await JsonSerializer.DeserializeAsync(
+                    http.Request.Body, DmartJsonContext.Default.Record, ct);
+            }
+            catch (JsonException ex)
+            {
+                return Results.Json(
+                    Response.Fail(InternalErrorCode.INVALID_DATA, ex.Message, "request"),
+                    DmartJsonContext.Default.Response, statusCode: 400);
+            }
+            if (record is null)
+                return Results.Json(
+                    Response.Fail(InternalErrorCode.INVALID_DATA, "missing body", "request"),
+                    DmartJsonContext.Default.Response, statusCode: 400);
+
+            // Python strips authorization/cookie from request_headers before
+            // persisting last_login. Matches process_user_login behaviour.
+            var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var h in http.Request.Headers)
+            {
+                if (string.Equals(h.Key, "authorization", StringComparison.OrdinalIgnoreCase)) continue;
+                if (string.Equals(h.Key, "cookie", StringComparison.OrdinalIgnoreCase)) continue;
+                headers[h.Key] = h.Value.ToString();
+            }
+
+            var result = await svc.CreateAsync(record, headers, ct);
+            if (!result.IsOk)
+                return Results.Json(
+                    Response.Fail(result.ErrorCode, result.ErrorMessage!, result.ErrorType ?? "create"),
+                    DmartJsonContext.Default.Response,
+                    statusCode: FailedResponseFilter.MapErrorToHttpStatus(result.ErrorCode));
+
+            var (user, access, _) = result.Value;
+
+            // Set auth_token cookie — mirrors the login flow so browser
+            // clients are authenticated immediately after create.
+            var maxAgeSeconds = settings.Value.JwtAccessMinutes * 60;
+            http.Response.Cookies.Append("auth_token", access, new CookieOptions
+            {
+                HttpOnly = true,
+                Secure = http.Request.IsHttps,
+                SameSite = SameSiteMode.Strict,
+                MaxAge = TimeSpan.FromSeconds(maxAgeSeconds),
+                Path = "/",
+            });
+
+            var responseRecord = new Record
+            {
+                ResourceType = Dmart.Models.Enums.ResourceType.User,
+                Shortname = user.Shortname,
+                Subpath = "users",
+                Attributes = new()
+                {
+                    ["access_token"] = access,
+                    ["type"] = user.Type.ToString().ToLowerInvariant(),
+                },
             };
-            // Invitation JWTs for unverified channels — included on the
-            // creation response so callers have something to hand back to
-            // the new user while SMTP/SMS delivery is not yet wired up.
-            if (invitations.Count > 0)
-                attrs["invitations"] = invitations;
-            return Response.Ok(attributes: attrs);
+            if (user.Displayname is not null)
+                responseRecord.Attributes["displayname"] = user.Displayname;
+
+            return Results.Json(Response.Ok(new[] { responseRecord }),
+                DmartJsonContext.Default.Response);
         });
     }
 }

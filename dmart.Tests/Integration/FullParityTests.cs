@@ -310,22 +310,33 @@ public class FullParityTests : IClassFixture<DmartFactory>
         ((JsonElement)body.Attributes!["valid"]!).GetBoolean().ShouldBeFalse();
     }
 
-    // ==================== check-existing per-field response ====================
+    // ==================== check-existing short-circuit response ====================
 
     [Fact]
-    public async Task CheckExisting_Returns_PerField_Booleans()
+    public async Task CheckExisting_ShortCircuits_On_First_Conflict()
     {
         if (!DmartFactory.HasPg) return;
         var client = _factory.CreateClient();
+        // Shortname exists → returns {"unique": false, "field": "shortname"}
+        // without evaluating the email/msisdn params (Python parity).
         var resp = await client.GetAsync($"/user/check-existing?shortname={_factory.AdminShortname}&email=nonexistent@example.com");
         var body = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
         body!.Status.ShouldBe(Status.Success);
         body.Attributes.ShouldNotBeNull();
-        body.Attributes!.ShouldContainKey("shortname");
-        body.Attributes!.ShouldContainKey("email");
-        body.Attributes!.ShouldContainKey("msisdn");
-        ((JsonElement)body.Attributes!["shortname"]!).GetBoolean().ShouldBeTrue();
-        ((JsonElement)body.Attributes!["email"]!).GetBoolean().ShouldBeFalse();
+        ((JsonElement)body.Attributes!["unique"]!).GetBoolean().ShouldBeFalse();
+        ((JsonElement)body.Attributes!["field"]!).GetString().ShouldBe("shortname");
+    }
+
+    [Fact]
+    public async Task CheckExisting_Returns_Unique_When_All_Free()
+    {
+        if (!DmartFactory.HasPg) return;
+        var client = _factory.CreateClient();
+        var resp = await client.GetAsync("/user/check-existing?shortname=nobody_xyz_123&email=nobody_xyz_123@example.com");
+        var body = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
+        body!.Status.ShouldBe(Status.Success);
+        ((JsonElement)body.Attributes!["unique"]!).GetBoolean().ShouldBeTrue();
+        body.Attributes!.ShouldNotContainKey("field");
     }
 
     // ==================== Correlation ID header ====================
@@ -360,25 +371,18 @@ public class FullParityTests : IClassFixture<DmartFactory>
     // ==================== is_registrable enforcement ====================
 
     [Fact]
-    public async Task Create_User_Respects_IsRegistrable_Setting()
+    public async Task Create_User_Rejected_Without_Email_Or_Msisdn()
     {
-        // This test verifies the setting is checked — the default is true,
-        // so registration should succeed. We test the path exists.
+        // Python parity: record.attributes must carry email or msisdn.
         if (!DmartFactory.HasPg) return;
         var client = _factory.CreateClient();
-        var body = "{\"shortname\":\"regtest_" + Guid.NewGuid().ToString("N")[..6] + "\",\"password\":\"testtest1234\"}";
+        var shortname = "regtest_" + Guid.NewGuid().ToString("N")[..6];
+        var body = "{\"resource_type\":\"user\",\"shortname\":\"" + shortname + "\",\"subpath\":\"/\",\"attributes\":{\"password\":\"Testtest1234\"}}";
         var resp = await client.PostAsync("/user/create",
             new StringContent(body, Encoding.UTF8, "application/json"));
         var result = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
-        // Should succeed (is_registrable defaults to true)
-        result!.Status.ShouldBe(Status.Success);
-
-        // Cleanup
-        if (result.Attributes?.TryGetValue("shortname", out var sn) == true)
-        {
-            var users = _factory.Services.GetRequiredService<UserRepository>();
-            await users.DeleteAsync(sn.ToString()!);
-        }
+        result!.Status.ShouldBe(Status.Failed);
+        result.Error!.Message.ShouldContain("Email or MSISDN");
     }
 
     // ==================== is_otp_for_create_required enforcement ====================
@@ -391,18 +395,19 @@ public class FullParityTests : IClassFixture<DmartFactory>
         if (!DmartFactory.HasPg) return;
         var client = _factory.CreateClient();
         var shortname = "otpreq_" + Guid.NewGuid().ToString("N")[..6];
-        var body = "{\"shortname\":\"" + shortname + "\",\"email\":\"a@b.c\",\"password\":\"testtest1234\"}";
+        var body = "{\"resource_type\":\"user\",\"shortname\":\"" + shortname + "\",\"subpath\":\"/\",\"attributes\":{\"email\":\"a@b.c\",\"password\":\"Testtest1234\"}}";
         var resp = await client.PostAsync("/user/create",
             new StringContent(body, Encoding.UTF8, "application/json"));
         var result = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
         result!.Status.ShouldBe(Status.Failed);
-        result.Error!.Message.ShouldContain("email_otp");
+        result.Error!.Message.ShouldContain("Email OTP");
     }
 
     [Fact]
     public async Task Create_User_With_Valid_Email_Otp_Succeeds()
     {
-        // Pre-store an OTP against the email, then /user/create consumes it.
+        // Pre-store an OTP against the email, then /user/create peeks it
+        // (Python parity — verify_user doesn't consume).
         if (!DmartFactory.HasPg) return;
         var otpRepo = _factory.Services.GetRequiredService<OtpRepository>();
         var shortname = "otpok_" + Guid.NewGuid().ToString("N")[..6];
@@ -411,13 +416,15 @@ public class FullParityTests : IClassFixture<DmartFactory>
         await otpRepo.StoreAsync(email, code, DateTime.UtcNow.AddMinutes(5));
 
         var client = _factory.CreateClient();
-        var body = "{\"shortname\":\"" + shortname + "\",\"email\":\"" + email + "\",\"password\":\"testtest1234\",\"email_otp\":\"" + code + "\"}";
+        var body = "{\"resource_type\":\"user\",\"shortname\":\"" + shortname + "\",\"subpath\":\"/\",\"attributes\":{\"email\":\"" + email + "\",\"password\":\"Testtest1234\",\"email_otp\":\"" + code + "\"}}";
         var resp = await client.PostAsync("/user/create",
             new StringContent(body, Encoding.UTF8, "application/json"));
         var result = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
         result!.Status.ShouldBe(Status.Success);
+        // Python parity: response is records=[Record(attributes={access_token, type})].
+        result.Records.ShouldNotBeNull();
+        result.Records![0].Attributes!.ShouldContainKey("access_token");
 
-        // Cleanup
         var users = _factory.Services.GetRequiredService<UserRepository>();
         await users.DeleteAsync(shortname);
     }
@@ -469,7 +476,7 @@ public class FullParityTests : IClassFixture<DmartFactory>
         }));
         var client = factory.CreateClient();
         var shortname = "otpoff_" + Guid.NewGuid().ToString("N")[..6];
-        var body = "{\"shortname\":\"" + shortname + "\",\"email\":\"" + shortname + "@x.y\",\"password\":\"testtest1234\"}";
+        var body = "{\"resource_type\":\"user\",\"shortname\":\"" + shortname + "\",\"subpath\":\"/\",\"attributes\":{\"email\":\"" + shortname + "@x.y\",\"password\":\"Testtest1234\"}}";
         var resp = await client.PostAsync("/user/create",
             new StringContent(body, Encoding.UTF8, "application/json"));
         var result = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);

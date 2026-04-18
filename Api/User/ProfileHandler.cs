@@ -160,24 +160,43 @@ public static class ProfileHandler
             return Response.Ok(attributes: new() { ["valid"] = valid });
         });
 
-        // GET /user/check-existing — Python returns per-field {shortname, email, msisdn} booleans.
+        // GET /user/check-existing — Python parity: short-circuit on first
+        // conflict. Iteration order matches Python dict: shortname → msisdn →
+        // email. Returns {"unique": true} when all free, else
+        // {"unique": false, "field": "<name>"}.
         g.MapGet("/check-existing", async (
             string? shortname, string? email, string? msisdn,
             UserRepository users, CancellationToken ct) =>
         {
-            var snExists = !string.IsNullOrEmpty(shortname)
-                && await users.GetByShortnameAsync(shortname, ct) is not null;
-            var emailExists = !string.IsNullOrEmpty(email)
-                && await users.GetByEmailAsync(email, ct) is not null;
-            var msisdnExists = !string.IsNullOrEmpty(msisdn)
-                && await users.GetByMsisdnAsync(msisdn, ct) is not null;
-
-            return Response.Ok(attributes: new()
+            if (!string.IsNullOrEmpty(shortname)
+                && await users.GetByShortnameAsync(shortname, ct) is not null)
             {
-                ["shortname"] = snExists,
-                ["email"] = emailExists,
-                ["msisdn"] = msisdnExists,
-            });
+                return Response.Ok(attributes: new()
+                {
+                    ["unique"] = false,
+                    ["field"] = "shortname",
+                });
+            }
+            if (!string.IsNullOrEmpty(msisdn)
+                && await users.GetByMsisdnAsync(msisdn, ct) is not null)
+            {
+                return Response.Ok(attributes: new()
+                {
+                    ["unique"] = false,
+                    ["field"] = "msisdn",
+                });
+            }
+            if (!string.IsNullOrEmpty(email)
+                && await users.GetByEmailAsync(email, ct) is not null)
+            {
+                return Response.Ok(attributes: new()
+                {
+                    ["unique"] = false,
+                    ["field"] = "email",
+                });
+            }
+
+            return Response.Ok(attributes: new() { ["unique"] = true });
         });
     }
 
