@@ -82,12 +82,16 @@ public static class OAuthEndpoints
     private static IResult ProtectedResourceMetadata(HttpContext http, DmartSettings settings)
     {
         var issuer = GetIssuerUrl(http, settings);
-        var resource = issuer;  // Same origin; MCP server is the resource.
+        // The `resource` field identifies the MCP endpoint itself per RFC 9728 /
+        // MCP's protected-resource profile. Pointing it at the bare origin would
+        // be ambiguous — clients need the exact URL of the protected resource.
+        var resource = $"{issuer}/mcp";
         using var ms = new MemoryStream();
         using (var w = new Utf8JsonWriter(ms))
         {
             w.WriteStartObject();
             w.WriteString("resource", resource);
+            w.WriteString("resource_name", "dmart");
             w.WriteStartArray("authorization_servers");
             w.WriteStringValue(issuer);
             w.WriteEndArray();
@@ -454,7 +458,13 @@ public static class OAuthEndpoints
             html.Append("</div>");
         }
 
-        html.Append("<form method=\"post\" action=\"/oauth/authorize\">");
+        // Empty action = post back to the current URL. Browsers resolve the
+        // empty string against the page's own URL, which is whatever external
+        // path the reverse proxy exposed (e.g. /dmart/oauth/authorize). An
+        // absolute "/oauth/authorize" would break when dmart is mounted under
+        // a sub-path — the POST would land on the origin root, which doesn't
+        // route to dmart.
+        html.Append("<form method=\"post\" action=\"\">");
         AppendHidden(html, "response_type", p.ResponseType);
         AppendHidden(html, "client_id", p.ClientId);
         AppendHidden(html, "redirect_uri", p.RedirectUri);

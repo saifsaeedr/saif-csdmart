@@ -38,6 +38,57 @@ public sealed class McpOAuthAndSseTests : IClassFixture<DmartFactory>
         var scopes = root.GetProperty("scopes_supported");
         scopes.GetArrayLength().ShouldBeGreaterThan(0);
         scopes[0].GetString().ShouldBe("mcp");
+        // `resource` must identify the MCP endpoint itself, not the bare origin —
+        // MCP clients use it to correlate tokens with the specific resource.
+        root.GetProperty("resource").GetString().ShouldEndWith("/mcp");
+    }
+
+    [Fact]
+    public async Task Authorize_Form_Posts_Back_To_Current_Url()
+    {
+        if (!DmartFactory.HasPg) return;
+        using var client = _factory.CreateClient();
+
+        const string redirectUri = "http://localhost/form-action-test/callback";
+        var reg = await client.PostAsync("/oauth/register",
+            new StringContent(
+                $$"""{"redirect_uris":["{{redirectUri}}"],"client_name":"form-action"}""",
+                Encoding.UTF8, "application/json"));
+        var clientId = (await ReadJson(reg)).GetProperty("client_id").GetString()!;
+
+        var page = await client.GetStringAsync(
+            $"/oauth/authorize?response_type=code&client_id={clientId}" +
+            $"&redirect_uri={Uri.EscapeDataString(redirectUri)}" +
+            "&code_challenge=abc123&code_challenge_method=S256&state=xyz&scope=mcp");
+
+        // The form MUST post back to the same URL (empty action). An absolute
+        // "/oauth/authorize" breaks when dmart is mounted under a sub-path —
+        // the POST lands on the origin root, bypassing the reverse proxy
+        // rule that routes /<prefix>/oauth/* to dmart.
+        page.ShouldContain("action=\"\"");
+        page.ShouldNotContain("action=\"/oauth/authorize\"");
+    }
+
+    [Fact]
+    public async Task Unauthenticated_Mcp_401_Carries_WWWAuthenticate_With_ResourceMetadata()
+    {
+        if (!DmartFactory.HasPg) return;
+        using var client = _factory.CreateClient();
+
+        // No Authorization header → JwtBearer challenges. The response MUST
+        // carry `WWW-Authenticate: Bearer resource_metadata=...` per MCP's
+        // authorization profile — without it, Zed / Cursor / Claude Desktop
+        // can't kick off OAuth discovery.
+        var resp = await client.PostAsync("/mcp", new StringContent(
+            """{"jsonrpc":"2.0","id":1,"method":"initialize"}""",
+            Encoding.UTF8, "application/json"));
+        resp.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+        resp.Headers.TryGetValues("WWW-Authenticate", out var values).ShouldBeTrue();
+        var header = values!.First();
+        header.ShouldStartWith("Bearer ");
+        header.ShouldContain("realm=\"dmart-mcp\"");
+        header.ShouldContain("resource_metadata=");
+        header.ShouldContain("/.well-known/oauth-protected-resource");
     }
 
     [Fact]

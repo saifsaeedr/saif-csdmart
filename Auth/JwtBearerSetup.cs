@@ -108,6 +108,26 @@ public static class JwtBearerSetup
                             message = "Invalid token";
                         }
 
+                        // MCP clients (Zed, Cursor, Claude Desktop) only kick
+                        // off OAuth discovery *after* they see a 401 with a
+                        // `WWW-Authenticate: Bearer resource_metadata=...`
+                        // header pointing at the protected-resource document.
+                        // Emit it for any 401 on an /mcp* path. The metadata
+                        // URL is on the same origin as the request, so clients
+                        // behind any reverse-proxy path base still find it.
+                        if (ctx.Request.Path.StartsWithSegments("/mcp"))
+                        {
+                            var dmartSettings = ctx.HttpContext.RequestServices
+                                .GetRequiredService<IOptions<DmartSettings>>().Value;
+                            var base_ = Uri.TryCreate(dmartSettings.JwtIssuer, UriKind.Absolute, out var u)
+                                && (u.Scheme == "https" || u.Scheme == "http")
+                                ? dmartSettings.JwtIssuer!.TrimEnd('/')
+                                : $"{ctx.Request.Scheme}://{ctx.Request.Host.Value}".TrimEnd('/');
+                            var prmUrl = $"{base_}/.well-known/oauth-protected-resource";
+                            ctx.Response.Headers["WWW-Authenticate"] =
+                                $"Bearer realm=\"dmart-mcp\", resource_metadata=\"{prmUrl}\"";
+                        }
+
                         ctx.Response.StatusCode = 401;
                         ctx.Response.ContentType = "application/json";
                         var body = Response.Fail(code, message, "jwtauth");
