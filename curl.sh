@@ -18,8 +18,13 @@ set -u
 # Read defaults from config.env if present (same file the server uses).
 _read_config() { grep -m1 "^$1" config.env 2>/dev/null | sed 's/^[^=]*=//' | tr -d '"' | tr -d "'" || true; }
 
-API_URL="${DMART_URL:-http://127.0.0.1:$(_read_config LISTENING_PORT)}"
-API_URL="${API_URL:-http://127.0.0.1:5099}"
+# Port: prefer DMART_URL verbatim; else compose from LISTENING_PORT in
+# config.env; else fall back to 5099. Guard against config.env missing — if
+# the port lookup returns empty, _LISTEN would produce a malformed
+# "http://127.0.0.1:" URL that slips past the :- fallback. Validate numeric.
+_LISTEN=$(_read_config LISTENING_PORT)
+[[ "$_LISTEN" =~ ^[0-9]+$ ]] || _LISTEN=5099
+API_URL="${DMART_URL:-http://127.0.0.1:$_LISTEN}"
 ADMIN_SHORTNAME="${DMART_ADMIN:-$(_read_config ADMIN_SHORTNAME)}"
 ADMIN_SHORTNAME="${ADMIN_SHORTNAME:-cstest}"
 ADMIN_PASSWORD="${DMART_PWD:-$(_read_config ADMIN_PASSWORD)}"
@@ -610,7 +615,10 @@ fi
 # ============================================================================
 RESP=$(curl -s -H "$AUTH_HEADER" "$API_URL/user/check-existing?shortname=$ADMIN_SHORTNAME&email=nonexistent@example.com")
 printf '%-45s' "Check-existing per-field shape:" >&2
-if echo "$RESP" | jq -e '.attributes.shortname == true and .attributes.email == false and .attributes.msisdn == false' > /dev/null 2>&1; then
+# Python parity: returns {unique: false, field: "<first conflict>"} on the
+# first hit (iteration order: shortname → msisdn → email), or {unique: true}
+# when all free.
+if echo "$RESP" | jq -e '.attributes.unique == false and .attributes.field == "shortname"' > /dev/null 2>&1; then
     ok
 else
     nope "$RESP"

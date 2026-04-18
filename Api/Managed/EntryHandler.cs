@@ -35,11 +35,13 @@ public static class EntryHandler
                 // Python parity: every failure path returns the structured
                 // {status:"failed", error:{type, code, message}} envelope. The
                 // caller's Python client decodes api.Error — bare 404/400 HTML
-                // breaks that contract.
+                // breaks that contract. Not-found still uses HTTP 404 so
+                // clients can branch on the status code without parsing the
+                // body (matches Python api.Error bindings + existing tests).
                 static IResult NotFoundMedia() => Results.Json(
                     Response.Fail(InternalErrorCode.OBJECT_NOT_FOUND,
                         "Request object is not available", "media"),
-                    DmartJsonContext.Default.Response, statusCode: 400);
+                    DmartJsonContext.Default.Response, statusCode: 404);
 
                 if (!Enum.TryParse<ResourceType>(resource_type, true, out var rt))
                     return Results.Json(
