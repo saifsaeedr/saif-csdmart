@@ -742,6 +742,11 @@ app.MapGroup("/user").WithTags("User").AddEndpointFilter<FailedResponseFilter>()
 app.MapGroup("/info").WithTags("Info").RequireAuthorization().AddEndpointFilter<FailedResponseFilter>().MapInfo();
 app.MapGroup("/qr").WithTags("QR").AddEndpointFilter<FailedResponseFilter>().MapQr();
 
+// Model Context Protocol — hand-rolled, AOT-safe. Routes: POST/GET/DELETE /mcp.
+// Auth is applied per-route inside MapMcp via RequireAuthorization() — the
+// caller's JWT flows through to tool handlers so permissions are enforced.
+Dmart.Api.Mcp.McpEndpoint.MapMcp(app);
+
 // WebSocket server — port of dmart/websocket.py.
 // /ws?token=<jwt>, /send-message/{user}, /broadcast-to-channels, /ws-info
 app.MapWebSocket();
