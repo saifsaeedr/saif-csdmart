@@ -626,6 +626,8 @@ builder.Services.AddSingleton<Dmart.Auth.OAuth.GoogleProvider>();
 builder.Services.AddSingleton<Dmart.Auth.OAuth.FacebookProvider>();
 builder.Services.AddSingleton<Dmart.Auth.OAuth.AppleProvider>();
 builder.Services.AddSingleton<Dmart.Auth.OAuth.OAuthUserResolver>();
+builder.Services.AddSingleton<Dmart.Auth.OAuthCodeStore>();
+builder.Services.AddSingleton<Dmart.Auth.OAuthClientStore>();
 builder.Services.AddDmartAuth(builder.Configuration);
 
 // Plugins
@@ -638,6 +640,8 @@ builder.Services.AddSingleton<IHookPlugin, SystemNotificationSenderPlugin>();
 builder.Services.AddSingleton<IHookPlugin, LocalNotificationPlugin>();
 builder.Services.AddSingleton<IHookPlugin, LdapManagerPlugin>();
 builder.Services.AddSingleton<IHookPlugin, SemanticIndexerPlugin>();
+builder.Services.AddSingleton<IHookPlugin, McpSseBridgePlugin>();
+builder.Services.AddSingleton<Dmart.Api.Mcp.McpSessionStore>();
 builder.Services.AddSingleton<EmbeddingProvider>();
 builder.Services.AddSingleton<SemanticSearchService>();
 builder.Services.AddSingleton<SemanticIndexerService>();
@@ -746,6 +750,12 @@ app.MapGroup("/public").WithTags("Public").AddEndpointFilter<FailedResponseFilte
 app.MapGroup("/user").WithTags("User").AddEndpointFilter<FailedResponseFilter>().MapUser();
 app.MapGroup("/info").WithTags("Info").RequireAuthorization().AddEndpointFilter<FailedResponseFilter>().MapInfo();
 app.MapGroup("/qr").WithTags("QR").AddEndpointFilter<FailedResponseFilter>().MapQr();
+
+// OAuth 2.1 Authorization Server for MCP clients. Discovery + DCR + the
+// authorize/token endpoints live alongside the JWT-protected /mcp route so a
+// single host provides everything an MCP client needs to onboard with
+// zero-config (just the base URL).
+Dmart.Api.Oauth.OAuthEndpoints.MapOAuth(app);
 
 // Model Context Protocol — hand-rolled, AOT-safe. Routes: POST/GET/DELETE /mcp.
 // Auth is applied per-route inside MapMcp via RequireAuthorization() — the

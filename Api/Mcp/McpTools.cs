@@ -309,17 +309,34 @@ public static class McpTools
         var args = arguments.Value;
         var actor = RequireActor(http);
 
-        var confirm = args.TryGetProperty("confirm", out var confEl)
-            && confEl.ValueKind == JsonValueKind.True;
-        if (!confirm)
-            throw new ArgumentException(
-                "delete requires explicit `confirm: true` — ask the user first, then retry");
-
         var space = GetRequiredString(args, "space_name");
         var subpath = GetString(args, "subpath") ?? "/";
         var shortname = GetRequiredString(args, "shortname");
         var resourceType = TryParseEnum<ResourceType>(GetString(args, "resource_type"))
             ?? ResourceType.Content;
+
+        var confirm = args.TryGetProperty("confirm", out var confEl)
+            && confEl.ValueKind == JsonValueKind.True;
+
+        // If the client supports elicitation and didn't pre-confirm, ask the
+        // user directly over SSE. On accept we proceed; on decline/cancel we
+        // return a friendly "no-op" result instead of throwing — the model
+        // can read that back to the user cleanly.
+        if (!confirm)
+        {
+            var elicitation = await McpElicitation.TryConfirmDeleteAsync(
+                http, space, subpath, shortname, resourceType, ct);
+            switch (elicitation)
+            {
+                case McpElicitation.Outcome.Accepted:
+                    break;
+                case McpElicitation.Outcome.Declined:
+                    return BuildDeclinedResponse(space, subpath, shortname, resourceType);
+                case McpElicitation.Outcome.Unsupported:
+                    throw new ArgumentException(
+                        "delete requires explicit `confirm: true` — ask the user first, then retry");
+            }
+        }
 
         var locator = new Locator(resourceType, space, subpath, shortname);
         var result = await http.RequestServices.GetRequiredService<EntryService>()
@@ -533,6 +550,27 @@ public static class McpTools
             w.WriteNumber("size", size);
             w.WriteString("encoding", encoding);
             w.WriteString("content", content);
+            w.WriteEndObject();
+        }
+        return ParseBytes(ms.ToArray());
+    }
+
+    // Returned when the user declined the elicitation prompt. Shaped to
+    // parallel the successful delete payload so the model can interpret
+    // either case with the same code path.
+    private static JsonElement BuildDeclinedResponse(
+        string space, string subpath, string shortname, ResourceType rt)
+    {
+        using var ms = new MemoryStream();
+        using (var w = new Utf8JsonWriter(ms))
+        {
+            w.WriteStartObject();
+            w.WriteString("status", "cancelled");
+            w.WriteString("reason", "user declined the delete prompt");
+            w.WriteString("space_name", space);
+            w.WriteString("subpath", subpath);
+            w.WriteString("shortname", shortname);
+            w.WriteString("resource_type", rt.ToString().ToLowerInvariant());
             w.WriteEndObject();
         }
         return ParseBytes(ms.ToArray());

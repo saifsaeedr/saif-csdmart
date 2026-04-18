@@ -1,0 +1,13 @@
+{
+  "shortname": "mcp_sse_bridge",
+  "is_active": true,
+  "always_active": true,
+  "filters": {
+    "subpaths": ["__ALL__"],
+    "resource_types": ["__ALL__"],
+    "schema_shortnames": ["__ALL__"],
+    "actions": ["create", "update", "delete", "progress_ticket"]
+  },
+  "type": "hook",
+  "listen_time": "after"
+}

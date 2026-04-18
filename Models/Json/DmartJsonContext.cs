@@ -29,6 +29,8 @@ namespace Dmart.Models.Json;
 [JsonSerializable(typeof(SendOTPRequest))]
 [JsonSerializable(typeof(ConfirmOTPRequest))]
 [JsonSerializable(typeof(PasswordResetRequest))]
+[JsonSerializable(typeof(RegisterRequest))]
+[JsonSerializable(typeof(RegisterResponse))]
 [JsonSerializable(typeof(HttpValidationError))]
 [JsonSerializable(typeof(ValidationError))]
 [JsonSerializable(typeof(JsonElement))]

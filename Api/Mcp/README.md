@@ -25,14 +25,27 @@ via CXB or `curl`.
 
 | Method   | Path   | Purpose                                              |
 |----------|--------|------------------------------------------------------|
-| `POST`   | `/mcp` | Client → server JSON-RPC request. One message per body. Notifications (no `id`) return 202, requests return 200 with the response envelope. |
-| `GET`    | `/mcp` | Server → client SSE stream. Held open with 15 s keep-alive comments. v0.1 emits no real events yet. |
+| `POST`   | `/mcp` | Client → server JSON-RPC request, or a client *response* to a server-originated request (e.g. `elicitation/create` acknowledgement). Notifications & responses return 202, requests return 200 with the response envelope. |
+| `GET`    | `/mcp` | Server → client SSE stream. Requires `Mcp-Session-Id` header from a prior `initialize`. Emits `notifications/resources/updated` whenever dmart's event bus sees a create/update/delete on an entry the session's user can read, plus any server-originated requests like `elicitation/create`. |
 | `DELETE` | `/mcp` | Optional session close (client sends the `Mcp-Session-Id` header). |
 
-## Tools (v0.1)
+### OAuth 2.1 discovery + endpoints (v0.5)
 
-All read-only. Create/update/delete arrive in v0.2 with MCP elicitation
-confirmation for destructive operations.
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET`  | `/.well-known/oauth-protected-resource` | MCP's protected-resource metadata — tells the client where the authorization server is. |
+| `GET`  | `/.well-known/oauth-authorization-server` | RFC 8414 authorization-server metadata. S256-only PKCE, public clients (`token_endpoint_auth_methods_supported: ["none"]`). |
+| `POST` | `/oauth/register` | RFC 7591 dynamic client registration — mints a `client_id` for public clients. |
+| `GET`  | `/oauth/authorize` | Renders the inline HTML login form. |
+| `POST` | `/oauth/authorize` | Accepts the form; on valid creds, 302-redirects to `redirect_uri?code=...&state=...`. |
+| `POST` | `/oauth/token` | Exchanges `authorization_code` + PKCE verifier (or `refresh_token`) for a dmart JWT. |
+
+## Tools
+
+As of v0.5 the tool surface is read + write + destructive + semantic. Delete
+uses MCP `elicitation/create` to ask the user over SSE when the client
+advertises the capability; otherwise it falls back to the `confirm: true`
+argument guard.
 
 | Name            | Input                                                    | Delegates to                               |
 |-----------------|----------------------------------------------------------|--------------------------------------------|
@@ -43,7 +56,7 @@ confirmation for destructive operations.
 | `dmart.schema`  | `space_name`, `shortname`                                | `QueryService` against `/schema` subpath   |
 | `dmart.create`  | `space_name`, `subpath?`, `shortname`, `resource_type`, `payload?`, `schema_shortname?` | `EntryService.CreateAsync` |
 | `dmart.update`  | `space_name`, `subpath?`, `shortname`, `resource_type?`, `patch` | `EntryService.UpdateAsync` |
-| `dmart.delete`  | `space_name`, `subpath?`, `shortname`, `resource_type?`, **`confirm: true`** | `EntryService.DeleteAsync` — rejects without `confirm` |
+| `dmart.delete`  | `space_name`, `subpath?`, `shortname`, `resource_type?`, `confirm?` | `EntryService.DeleteAsync`. If the client advertised `capabilities.elicitation`, server sends `elicitation/create` over SSE instead of requiring `confirm:true`; the tool waits ≤ 2 min for the reply and cancels cleanly on decline. |
 | `dmart.history` | `space_name`, `subpath?`, `shortname`, `limit?` (max 50) | `QueryService` (QueryType.History) |
 | `dmart.download`| `space_name`, `subpath?`, `shortname`, `resource_type?` | Attachment bytes (base64) or entry payload (JSON). 5 MB hard cap. |
 | `dmart.semantic_search` | `query`, `space_name?`, `subpath?`, `resource_types?`, `limit?` | pgvector + embedding provider (see "Semantic search setup" below). Auto-disabled when either is missing. |
@@ -78,9 +91,13 @@ rest are discoverable by navigating into query results.
 ```
 
 Grab the JWT from a successful `POST /user/login` response (or any existing
-`auth_token` cookie). Default JWT lifetime is 15 minutes — long Claude
-sessions may hit an expiry; v0.1 surfaces a clean `-32002 Unauthenticated`
-MCP error when that happens. OAuth 2.1 transport is planned for v0.5.
+`auth_token` cookie). Default JWT lifetime is 15 minutes — long sessions
+hit expiry and get `-32002 Unauthenticated`.
+
+Alternatively, point the client at the OAuth 2.1 transport: it discovers the
+authorization server via `.well-known`, performs dynamic client registration,
+walks the user through `/oauth/authorize`, and exchanges the code for a JWT
+automatically — no manual token copy-paste.
 
 ### Quick curl smoke
 
@@ -216,8 +233,12 @@ admin endpoint is a candidate for a later version.
   `dmart.history`.
 - **v0.4** (shipped): `dmart.semantic_search` — pgvector + configurable
   embedding provider. Auto-disables when either is missing.
-- **v0.5**: OAuth 2.1 HTTP transport (removes the `Authorization: Bearer`
-  env-var requirement), MCP `elicitation/create` confirmation on delete
-  (upgrade from v0.2's static `confirm` flag), real SSE notifications
-  bridging dmart's existing WebSocket event bus into MCP's
-  `notifications/resources/updated`.
+- **v0.5** (shipped): OAuth 2.1 HTTP transport — `.well-known` discovery,
+  RFC 7591 dynamic client registration, authorization-code grant with
+  S256 PKCE, refresh-token grant. Real SSE notifications bridging dmart's
+  event bus (`McpSseBridgePlugin`) into MCP `notifications/resources/updated`
+  with per-session permission filtering. MCP `elicitation/create` confirmation
+  on delete — promotes the v0.2 static `confirm` flag to a live server→client
+  prompt when the client opts in at `initialize`.
+- **next**: prompts (`prompts/list`, `prompts/get`), reactive agent hooks
+  (`notifications/tool/...`), attachment streaming for > 5 MB downloads.

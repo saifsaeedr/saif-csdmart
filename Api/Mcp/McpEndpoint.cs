@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 
 namespace Dmart.Api.Mcp;
@@ -19,9 +20,7 @@ public static class McpEndpoint
 
     public static IEndpointRouteBuilder MapMcp(this IEndpointRouteBuilder g)
     {
-        var store = new McpSessionStore();
-
-        g.MapPost("/mcp", async (HttpContext http, CancellationToken ct) =>
+        g.MapPost("/mcp", async (HttpContext http, McpSessionStore store, CancellationToken ct) =>
         {
             var response = await HandlePostAsync(http, store, ct);
             if (response is null)
@@ -34,35 +33,75 @@ public static class McpEndpoint
                 http.Response.Body, response, McpJsonContext.Default.McpResponse, ct);
         }).RequireAuthorization();
 
-        // Streamable HTTP SSE stream. Phase 4 holds the connection open with
-        // periodic `:keep-alive` comments; future phases will emit real
-        // server-to-client notifications (e.g. `notifications/resources/updated`
-        // bridged from dmart's existing WebSocket event bus). Clients
-        // disconnect by aborting the request, which flips `ct` and unblocks
-        // the loop.
-        g.MapGet("/mcp", async (HttpContext http, CancellationToken ct) =>
+        // Streamable HTTP SSE stream. Drains the session outbox and writes
+        // each message as an SSE `data:` frame. The bridge plugin
+        // (McpSseBridgePlugin) populates the outbox from dmart events; the
+        // delete tool populates it with `elicitation/create` server-originated
+        // requests when the client supports that capability.
+        //
+        // Clients disconnect by aborting the request, which flips `ct` and
+        // completes the outbox read cleanly.
+        g.MapGet("/mcp", async (HttpContext http, McpSessionStore store, CancellationToken ct) =>
         {
+            var sessionId = http.Request.Headers[SessionHeader].ToString();
+            var session = string.IsNullOrEmpty(sessionId) ? null : store.Get(sessionId);
+            // Sessions MUST exist — the client has to call initialize first.
+            // If it hasn't, reject early with a 400 rather than hold a
+            // connection that can never receive anything routed to it.
+            if (session is null)
+            {
+                http.Response.StatusCode = StatusCodes.Status400BadRequest;
+                await http.Response.WriteAsync(
+                    "unknown or missing Mcp-Session-Id header — call initialize first", ct);
+                return;
+            }
+
             http.Response.ContentType = "text/event-stream";
             http.Response.Headers["Cache-Control"] = "no-cache";
             http.Response.Headers["Connection"] = "keep-alive";
             http.Response.Headers["X-Accel-Buffering"] = "no"; // disable nginx buffering
+
             var keepAlive = ": keep-alive\n\n"u8.ToArray();
+            await http.Response.Body.WriteAsync(keepAlive, ct);
+            await http.Response.Body.FlushAsync(ct);
+
+            // Keep-alive ticker so proxies don't timeout idle streams.
+            using var keepAliveTimer = new PeriodicTimer(TimeSpan.FromSeconds(15));
+            var keepAliveTask = Task.Run(async () =>
+            {
+                try
+                {
+                    while (await keepAliveTimer.WaitForNextTickAsync(ct))
+                    {
+                        await http.Response.Body.WriteAsync(keepAlive, ct);
+                        await http.Response.Body.FlushAsync(ct);
+                    }
+                }
+                catch (OperationCanceledException) { /* disconnect */ }
+                catch { /* write failure — outer loop tears down */ }
+            }, ct);
+
             try
             {
-                // Flush headers immediately so the client knows the stream is live.
-                await http.Response.Body.WriteAsync(keepAlive, ct);
-                await http.Response.Body.FlushAsync(ct);
-                while (!ct.IsCancellationRequested)
+                await foreach (var message in session.Outbox.Reader.ReadAllAsync(ct))
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(15), ct);
-                    await http.Response.Body.WriteAsync(keepAlive, ct);
+                    // SSE frame: "data: <json>\n\n". JSON can span lines in
+                    // theory but our serializer emits compact single-line
+                    // payloads so one `data:` per line is fine.
+                    var bytes = Encoding.UTF8.GetBytes($"data: {message}\n\n");
+                    await http.Response.Body.WriteAsync(bytes, ct);
                     await http.Response.Body.FlushAsync(ct);
                 }
             }
             catch (OperationCanceledException) { /* client disconnect — clean exit */ }
+            finally
+            {
+                session.Outbox.Writer.TryComplete();
+                try { await keepAliveTask; } catch { /* ignore */ }
+            }
         }).RequireAuthorization();
 
-        g.MapDelete("/mcp", (HttpContext http) =>
+        g.MapDelete("/mcp", (HttpContext http, McpSessionStore store) =>
         {
             var id = http.Request.Headers[SessionHeader].ToString();
             if (!string.IsNullOrEmpty(id)) store.Remove(id);
@@ -73,22 +112,57 @@ public static class McpEndpoint
     }
 
     // ---- core dispatch ----
-    // Returns null to signal "notification — reply with 202 Accepted, no body".
+    // Returns null to signal "notification or client response — reply with
+    // 202 Accepted, no body". Client responses to server-originated requests
+    // (e.g. elicitation/create) have `id` + `result|error` but no `method` —
+    // they route to the pending-elicitation map, not a handler.
     private static async Task<McpResponse?> HandlePostAsync(
         HttpContext http, McpSessionStore store, CancellationToken ct)
     {
-        McpRequest? req;
-        try
-        {
-            req = await JsonSerializer.DeserializeAsync(
-                http.Request.Body, McpJsonContext.Default.McpRequest, ct);
-        }
-        catch (JsonException ex)
-        {
-            return ErrorResponse(id: null, code: -32700, message: $"parse error: {ex.Message}");
-        }
-        if (req is null || string.IsNullOrEmpty(req.Method))
+        // Buffer the body so we can try both the "request" and "response"
+        // shapes. MCP tolerates both over the same POST route since v2025-03.
+        using var bodyDoc = await JsonDocument.ParseAsync(http.Request.Body, cancellationToken: ct);
+        var root = bodyDoc.RootElement;
+        if (root.ValueKind != JsonValueKind.Object)
             return ErrorResponse(id: null, code: -32600, message: "invalid request");
+
+        JsonElement? id = root.TryGetProperty("id", out var idEl) ? idEl.Clone() : null;
+        var hasMethod = root.TryGetProperty("method", out var methodEl)
+            && methodEl.ValueKind == JsonValueKind.String;
+
+        // Client response to a server-originated request (elicitation reply).
+        // Match by session + request id; resolve the TaskCompletionSource that
+        // the delete tool is awaiting.
+        if (!hasMethod)
+        {
+            var sessionIdHeader = http.Request.Headers[SessionHeader].ToString();
+            if (!string.IsNullOrEmpty(sessionIdHeader) && id.HasValue)
+            {
+                var session = store.Get(sessionIdHeader);
+                if (session is not null)
+                {
+                    var idKey = id.Value.ToString() ?? "";
+                    if (session.PendingElicitations.TryRemove(idKey, out var tcs))
+                    {
+                        if (root.TryGetProperty("result", out var resEl))
+                            tcs.TrySetResult(resEl.Clone());
+                        else if (root.TryGetProperty("error", out var errEl))
+                            tcs.TrySetException(new InvalidOperationException(
+                                errEl.TryGetProperty("message", out var m)
+                                    ? m.GetString() ?? "client declined"
+                                    : "client declined"));
+                    }
+                }
+            }
+            return null;  // 202 Accepted
+        }
+
+        var req = new McpRequest
+        {
+            Id = id,
+            Method = methodEl.GetString() ?? "",
+            Params = root.TryGetProperty("params", out var pEl) ? pEl.Clone() : null,
+        };
 
         // Notifications (no id) never produce a response body.
         var isNotification = !req.Id.HasValue || req.Id.Value.ValueKind == JsonValueKind.Null;
@@ -169,6 +243,21 @@ public static class McpEndpoint
         var clientVersion = p?.ProtocolVersion ?? ServerProtocolVersion;
 
         var session = store.Create(clientInfo.Name, clientInfo.Version, clientVersion);
+        // Stamp the authenticated user on the session so the event-bus bridge
+        // can fan notifications out to the right sessions. Identity comes from
+        // the same JwtBearer middleware that protects the rest of /mcp.
+        session.UserShortname = http.User.Identity?.Name;
+
+        // Elicitation capability: the client opts in by sending
+        // `capabilities.elicitation: {}`. If present, the delete tool (and any
+        // future destructive op) sends `elicitation/create` over SSE instead
+        // of rejecting up-front. MCP clients without this capability fall
+        // back to the explicit `confirm: true` argument.
+        if (p?.Capabilities is JsonElement caps && caps.ValueKind == JsonValueKind.Object
+            && caps.TryGetProperty("elicitation", out _))
+        {
+            session.ElicitationSupported = true;
+        }
 
         // Mcp-Session-Id header is how the client echoes session identity on
         // subsequent requests — emit it on the initialize response only.

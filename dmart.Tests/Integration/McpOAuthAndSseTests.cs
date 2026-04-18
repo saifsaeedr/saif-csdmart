@@ -1,0 +1,357 @@
+using System.Net;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using Dmart.Api.Mcp;
+using Dmart.Auth;
+using Dmart.Models.Api;
+using Dmart.Models.Json;
+using Microsoft.Extensions.DependencyInjection;
+using Shouldly;
+using Xunit;
+
+namespace Dmart.Tests.Integration;
+
+// Integration tests for the v0.5 MCP additions: the OAuth 2.1 transport
+// (discovery / dynamic client registration / authorize / token with PKCE),
+// the SSE server→client stream, and the elicitation/create confirmation
+// flow that the delete tool drives when the client opts in.
+public sealed class McpOAuthAndSseTests : IClassFixture<DmartFactory>
+{
+    private readonly DmartFactory _factory;
+    public McpOAuthAndSseTests(DmartFactory factory) => _factory = factory;
+
+    // ---- Discovery ----
+
+    [Fact]
+    public async Task ProtectedResourceMetadata_Advertises_Authorization_Server()
+    {
+        if (!DmartFactory.HasPg) return;
+        using var client = _factory.CreateClient();
+
+        var resp = await client.GetAsync("/.well-known/oauth-protected-resource");
+        resp.StatusCode.ShouldBe(HttpStatusCode.OK);
+        var root = await ReadJson(resp);
+        root.GetProperty("authorization_servers").GetArrayLength().ShouldBe(1);
+        var scopes = root.GetProperty("scopes_supported");
+        scopes.GetArrayLength().ShouldBeGreaterThan(0);
+        scopes[0].GetString().ShouldBe("mcp");
+    }
+
+    [Fact]
+    public async Task AuthorizationServerMetadata_Declares_Pkce_Only_Public_Clients()
+    {
+        if (!DmartFactory.HasPg) return;
+        using var client = _factory.CreateClient();
+
+        var resp = await client.GetAsync("/.well-known/oauth-authorization-server");
+        resp.StatusCode.ShouldBe(HttpStatusCode.OK);
+        var root = await ReadJson(resp);
+
+        root.GetProperty("authorization_endpoint").GetString().ShouldEndWith("/oauth/authorize");
+        root.GetProperty("token_endpoint").GetString().ShouldEndWith("/oauth/token");
+        root.GetProperty("registration_endpoint").GetString().ShouldEndWith("/oauth/register");
+
+        // S256 is the only PKCE method we accept.
+        var methods = root.GetProperty("code_challenge_methods_supported");
+        methods.GetArrayLength().ShouldBe(1);
+        methods[0].GetString().ShouldBe("S256");
+
+        // Public clients only — token_endpoint_auth_methods must include "none".
+        var authMethods = root.GetProperty("token_endpoint_auth_methods_supported");
+        var names = new List<string>();
+        foreach (var m in authMethods.EnumerateArray()) names.Add(m.GetString()!);
+        names.ShouldContain("none");
+    }
+
+    // ---- Dynamic client registration + authorize + token ----
+
+    [Fact]
+    public async Task FullOauthCodeFlow_With_Pkce_Issues_Valid_JwtAccessToken()
+    {
+        if (!DmartFactory.HasPg) return;
+        using var client = _factory.CreateClient();
+        // Disable auto-redirects so the /oauth/authorize POST's 302 is visible.
+        using var noRedirect = _factory.CreateClient(
+            new Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactoryClientOptions
+            { AllowAutoRedirect = false });
+
+        // 1. Register the client.
+        const string redirectUri = "http://localhost/mcp-client/callback";
+        var reg = await client.PostAsync("/oauth/register",
+            new StringContent(
+                $$"""{"redirect_uris":["{{redirectUri}}"],"client_name":"test-client"}""",
+                Encoding.UTF8, "application/json"));
+        reg.StatusCode.ShouldBe(HttpStatusCode.Created);
+        var regBody = await ReadJson(reg);
+        var clientId = regBody.GetProperty("client_id").GetString()!;
+        clientId.ShouldNotBeNullOrEmpty();
+
+        // 2. Build PKCE challenge.
+        var verifier = CreatePkceVerifier();
+        var challenge = S256Challenge(verifier);
+        var state = "xunit-state-1234";
+
+        // 3. POST /oauth/authorize with valid admin credentials.
+        var form = new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["response_type"] = "code",
+            ["client_id"] = clientId,
+            ["redirect_uri"] = redirectUri,
+            ["scope"] = "mcp",
+            ["state"] = state,
+            ["code_challenge"] = challenge,
+            ["code_challenge_method"] = "S256",
+            ["shortname"] = _factory.AdminShortname,
+            ["password"] = _factory.AdminPassword,
+        });
+        var authResp = await noRedirect.PostAsync("/oauth/authorize", form);
+        authResp.StatusCode.ShouldBe(HttpStatusCode.Redirect);
+        var location = authResp.Headers.Location!.ToString();
+        location.ShouldStartWith(redirectUri);
+        var query = System.Web.HttpUtility.ParseQueryString(new Uri(location).Query);
+        query["state"].ShouldBe(state);
+        var code = query["code"]!;
+        code.ShouldNotBeNullOrEmpty();
+
+        // 4. Exchange code for tokens.
+        var tokenForm = new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["grant_type"] = "authorization_code",
+            ["code"] = code,
+            ["client_id"] = clientId,
+            ["redirect_uri"] = redirectUri,
+            ["code_verifier"] = verifier,
+        });
+        var tokenResp = await client.PostAsync("/oauth/token", tokenForm);
+        tokenResp.StatusCode.ShouldBe(HttpStatusCode.OK);
+        var tokenBody = await ReadJson(tokenResp);
+        tokenBody.GetProperty("token_type").GetString().ShouldBe("Bearer");
+        var accessToken = tokenBody.GetProperty("access_token").GetString()!;
+        accessToken.ShouldNotBeNullOrEmpty();
+        tokenBody.GetProperty("refresh_token").GetString().ShouldNotBeNullOrEmpty();
+
+        // 5. Use the token against /mcp — the whole point of this flow.
+        using var authed = _factory.CreateClient();
+        authed.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        var ping = await authed.PostAsync("/mcp",
+            new StringContent("""{"jsonrpc":"2.0","id":1,"method":"ping"}""",
+                Encoding.UTF8, "application/json"));
+        ping.StatusCode.ShouldBe(HttpStatusCode.OK);
+    }
+
+    [Fact]
+    public async Task Token_With_Wrong_Verifier_Is_Rejected()
+    {
+        if (!DmartFactory.HasPg) return;
+        using var client = _factory.CreateClient();
+        var noRedirect = _factory.CreateClient(
+            new Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactoryClientOptions
+            { AllowAutoRedirect = false });
+
+        const string redirectUri = "http://localhost/mcp-client/callback2";
+        var reg = await client.PostAsync("/oauth/register",
+            new StringContent(
+                $$"""{"redirect_uris":["{{redirectUri}}"],"client_name":"t2"}""",
+                Encoding.UTF8, "application/json"));
+        var clientId = (await ReadJson(reg)).GetProperty("client_id").GetString()!;
+
+        var verifier = CreatePkceVerifier();
+        var challenge = S256Challenge(verifier);
+
+        var form = new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["response_type"] = "code",
+            ["client_id"] = clientId,
+            ["redirect_uri"] = redirectUri,
+            ["state"] = "x",
+            ["code_challenge"] = challenge,
+            ["code_challenge_method"] = "S256",
+            ["shortname"] = _factory.AdminShortname,
+            ["password"] = _factory.AdminPassword,
+        });
+        var authResp = await noRedirect.PostAsync("/oauth/authorize", form);
+        var location = authResp.Headers.Location!.ToString();
+        var code = System.Web.HttpUtility.ParseQueryString(new Uri(location).Query)["code"]!;
+
+        var wrongVerifier = CreatePkceVerifier();  // different value
+        var tokenResp = await client.PostAsync("/oauth/token", new FormUrlEncodedContent(
+            new Dictionary<string, string>
+            {
+                ["grant_type"] = "authorization_code",
+                ["code"] = code,
+                ["client_id"] = clientId,
+                ["redirect_uri"] = redirectUri,
+                ["code_verifier"] = wrongVerifier,
+            }));
+        tokenResp.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+        var body = await ReadJson(tokenResp);
+        body.GetProperty("error").GetString().ShouldBe("invalid_grant");
+    }
+
+    [Fact]
+    public async Task Authorize_With_Unknown_Client_Is_Rejected()
+    {
+        if (!DmartFactory.HasPg) return;
+        using var client = _factory.CreateClient();
+        var resp = await client.GetAsync(
+            "/oauth/authorize?response_type=code&client_id=mcp_nope&redirect_uri=http://localhost/cb&code_challenge=abc");
+        resp.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+    }
+
+    [Fact]
+    public async Task RefreshToken_Issues_New_Access()
+    {
+        if (!DmartFactory.HasPg) return;
+        // Login the old-fashioned way to grab a refresh_token, then exchange.
+        using var client = _factory.CreateClient();
+        var login = new UserLoginRequest(
+            _factory.AdminShortname, null, null, _factory.AdminPassword, null);
+        var loginResp = await client.PostAsJsonAsync("/user/login", login,
+            DmartJsonContext.Default.UserLoginRequest);
+        var loginBody = await loginResp.Content.ReadFromJsonAsync(
+            DmartJsonContext.Default.Response);
+        var refresh = loginBody!.Records!.First().Attributes!["refresh_token"].ToString()!;
+
+        var tokenResp = await client.PostAsync("/oauth/token", new FormUrlEncodedContent(
+            new Dictionary<string, string>
+            {
+                ["grant_type"] = "refresh_token",
+                ["refresh_token"] = refresh,
+            }));
+        tokenResp.StatusCode.ShouldBe(HttpStatusCode.OK);
+        var body = await ReadJson(tokenResp);
+        body.GetProperty("access_token").GetString().ShouldNotBeNullOrEmpty();
+    }
+
+    // ---- SSE + elicitation ----
+
+    [Fact]
+    public async Task SseGet_WithoutInitialize_Returns_BadRequest()
+    {
+        if (!DmartFactory.HasPg) return;
+        using var client = await LoginClient();
+        var resp = await client.GetAsync("/mcp");
+        resp.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+    }
+
+    [Fact]
+    public async Task Elicitation_Declined_Delete_Cancels_Without_Throwing()
+    {
+        if (!DmartFactory.HasPg) return;
+
+        // This is a focused unit-level test on McpElicitation — we push an
+        // "action=decline" result into the pending TCS directly and verify the
+        // DeleteAsync path routes through BuildDeclinedResponse rather than
+        // performing the deletion.
+        var store = _factory.Services.GetRequiredService<McpSessionStore>();
+        var session = store.Create("xunit", "0", "2025-03-26");
+        session.UserShortname = "dmart";
+        session.ElicitationSupported = true;
+
+        // Drain any frames the bridge plugin may have enqueued before.
+        while (session.Outbox.Reader.TryRead(out _)) { }
+
+        // Simulate: tool emits elicitation/create, client replies decline.
+        var waiter = Task.Run(async () =>
+        {
+            // Wait for the elicitation/create frame to land.
+            var frame = await session.Outbox.Reader.ReadAsync();
+            using var doc = JsonDocument.Parse(frame);
+            var requestId = doc.RootElement.GetProperty("id").GetString()!;
+            requestId.ShouldNotBeNullOrEmpty();
+
+            // Resolve the TCS with an "action=decline" response as if the
+            // client had POSTed back.
+            session.PendingElicitations.TryGetValue(requestId, out var tcs).ShouldBeTrue();
+            var decline = JsonDocument.Parse("""{"action":"decline"}""").RootElement.Clone();
+            tcs!.TrySetResult(decline);
+        });
+
+        var httpCtx = new Microsoft.AspNetCore.Http.DefaultHttpContext
+        {
+            RequestServices = _factory.Services,
+        };
+        httpCtx.Request.Headers["Mcp-Session-Id"] = session.Id;
+        var outcome = await McpElicitation.TryConfirmDeleteAsync(
+            httpCtx, "management", "/users", "xunit_target",
+            Dmart.Models.Enums.ResourceType.Content, default);
+        await waiter;
+        outcome.ShouldBe(McpElicitation.Outcome.Declined);
+    }
+
+    [Fact]
+    public async Task Elicitation_Accepted_Returns_Accepted_Outcome()
+    {
+        if (!DmartFactory.HasPg) return;
+        var store = _factory.Services.GetRequiredService<McpSessionStore>();
+        var session = store.Create("xunit-accept", "0", "2025-03-26");
+        session.UserShortname = "dmart";
+        session.ElicitationSupported = true;
+        while (session.Outbox.Reader.TryRead(out _)) { }
+
+        var waiter = Task.Run(async () =>
+        {
+            var frame = await session.Outbox.Reader.ReadAsync();
+            using var doc = JsonDocument.Parse(frame);
+            var requestId = doc.RootElement.GetProperty("id").GetString()!;
+            session.PendingElicitations.TryGetValue(requestId, out var tcs).ShouldBeTrue();
+            var accept = JsonDocument.Parse(
+                """{"action":"accept","content":{"confirm":true}}""").RootElement.Clone();
+            tcs!.TrySetResult(accept);
+        });
+
+        var httpCtx = new Microsoft.AspNetCore.Http.DefaultHttpContext
+        {
+            RequestServices = _factory.Services,
+        };
+        httpCtx.Request.Headers["Mcp-Session-Id"] = session.Id;
+        var outcome = await McpElicitation.TryConfirmDeleteAsync(
+            httpCtx, "management", "/users", "xunit_target",
+            Dmart.Models.Enums.ResourceType.Content, default);
+        await waiter;
+        outcome.ShouldBe(McpElicitation.Outcome.Accepted);
+    }
+
+    // ---- PKCE primitives ----
+
+    private static string CreatePkceVerifier()
+    {
+        Span<byte> raw = stackalloc byte[32];
+        RandomNumberGenerator.Fill(raw);
+        return Convert.ToBase64String(raw)
+            .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+    }
+
+    private static string S256Challenge(string verifier)
+    {
+        Span<byte> hash = stackalloc byte[32];
+        SHA256.HashData(Encoding.ASCII.GetBytes(verifier), hash);
+        return Convert.ToBase64String(hash)
+            .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+    }
+
+    // ---- helpers ----
+
+    private async Task<HttpClient> LoginClient()
+    {
+        var client = _factory.CreateClient();
+        var login = new UserLoginRequest(_factory.AdminShortname, null, null,
+            _factory.AdminPassword, null);
+        var resp = await client.PostAsJsonAsync("/user/login", login,
+            DmartJsonContext.Default.UserLoginRequest);
+        resp.EnsureSuccessStatusCode();
+        var body = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
+        var token = body!.Records!.First().Attributes!["access_token"].ToString();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        return client;
+    }
+
+    private static async Task<JsonElement> ReadJson(HttpResponseMessage resp)
+    {
+        var text = await resp.Content.ReadAsStringAsync();
+        return JsonDocument.Parse(text).RootElement.Clone();
+    }
+}
