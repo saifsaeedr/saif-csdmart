@@ -668,6 +668,13 @@ builder.Services.Configure<Microsoft.AspNetCore.Http.Features.FormOptions>(o =>
 
 var app = builder.Build();
 
+// Register the shutdown hook for subprocess plugins so each one gets a
+// clean stdin-close (EOF) when dmart starts shutting down. Paired with the
+// SDK sample's SIGINT handling, this silences the KeyboardInterrupt trace
+// that terminal Ctrl+C would otherwise elicit.
+Dmart.Plugins.Native.NativePluginLoader.WireSubprocessShutdown(
+    app.Services.GetRequiredService<IHostApplicationLifetime>());
+
 // Log the baked-in build version as the first line of the startup banner.
 // Uses Microsoft.Hosting.Lifetime so it appears alongside Kestrel's
 // "Now listening on" in the standard info stream and is captured by the

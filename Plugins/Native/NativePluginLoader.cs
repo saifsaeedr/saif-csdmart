@@ -15,6 +15,12 @@ namespace Dmart.Plugins.Native;
 // to them identically to built-in plugins.
 public static class NativePluginLoader
 {
+    // Every SubprocessPluginHost we spawn. Walked on ApplicationStopping so
+    // each subprocess gets a clean stdin-close (EOF) shutdown before the
+    // dotnet process exits. Without this, subprocesses only find out dmart
+    // is gone when their next stdin write raises a broken-pipe.
+    private static readonly List<SubprocessPluginHost> _hosts = new();
+
     public static void AddNativePlugins(this IServiceCollection services)
     {
         var customRoot = FindPluginsRoot();
@@ -48,6 +54,7 @@ public static class NativePluginLoader
         try
         {
             var host = new SubprocessPluginHost(execPath, dirName);
+            _hosts.Add(host);
 
             // Ask the plugin for its info
             var infoJson = host.SendAndReceive("{\"type\":\"info\"}");
@@ -216,6 +223,22 @@ public static class NativePluginLoader
             return info.Exists && (info.UnixFileMode & UnixFileMode.UserExecute) != 0;
         }
         catch { return false; }
+    }
+
+    // Invoke from Program.cs once the WebApplication has been built, so we
+    // can register a graceful-shutdown callback on IHostApplicationLifetime.
+    // For subprocess plugins, this sends an EOF on their stdin so they exit
+    // cleanly on the next read rather than learning about shutdown via a
+    // broken-pipe (or tripping a KeyboardInterrupt on terminal Ctrl+C).
+    public static void WireSubprocessShutdown(IHostApplicationLifetime lifetime)
+    {
+        lifetime.ApplicationStopping.Register(() =>
+        {
+            foreach (var h in _hosts)
+            {
+                try { h.Shutdown(); } catch { /* best-effort */ }
+            }
+        });
     }
 
     private static List<NativeApiPlugin.NativeRoute> ParseRoutes(JsonElement root)

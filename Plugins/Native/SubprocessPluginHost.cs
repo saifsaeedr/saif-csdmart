@@ -124,5 +124,27 @@ internal sealed class SubprocessPluginHost : IDisposable
         }
     }
 
+    // Graceful shutdown: close stdin so the subprocess's `for line in sys.stdin`
+    // (or equivalent) returns EOF and exits on its own, give it up to 500ms,
+    // then kill if it's still around. Used by IHostApplicationLifetime's
+    // ApplicationStopping hook so non-terminal shutdowns (SIGTERM from
+    // systemd, docker stop, host.StopAsync()) never have to fall through to
+    // Kill().
+    public void Shutdown()
+    {
+        lock (_lock)
+        {
+            if (_process is null) return;
+            try
+            {
+                _stdin?.Dispose();  // closes the pipe → subprocess sees EOF
+                if (_process is { HasExited: false })
+                    _process.WaitForExit(500);
+            }
+            catch { /* ignore — fall through to Kill */ }
+            Kill();
+        }
+    }
+
     public void Dispose() => Kill();
 }

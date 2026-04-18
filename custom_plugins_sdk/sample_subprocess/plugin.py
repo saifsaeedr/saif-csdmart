@@ -47,4 +47,18 @@ def main():
             print(json.dumps({"status": "error", "message": str(e)}), flush=True)
 
 if __name__ == "__main__":
-    main()
+    # Ctrl+C in the controlling terminal sends SIGINT to every process in the
+    # foreground process group — this plugin included. dmart also receives it
+    # and begins a clean shutdown which closes our stdin; that's the signal
+    # we actually want to obey. Ignoring SIGINT here keeps us running until
+    # dmart's stdin close drops us out of the `for line in sys.stdin` loop,
+    # so shutdown is orderly and there's no traceback to scare operators.
+    import signal
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        main()
+    except KeyboardInterrupt:
+        # Belt-and-suspenders: if SIG_IGN somehow didn't stick (e.g. the
+        # plugin is launched from a context that resets signal handlers),
+        # still exit silently rather than dumping a Python traceback.
+        pass
