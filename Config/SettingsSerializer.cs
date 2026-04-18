@@ -27,6 +27,7 @@ public static class SettingsSerializer
         nameof(DmartSettings.PostgresConnection),
         // SMS gateway token — outbound credentials must not leak.
         nameof(DmartSettings.SmppAuthKey),
+        nameof(DmartSettings.EmbeddingApiKey),
     };
 
     /// <summary>

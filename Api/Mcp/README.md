@@ -41,6 +41,12 @@ confirmation for destructive operations.
 | `dmart.query`   | `space_name`, `subpath?`, `type?`, `resource_types?`, `filter_shortnames?`, `search?`, `limit?` (hard cap 50) | `QueryService.ExecuteAsync` |
 | `dmart.read`    | `space_name`, `subpath?`, `shortname`, `resource_type?`  | `QueryService` (single-shortname filter)   |
 | `dmart.schema`  | `space_name`, `shortname`                                | `QueryService` against `/schema` subpath   |
+| `dmart.create`  | `space_name`, `subpath?`, `shortname`, `resource_type`, `payload?`, `schema_shortname?` | `EntryService.CreateAsync` |
+| `dmart.update`  | `space_name`, `subpath?`, `shortname`, `resource_type?`, `patch` | `EntryService.UpdateAsync` |
+| `dmart.delete`  | `space_name`, `subpath?`, `shortname`, `resource_type?`, **`confirm: true`** | `EntryService.DeleteAsync` — rejects without `confirm` |
+| `dmart.history` | `space_name`, `subpath?`, `shortname`, `limit?` (max 50) | `QueryService` (QueryType.History) |
+| `dmart.download`| `space_name`, `subpath?`, `shortname`, `resource_type?` | Attachment bytes (base64) or entry payload (JSON). 5 MB hard cap. |
+| `dmart.semantic_search` | `query`, `space_name?`, `subpath?`, `resource_types?`, `limit?` | pgvector + embedding provider (see "Semantic search setup" below). Auto-disabled when either is missing. |
 
 ## Resources
 
@@ -113,6 +119,84 @@ curl -s -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
 No attributes, no reflection — explicit registration matches dmart's overall
 source-gen discipline.
 
+## Semantic search setup
+
+`dmart.semantic_search` + `POST /managed/semantic-search` are opt-in. Three
+pieces have to line up:
+
+### 1. Install pgvector in PostgreSQL
+
+```bash
+# Fedora / RHEL
+sudo dnf install pgvector_17   # match your PG major version
+
+# Debian / Ubuntu
+sudo apt install postgresql-17-pgvector
+
+# Or from source
+git clone https://github.com/pgvector/pgvector.git && cd pgvector && make && sudo make install
+```
+
+Then, as a PostgreSQL superuser (once per database):
+
+```bash
+psql -U postgres -d <your-db> -c "CREATE EXTENSION vector"
+```
+
+dmart's own DB role normally isn't a superuser, so it can't install the
+extension itself. dmart's schema init only adds the `entries.embedding`
+column when the extension is already installed — safe to run either way.
+
+If you skip this step, semantic features stay disabled cleanly — no crash,
+no warning spam.
+
+### 2. Configure an embedding provider
+
+The HTTP call is OpenAI-shape-compatible. Point it at anything that speaks
+that contract:
+
+```ini
+# OpenAI
+EMBEDDING_API_URL=https://api.openai.com/v1/embeddings
+EMBEDDING_API_KEY=sk-...
+EMBEDDING_MODEL=text-embedding-3-small
+
+# Ollama (localhost, self-hosted)
+EMBEDDING_API_URL=http://localhost:11434/v1/embeddings
+EMBEDDING_MODEL=nomic-embed-text
+
+# text-embeddings-inference (HuggingFace, self-hosted)
+EMBEDDING_API_URL=http://localhost:8080/v1/embeddings
+EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
+```
+
+### 3. Activate the indexer per space
+
+The `semantic_indexer` plugin is registered but inactive by default. To
+index a space, add it to the space's `active_plugins`:
+
+```json
+POST /managed/request
+{
+  "space_name": "my_space",
+  "request_type": "update",
+  "records": [{
+    "resource_type": "space",
+    "shortname": "my_space",
+    "subpath": "/",
+    "attributes": {
+      "active_plugins": ["resource_folders_creation", "audit", "semantic_indexer"]
+    }
+  }]
+}
+```
+
+From the next create/update onward, entries get embedded automatically.
+
+To backfill existing entries, run a one-shot update touching every entry in
+the space (they'll each trigger the indexer hook). A dedicated "reindex all"
+admin endpoint is a candidate for a later version.
+
 ## Safety defaults
 
 - **Hard 50-result cap** on `dmart.query` regardless of what the model asks
@@ -126,10 +210,14 @@ source-gen discipline.
 ## Roadmap
 
 - **v0.1** (shipped): read-only tools + resources, SSE skeleton.
-- **v0.2**: `dmart.create`, `dmart.update`, `dmart.delete` with MCP
-  elicitation confirmation on destructive ops.
-- **v0.3**: `dmart.download` (attachment bytes, size-gated), `dmart.history`.
-- **v0.4**: `dmart.semantic_search` — blocked on pgvector integration.
+- **v0.2** (shipped): `dmart.create`, `dmart.update`, `dmart.delete` with
+  explicit `confirm: true` guard on delete.
+- **v0.3** (shipped): `dmart.download` (attachment bytes, 5 MB cap),
+  `dmart.history`.
+- **v0.4** (shipped): `dmart.semantic_search` — pgvector + configurable
+  embedding provider. Auto-disables when either is missing.
 - **v0.5**: OAuth 2.1 HTTP transport (removes the `Authorization: Bearer`
-  env-var requirement), real SSE notifications bridging dmart's existing
-  WebSocket event bus into MCP's `notifications/resources/updated`.
+  env-var requirement), MCP `elicitation/create` confirmation on delete
+  (upgrade from v0.2's static `confirm` flag), real SSE notifications
+  bridging dmart's existing WebSocket event bus into MCP's
+  `notifications/resources/updated`.

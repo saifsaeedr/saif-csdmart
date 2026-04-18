@@ -468,5 +468,18 @@ public static class SqlSchema
                 UNIQUE (invitation_token);
         END IF;
     END $$;
+
+    -- pgvector integration for semantic search. We deliberately DON'T run
+    -- `CREATE EXTENSION vector` here — that requires superuser, which dmart's
+    -- DB user usually isn't. A DBA installs the extension once via
+    --   psql -U postgres -d <dbname> -c "CREATE EXTENSION vector"
+    -- We just add the column if the extension is already installed; on
+    -- pg_extension miss we no-op and runtime code gates all semantic
+    -- features behind EmbeddingProvider.IsEnabledAsync.
+    DO $$ BEGIN
+        IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN
+            ALTER TABLE entries ADD COLUMN IF NOT EXISTS embedding vector;
+        END IF;
+    END $$;
     """;
 }

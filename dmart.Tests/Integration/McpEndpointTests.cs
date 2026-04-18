@@ -332,6 +332,43 @@ public sealed class McpEndpointTests : IClassFixture<DmartFactory>
     }
 
     [Fact]
+    public async Task SemanticSearch_Returns_Clean_Response_Regardless_Of_Environment()
+    {
+        // Covers three scenarios with one assertion:
+        //   (a) pgvector not installed → Response with status=failed +
+        //       error.type="request" and a "not configured" message.
+        //   (b) pgvector present, EMBEDDING_API_URL blank → same result.
+        //   (c) Both configured + a real embedder → status=success with
+        //       records (possibly empty).
+        // Every scenario returns a well-formed Response envelope inside a
+        // successful MCP ToolsCallResult — never a raw exception.
+        if (!DmartFactory.HasPg) return;
+        using var client = await LoginClient();
+
+        var resp = await client.PostAsync("/mcp", JsonRpc(
+            "tools/call", id: 220,
+            paramsJson: """{"name":"dmart.semantic_search","arguments":{"query":"anything"}}"""));
+        resp.StatusCode.ShouldBe(HttpStatusCode.OK);
+        var body = await ReadJson(resp);
+        var result = body.GetProperty("result");
+        result.TryGetProperty("isError", out var isErr).ShouldBeTrue();
+        isErr.GetBoolean().ShouldBeFalse();
+
+        var text = result.GetProperty("content")[0].GetProperty("text").GetString()!;
+        using var doc = JsonDocument.Parse(text);
+        var status = doc.RootElement.GetProperty("status").GetString();
+        status.ShouldBeOneOf("success", "failed");
+        if (status == "failed")
+        {
+            var msg = doc.RootElement.GetProperty("error").GetProperty("message").GetString()!;
+            // One of the two disabled diagnostics — "not configured" (no
+            // provider URL) or "not available" (no pgvector extension).
+            (msg.Contains("not configured") || msg.Contains("not available"))
+                .ShouldBeTrue();
+        }
+    }
+
+    [Fact]
     public async Task Download_UnknownEntry_ReturnsToolError()
     {
         if (!DmartFactory.HasPg) return;

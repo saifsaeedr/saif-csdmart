@@ -636,6 +636,9 @@ builder.Services.AddSingleton<IHookPlugin, AdminNotificationSenderPlugin>();
 builder.Services.AddSingleton<IHookPlugin, SystemNotificationSenderPlugin>();
 builder.Services.AddSingleton<IHookPlugin, LocalNotificationPlugin>();
 builder.Services.AddSingleton<IHookPlugin, LdapManagerPlugin>();
+builder.Services.AddSingleton<IHookPlugin, SemanticIndexerPlugin>();
+builder.Services.AddSingleton<EmbeddingProvider>();
+builder.Services.AddSingleton<SemanticSearchService>();
 builder.Services.AddSingleton<IApiPlugin, DbSizeInfoPlugin>();
 
 // Native .so plugins from ~/.dmart/plugins/ — no rebuild needed.

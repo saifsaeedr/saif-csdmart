@@ -29,8 +29,9 @@ public static class McpRegistry
             ["dmart.create"]  = McpTools.CreateAsync,
             ["dmart.update"]  = McpTools.UpdateAsync,
             ["dmart.delete"]  = McpTools.DeleteAsync,
-            ["dmart.history"]  = McpTools.HistoryAsync,
-            ["dmart.download"] = McpTools.DownloadAsync,
+            ["dmart.history"]          = McpTools.HistoryAsync,
+            ["dmart.download"]         = McpTools.DownloadAsync,
+            ["dmart.semantic_search"]  = McpTools.SemanticSearchAsync,
         };
 
     private static List<McpTool> BuildTools() =>
@@ -217,6 +218,31 @@ public static class McpRegistry
                     "limit":      { "type": "integer", "minimum": 1, "maximum": 50 }
                   },
                   "required": ["space_name","shortname"],
+                  "additionalProperties": false
+                }
+                """),
+        },
+        new McpTool
+        {
+            Name = "dmart.semantic_search",
+            Description = "Vector-similarity search across dmart entries. " +
+                          "Returns matches ranked by semantic closeness to " +
+                          "`query`, with a `similarity` score in [0,1]. " +
+                          "Respects read permissions — results the caller " +
+                          "can't see are dropped silently. REQUIRES server- " +
+                          "side setup: pgvector extension + EMBEDDING_API_URL " +
+                          "configured. Returns a clear error when not set up.",
+            InputSchema = ParseSchema("""
+                {
+                  "type": "object",
+                  "properties": {
+                    "query":          { "type": "string", "description": "Natural-language query to embed and match against." },
+                    "space_name":     { "type": "string", "description": "Optional: restrict to one space." },
+                    "subpath":        { "type": "string", "description": "Optional: restrict to entries whose subpath starts with this prefix." },
+                    "resource_types": { "type": "array", "items": { "type": "string" }, "description": "Optional: filter by resource types." },
+                    "limit":          { "type": "integer", "minimum": 1, "maximum": 50, "description": "Defaults to 10, capped at 50." }
+                  },
+                  "required": ["query"],
                   "additionalProperties": false
                 }
                 """),

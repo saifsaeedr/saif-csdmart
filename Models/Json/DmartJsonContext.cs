@@ -68,6 +68,12 @@ namespace Dmart.Models.Json;
 [JsonSerializable(typeof(List<Language>))]
 [JsonSerializable(typeof(List<Dictionary<string, object>>))]
 [JsonSerializable(typeof(Dictionary<string, object>))]
+// Scalar types that appear inside Dictionary<string, object> attribute bags.
+// Without explicit registration, the source-gen serializer throws at runtime
+// for any ValueType it hasn't been told about — seen on semantic_search's
+// similarity score (double).
+[JsonSerializable(typeof(double))]
+[JsonSerializable(typeof(float))]
 [JsonSerializable(typeof(Dictionary<string, List<string>>))]
 [JsonSerializable(typeof(Dictionary<string, List<Record>>))]
 [JsonSerializable(typeof(Dictionary<string, string>))]

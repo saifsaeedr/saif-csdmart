@@ -341,6 +341,40 @@ public static class McpTools
         return ParseBytes(ms.ToArray());
     }
 
+    // ---- dmart.semantic_search ----
+
+    public static async Task<JsonElement> SemanticSearchAsync(
+        JsonElement? arguments, HttpContext http, CancellationToken ct)
+    {
+        if (!arguments.HasValue || arguments.Value.ValueKind != JsonValueKind.Object)
+            throw new ArgumentException("arguments object required");
+        var args = arguments.Value;
+        var actor = RequireActor(http);
+
+        var query = GetRequiredString(args, "query");
+        var space = GetString(args, "space_name");
+        var subpath = GetString(args, "subpath");
+        var rawLimit = GetInt(args, "limit") ?? 10;
+        var limit = Math.Min(Math.Max(1, rawLimit), MaxQueryLimit);
+
+        List<ResourceType>? types = null;
+        if (args.TryGetProperty("resource_types", out var rtArr) &&
+            rtArr.ValueKind == JsonValueKind.Array)
+        {
+            types = [];
+            foreach (var el in rtArr.EnumerateArray())
+            {
+                if (el.ValueKind == JsonValueKind.String &&
+                    TryParseEnum<ResourceType>(el.GetString()) is ResourceType rt)
+                    types.Add(rt);
+            }
+        }
+
+        var svc = http.RequestServices.GetRequiredService<SemanticSearchService>();
+        var resp = await svc.SearchAsync(query, space, subpath, types, limit, actor, ct);
+        return SerializeResponse(resp);
+    }
+
     // ---- dmart.history ----
 
     public static async Task<JsonElement> HistoryAsync(

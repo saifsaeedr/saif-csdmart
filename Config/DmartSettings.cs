@@ -115,6 +115,24 @@ public sealed class DmartSettings
     // links to msisdn users). Python: `send_sms_api`. Same request shape as
     // `SendSmsOtpApi`. Empty disables outbound SMS for invitation delivery.
     public string SendSmsApi { get; set; } = "";
+
+    // ---- Embeddings (for semantic search) ----
+    // Semantic search is an opt-in feature. When both the pgvector extension
+    // is installed in PostgreSQL AND EmbeddingApiUrl is set, dmart will embed
+    // every entry it creates/updates and expose POST /managed/semantic-search
+    // + the `dmart.semantic_search` MCP tool. When either is missing, those
+    // features silently no-op and existing workloads are unaffected.
+    //
+    // Request shape sent to the endpoint (OpenAI-compatible):
+    //   POST {EmbeddingApiUrl}  with Authorization: Bearer {EmbeddingApiKey}
+    //   Body: { "model": "...", "input": "<text>" }
+    //   Response: { "data": [ { "embedding": [floats...] } ], ... }
+    // Works against OpenAI directly, Ollama's /api/embeddings with a
+    // compatible wrapper, text-embeddings-inference, and most OpenAI-
+    // compatible relays.
+    public string EmbeddingApiUrl { get; set; } = "";
+    public string EmbeddingApiKey { get; set; } = "";
+    public string EmbeddingModel { get; set; } = "text-embedding-3-small";
     public bool LogoutOnPwdChange { get; set; } = true;
     public int RequestTimeout { get; set; } = 35;
 

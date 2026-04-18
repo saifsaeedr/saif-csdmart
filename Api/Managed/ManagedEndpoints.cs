@@ -5,6 +5,7 @@ public static class ManagedEndpoints
     public static RouteGroupBuilder MapManaged(this RouteGroupBuilder g)
     {
         QueryHandler.Map(g);
+        SemanticSearchHandler.Map(g);
         RequestHandler.Map(g);
         EntryHandler.Map(g);
         PayloadHandler.Map(g);
