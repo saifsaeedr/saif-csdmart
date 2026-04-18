@@ -15,20 +15,35 @@
 
 set -u
 
-# Read defaults from config.env if present (same file the server uses).
-_read_config() { grep -m1 "^$1" config.env 2>/dev/null | sed 's/^[^=]*=//' | tr -d '"' | tr -d "'" || true; }
+# Read defaults from a config.env the server would also pick up. Mirrors the
+# server's lookup order: $BACKEND_ENV → ./config.env → ~/.dmart/config.env.
+# Returns the first match; empty if none exist or the key isn't set.
+_read_config() {
+    local key="$1" file
+    for file in "${BACKEND_ENV:-}" ./config.env "$HOME/.dmart/config.env"; do
+        [[ -n "$file" && -f "$file" ]] || continue
+        local v
+        v=$(grep -m1 "^$key=" "$file" 2>/dev/null | sed 's/^[^=]*=//' | tr -d '"' | tr -d "'")
+        if [[ -n "$v" ]]; then echo "$v"; return; fi
+    done
+}
 
 # Port: prefer DMART_URL verbatim; else compose from LISTENING_PORT in
-# config.env; else fall back to 5099. Guard against config.env missing — if
-# the port lookup returns empty, _LISTEN would produce a malformed
-# "http://127.0.0.1:" URL that slips past the :- fallback. Validate numeric.
+# config.env; else fall back to 5099. Guard against a missing or non-numeric
+# LISTENING_PORT so we don't emit the malformed "http://127.0.0.1:" URL that
+# slips past the :- fallback.
 _LISTEN=$(_read_config LISTENING_PORT)
 [[ "$_LISTEN" =~ ^[0-9]+$ ]] || _LISTEN=5099
 API_URL="${DMART_URL:-http://127.0.0.1:$_LISTEN}"
+# Admin shortname: canonical default is "dmart" (see AdminBootstrap.cs).
 ADMIN_SHORTNAME="${DMART_ADMIN:-$(_read_config ADMIN_SHORTNAME)}"
-ADMIN_SHORTNAME="${ADMIN_SHORTNAME:-cstest}"
+ADMIN_SHORTNAME="${ADMIN_SHORTNAME:-dmart}"
+# Admin password: empty by default — AdminBootstrap creates a passwordless
+# admin unless ADMIN_PASSWORD is set at first boot. If the caller's DB was
+# bootstrapped with one, they MUST pass DMART_PWD or set ADMIN_PASSWORD in
+# config.env so curl.sh can log in.
 ADMIN_PASSWORD="${DMART_PWD:-$(_read_config ADMIN_PASSWORD)}"
-ADMIN_PASSWORD="${ADMIN_PASSWORD:-cstest-password-123}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-dmart}"
 SPACE="${DMART_TEST_SPACE:-dummy}"
 SHORTNAME="97326c47"
 SUBPATH="posts"

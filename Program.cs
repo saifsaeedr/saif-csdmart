@@ -668,6 +668,20 @@ builder.Services.Configure<Microsoft.AspNetCore.Http.Features.FormOptions>(o =>
 
 var app = builder.Build();
 
+// Log the baked-in build version as the first line of the startup banner.
+// Uses Microsoft.Hosting.Lifetime so it appears alongside Kestrel's
+// "Now listening on" in the standard info stream and is captured by the
+// JSONL sink (LOG_FILE) as a structured {Version, Runtime} record.
+{
+    var v = typeof(Program).Assembly
+        .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+        .OfType<System.Reflection.AssemblyInformationalVersionAttribute>()
+        .FirstOrDefault()?.InformationalVersion ?? "dev";
+    app.Services.GetRequiredService<ILoggerFactory>()
+        .CreateLogger("Microsoft.Hosting.Lifetime")
+        .LogInformation("dmart {Version} on .NET {Runtime}", v, Environment.Version);
+}
+
 // Exception handler
 app.Use(async (ctx, next) =>
 {
