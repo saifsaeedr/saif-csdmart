@@ -460,7 +460,24 @@ for (var i = 0; i < serverArgs.Length - 1; i++)
 }
 
 var builder = WebApplication.CreateSlimBuilder(serverArgs);
-builder.Services.AddOpenApi();
+builder.Services.AddOpenApi(options =>
+{
+    // Make the generated openapi.json describe endpoints relative to its
+    // own URL rather than to the server's origin. With `servers: [{ url: ".." }]`,
+    // a Swagger UI loaded at https://host/<anyprefix>/docs/ will resolve the
+    // spec from https://host/<anyprefix>/docs/openapi.json and route "Try it
+    // out" calls back through https://host/<anyprefix>/<endpoint>. Works
+    // whether dmart is mounted at /, /dmart/, /abc/xyz/, or anywhere else
+    // behind a reverse proxy — no path-base awareness needed on the server.
+    options.AddDocumentTransformer((document, _, _) =>
+    {
+        document.Servers = new List<Microsoft.OpenApi.OpenApiServer>
+        {
+            new() { Url = ".." },
+        };
+        return Task.CompletedTask;
+    });
+});
 
 // All logging config from config.env.
 // LOG_FORMAT: "text" (default, human-readable) or "json" (structured JSON lines)
@@ -759,7 +776,7 @@ app.MapGet("/docs", () => Results.Content("""
     <div id="swagger-ui"></div>
     <script src="https://unpkg.com/swagger-ui-dist/swagger-ui-bundle.js"></script>
     <script>
-        SwaggerUIBundle({ url: '/docs/openapi.json', dom_id: '#swagger-ui' });
+        SwaggerUIBundle({ url: 'openapi.json', dom_id: '#swagger-ui' });
     </script>
 </body>
 </html>
