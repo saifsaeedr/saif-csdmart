@@ -1,6 +1,7 @@
 {
   "shortname": "semantic_indexer",
   "is_active": true,
+  "always_active": true,
   "filters": {
     "subpaths": ["__ALL__"],
     "resource_types": ["__ALL__"],

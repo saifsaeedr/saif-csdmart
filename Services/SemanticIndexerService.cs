@@ -88,12 +88,11 @@ public sealed class SemanticIndexerService(
     {
         if (!string.IsNullOrEmpty(explicitSpace)) return [explicitSpace];
 
+        // semantic_indexer runs with always_active=true — fires on every
+        // space's events regardless of per-space opt-in. Bulk reindex with
+        // no space argument therefore walks every space that exists.
         var all = await spaces.ListAsync(ct);
-        return all
-            .Where(s => s.ActivePlugins is { Count: > 0 } &&
-                        s.ActivePlugins.Contains("semantic_indexer", StringComparer.Ordinal))
-            .Select(s => s.Shortname)
-            .ToList();
+        return all.Select(s => s.Shortname).ToList();
     }
 
     private async Task ReindexOneSpaceAsync(

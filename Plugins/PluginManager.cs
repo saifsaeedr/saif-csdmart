@@ -205,7 +205,10 @@ public sealed class PluginManager(
 
         foreach (var hook in plugins)
         {
-            if (!spaceActive.Contains(hook.Wrapper.Shortname)) continue;
+            // `always_active` bypasses the per-space opt-in — system plugins
+            // (e.g. semantic_indexer) run on every space's events.
+            if (!hook.Wrapper.AlwaysActive &&
+                !spaceActive.Contains(hook.Wrapper.Shortname)) continue;
             if (hook.Wrapper.Filters is null) continue;
             if (!MatchedFilters(hook.Wrapper.Filters, e)) continue;
 
@@ -231,7 +234,8 @@ public sealed class PluginManager(
 
         foreach (var hook in plugins)
         {
-            if (!spaceActive.Contains(hook.Wrapper.Shortname)) continue;
+            if (!hook.Wrapper.AlwaysActive &&
+                !spaceActive.Contains(hook.Wrapper.Shortname)) continue;
             if (hook.Wrapper.Filters is null) continue;
             if (!MatchedFilters(hook.Wrapper.Filters, e)) continue;
 
