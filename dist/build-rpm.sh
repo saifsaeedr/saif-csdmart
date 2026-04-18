@@ -62,6 +62,9 @@ if [[ "$TARGET" == "srpm" ]]; then
         "$RPMBUILD/SPECS/dmart.spec"
 
     mkdir -p "$SRCDIR/dist/out"
+    # Keep only one SRPM on disk — older versions would otherwise pile up in
+    # dist/out/ and confuse downstream scripts globbing for the current build.
+    rm -f "$SRCDIR/dist/out/"*.src.rpm
     cp "$RPMBUILD"/SRPMS/*.src.rpm "$SRCDIR/dist/out/"
 
     echo ""
@@ -151,6 +154,14 @@ if [[ "$TARGET" == "el9" || "$TARGET" == "rhel9" ]]; then
         -w /src \
         "$CONTAINER_NAME" \
         bash /src/dist/build-rpm.sh
+
+    # Stop the builder so it stops showing up in `podman ps` / `ps aux`. The
+    # writable layer (installed dotnet-sdk, rpm-build, etc.) persists, so the
+    # next build just `podman start`s it — no re-install needed. 1-second
+    # timeout is plenty since PID 1 is `tail -f /dev/null`; matches the
+    # alpine builder in admin_scripts/docker/notes.sh.
+    $ENGINE stop -t 1 "$CONTAINER_NAME" >/dev/null 2>&1 || true
+
     echo ""
     echo "=== RHEL 9 RPM ==="
     ls -lh dist/out/*el9*.rpm 2>/dev/null || ls -lh dist/out/*.rpm
@@ -205,10 +216,23 @@ rpmbuild -bb \
     --define "_topdir $RPMBUILD" \
     "$RPMBUILD/SPECS/dmart.spec"
 
-# Step 5: Copy output
+# Step 5: Copy output.
+# Keep only one RPM per dist tag (fc44, el9, …) so dist/out/ ends up with
+# at most three files: one binary RPM per target + one SRPM. Extract the
+# tag from the filename (`dmart-VER-REL.<dist>.<arch>.rpm`, field NF-2) and
+# purge every prior RPM sharing that tag before copying the fresh build in.
 mkdir -p "$SRCDIR/dist/out"
-cp "$RPMBUILD"/RPMS/*/*.rpm "$SRCDIR/dist/out/"
-cp "$RPMBUILD"/SRPMS/*.src.rpm "$SRCDIR/dist/out/" 2>/dev/null || true
+for new_rpm in "$RPMBUILD"/RPMS/*/*.rpm; do
+    [ -e "$new_rpm" ] || continue
+    dist_tag=$(basename "$new_rpm" | awk -F. '{print $(NF-2)}')
+    find "$SRCDIR/dist/out" -maxdepth 1 -type f \
+        -name "*.${dist_tag}.*.rpm" ! -name "*.src.rpm" -delete
+    cp "$new_rpm" "$SRCDIR/dist/out/"
+done
+if ls "$RPMBUILD"/SRPMS/*.src.rpm >/dev/null 2>&1; then
+    rm -f "$SRCDIR/dist/out/"*.src.rpm
+    cp "$RPMBUILD"/SRPMS/*.src.rpm "$SRCDIR/dist/out/"
+fi
 
 echo ""
 echo "=== RPMs built successfully ==="
