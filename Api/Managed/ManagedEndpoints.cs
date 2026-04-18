@@ -6,6 +6,7 @@ public static class ManagedEndpoints
     {
         QueryHandler.Map(g);
         SemanticSearchHandler.Map(g);
+        ReindexEmbeddingsHandler.Map(g);
         RequestHandler.Map(g);
         EntryHandler.Map(g);
         PayloadHandler.Map(g);
