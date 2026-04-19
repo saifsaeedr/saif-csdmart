@@ -393,6 +393,16 @@ public static class QueryHelper
     {
         var parts = path.Split('.');
 
+        // Array iteration: any part ending in `[]` triggers
+        // EXISTS (SELECT 1 FROM jsonb_array_elements(...) AS x WHERE ...) —
+        // Python parity for `@payload.body.variants[].X:Y` and
+        // `@payload.body.variants[]:Y` (primitive-array element match).
+        for (int i = 0; i < parts.Length; i++)
+        {
+            if (parts[i].EndsWith("[]", StringComparison.Ordinal))
+                return BuildPayloadArraySql(parts, i, data, args);
+        }
+
         // Wildcard: payload.body.*  or  payload.*
         if (parts.Contains("*"))
         {
@@ -452,6 +462,129 @@ public static class QueryHelper
 
         // Type-aware value matching (mirrors Python's jsonb_typeof checks)
         return BuildPayloadValueSql(arrowPath, textExtract, data, args);
+    }
+
+    // Handles `@payload.a.b[].c:value` and `@payload.a.b[]:value` forms.
+    //   * arrayIdx = index into `parts` of the element ending in `[]`
+    //   * everything before that is the path to the JSONB array
+    //   * everything after is the path to dereference on each element
+    // Emits EXISTS (SELECT 1 FROM jsonb_array_elements(...) AS x WHERE <cond>).
+    // Supports equality (numeric/string), comparison operators (>, <, >=, <=),
+    // negation, and ranges `[A B]`.
+    private static string? BuildPayloadArraySql(
+        string[] parts, int arrayIdx, SearchField data, List<NpgsqlParameter> args)
+    {
+        // Prefix: path to the array itself. Strip `[]` off the array part.
+        var prefixParts = new List<string>(arrayIdx + 1);
+        for (int i = 0; i < arrayIdx; i++) prefixParts.Add(parts[i]);
+        prefixParts.Add(parts[arrayIdx][..^2]); // drop "[]"
+        var arrayPathArrow = string.Join("->", prefixParts.Select(p => $"'{p}'"));
+        var arrayExpr = $"payload::jsonb->{arrayPathArrow}";
+
+        var remaining = parts.Skip(arrayIdx + 1).ToArray();
+        bool hasSubPath = remaining.Length > 0;
+
+        // Per-element expressions for inside the EXISTS subquery.
+        //   hasSubPath  → x->'a'->'b'->>'c'  (text)  /  x->'a'->'b'->'c' (jsonb, for typeof/float cast)
+        //   primitive   → e (alias used with jsonb_array_elements_text)
+        string elementText, elementJsonb, iterator;
+        if (hasSubPath)
+        {
+            if (remaining.Length == 1)
+            {
+                elementText = $"x->>'{remaining[0]}'";
+                elementJsonb = $"x->'{remaining[0]}'";
+            }
+            else
+            {
+                var nested = string.Join("->", remaining[..^1].Select(p => $"'{p}'"));
+                elementText = $"x->{nested}->>'{remaining[^1]}'";
+                elementJsonb = $"x->{nested}->'{remaining[^1]}'";
+            }
+            iterator = $"jsonb_array_elements({arrayExpr}) AS x";
+        }
+        else
+        {
+            // Primitive-array path: compare scalar elements directly.
+            elementText = "e";
+            elementJsonb = "e::jsonb";
+            iterator = $"jsonb_array_elements_text({arrayExpr}) AS e";
+        }
+
+        var typeofGuard = $"jsonb_typeof({arrayExpr}) = 'array'";
+
+        // Range: emit EXISTS (... BETWEEN ...)
+        if (data.IsRange && data.Values.Count == 2)
+        {
+            var v1 = data.Values[0];
+            var v2 = data.Values[1];
+            if (data.ValueType == "numeric")
+            {
+                if (double.TryParse(v1, out var d1) && double.TryParse(v2, out var d2) && d1 > d2)
+                    (v1, v2) = (v2, v1);
+                args.Add(new() { Value = v1 });
+                var p1 = args.Count;
+                args.Add(new() { Value = v2 });
+                var p2 = args.Count;
+                var castCol = hasSubPath ? $"({elementJsonb})::float" : "e::float";
+                var between = $"{castCol} BETWEEN CAST(${p1} AS float) AND CAST(${p2} AS float)";
+                var exists = $"EXISTS (SELECT 1 FROM {iterator} WHERE {between})";
+                return data.Negative
+                    ? $"({typeofGuard} AND NOT {exists})"
+                    : $"({typeofGuard} AND {exists})";
+            }
+            // Lexicographic range for string/date.
+            if (string.Compare(v1, v2, StringComparison.Ordinal) > 0) (v1, v2) = (v2, v1);
+            args.Add(new() { Value = v1 });
+            var sp1 = args.Count;
+            args.Add(new() { Value = v2 });
+            var sp2 = args.Count;
+            var between2 = $"{elementText} BETWEEN ${sp1} AND ${sp2}";
+            var exists2 = $"EXISTS (SELECT 1 FROM {iterator} WHERE {between2})";
+            return data.Negative
+                ? $"({typeofGuard} AND NOT {exists2})"
+                : $"({typeofGuard} AND {exists2})";
+        }
+
+        var compOp = data.ComparisonOperator;
+        var conditions = new List<string>();
+        foreach (var value in data.Values)
+        {
+            bool isNum = NumericRegex.IsMatch(value);
+            string predicate;
+
+            if (isNum && compOp is not null)
+            {
+                var sqlOp = compOp switch { "!" => "!=", ">" => ">", ">=" => ">=", "<" => "<", "<=" => "<=", _ => "=" };
+                args.Add(new() { Value = double.Parse(value) });
+                var pNum = args.Count;
+                var castCol = hasSubPath ? $"({elementJsonb})::float" : "e::float";
+                predicate = $"{castCol} {sqlOp} CAST(${pNum} AS float)";
+            }
+            else if (data.Negative || compOp == "!")
+            {
+                args.Add(new() { Value = value });
+                predicate = $"{elementText} != ${args.Count}";
+            }
+            else if (isNum)
+            {
+                args.Add(new() { Value = double.Parse(value) });
+                var pNum = args.Count;
+                var castCol = hasSubPath ? $"({elementJsonb})::float" : "e::float";
+                predicate = $"{castCol} = CAST(${pNum} AS float)";
+            }
+            else
+            {
+                args.Add(new() { Value = value });
+                predicate = $"{elementText} = ${args.Count}";
+            }
+
+            var exists = $"EXISTS (SELECT 1 FROM {iterator} WHERE {predicate})";
+            conditions.Add(data.Negative
+                ? $"({typeofGuard} AND NOT {exists})"
+                : $"({typeofGuard} AND {exists})");
+        }
+        return JoinConditions(conditions, data.Operation, data.Negative);
     }
 
     private static string? BuildPayloadValueSql(
