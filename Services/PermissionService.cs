@@ -90,9 +90,10 @@ public sealed class PermissionService(UserRepository users, AccessRepository acc
 
         var user = await users.GetByShortnameAsync(actorShortname, ct);
         var isAnonymous = actorShortname == AnonymousUser;
-        // For a missing/inactive named user we still short-circuit. For the
-        // anonymous bucket we continue so the "world" permission still applies
-        // even without an "anonymous" user row in the DB.
+        // For a missing/inactive named user we short-circuit. For the anonymous
+        // bucket we continue even when no "anonymous" row exists so the cache
+        // entry records "no permissions" — avoids re-querying the users table
+        // on every unauthenticated request.
         if (!isAnonymous && (user is null || !user.IsActive))
             return (user, new());
 
@@ -108,13 +109,17 @@ public sealed class PermissionService(UserRepository users, AccessRepository acc
         var permNames = roles.SelectMany(r => r.Permissions).Distinct().ToList();
         var perms = permNames.Count == 0 ? new() : await access.GetPermissionsAsync(permNames, ct);
 
-        if (isAnonymous)
+        // Python parity: `generate_user_permissions` appends the "world" record
+        // INSIDE the role-iteration loop (adapter.py:3283-3290), so an anonymous
+        // caller with zero roles resolves to zero permissions — world is never
+        // consulted. To match, we require roles.Count > 0. Admins must create
+        // an "anonymous" user row with at least one role for world to apply.
+        // Don't re-filter by world.IsActive here — the permission walk already
+        // skips inactive permissions.
+        if (isAnonymous && roles.Count > 0)
         {
-            // Python: always try the special "world" permission for anonymous —
-            // it grants what a deployment wants every unauthenticated caller to
-            // see. No-op if not defined.
             var world = await access.GetPermissionAsync(WorldPermission, ct);
-            if (world is not null && world.IsActive && !perms.Any(p => p.Shortname == WorldPermission))
+            if (world is not null && !perms.Any(p => p.Shortname == WorldPermission))
                 perms.Add(world);
         }
 
@@ -171,6 +176,8 @@ public sealed class PermissionService(UserRepository users, AccessRepository acc
             if (resource.IsActive) achieved.Add("is_active");
             if (!string.IsNullOrEmpty(resource.OwnerShortname) && resource.OwnerShortname == actorShortname)
                 achieved.Add("own");
+            // user is only null in the anonymous-with-no-db-row path; group
+            // ownership can't apply there (no Groups to consult).
             else if (!string.IsNullOrEmpty(resource.OwnerGroupShortname) && user is not null &&
                      user.Groups.Contains(resource.OwnerGroupShortname))
                 achieved.Add("own");

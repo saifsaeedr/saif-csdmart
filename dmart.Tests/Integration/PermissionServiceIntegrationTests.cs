@@ -379,16 +379,124 @@ public class PermissionServiceIntegrationTests : IClassFixture<DmartFactory>
         }
     }
 
+    // Python-parity anonymous access: for any grant to take effect,
+    // `adapter.generate_user_permissions` requires (a) an "anonymous" user row,
+    // (b) at least one role on that user, and (c) a "world" permission (or the
+    // role's own permissions covering the target). No shortcut grants anonymous
+    // any implicit access — a bare null actor resolves to zero permissions.
     [Fact]
-    public async Task Anonymous_Can_View_But_Cannot_Write()
+    public async Task Anonymous_With_World_Permission_Can_View_But_Cannot_Write()
     {
         if (!DmartFactory.HasPg) return;
-        var (perms, _, _) = Resolve();
-        var l = new Locator(ResourceType.Content, "any", "/", "x");
-        (await perms.CanReadAsync(null, l)).ShouldBeTrue("anonymous read is allowed");
-        (await perms.CanCreateAsync(null, l)).ShouldBeFalse("anonymous create is denied");
-        (await perms.CanUpdateAsync(null, l)).ShouldBeFalse("anonymous update is denied");
-        (await perms.CanDeleteAsync(null, l)).ShouldBeFalse("anonymous delete is denied");
+        var (perms, users, access) = Resolve();
+
+        var anonRole = $"itest_anon_role_{Guid.NewGuid():N}".Substring(0, 24);
+        const string worldPerm = "world";      // Python-reserved shortname
+        const string anonUser = "anonymous";   // Python-reserved shortname
+
+        // Preserve any pre-existing anonymous user/world permission so we
+        // restore them on teardown — otherwise a shared DB loses them.
+        var priorAnon = await users.GetByShortnameAsync(anonUser);
+        var priorWorld = await access.GetPermissionAsync(worldPerm);
+
+        try
+        {
+            await access.UpsertPermissionAsync(BuildPerm(
+                worldPerm,
+                "management",
+                new() { [PermissionService.AllSpacesMw] = new() { PermissionService.AllSubpathsMw } },
+                actions: new() { "view", "query" },
+                resourceTypes: new() { "content" }));
+
+            await access.UpsertRoleAsync(BuildRole(anonRole, worldPerm));
+            await users.UpsertAsync(BuildUser(anonUser, anonRole));
+            await access.InvalidateAllCachesAsync();
+
+            var l = new Locator(ResourceType.Content, "any", "/", "x");
+            (await perms.CanReadAsync(null, l)).ShouldBeTrue("anonymous read via world");
+            (await perms.CanCreateAsync(null, l)).ShouldBeFalse("anonymous create denied (no 'create' action)");
+            (await perms.CanUpdateAsync(null, l)).ShouldBeFalse("anonymous update denied");
+            (await perms.CanDeleteAsync(null, l)).ShouldBeFalse("anonymous delete denied");
+        }
+        finally
+        {
+            try { await users.DeleteAsync(anonUser); } catch { }
+            try { await access.DeleteRoleAsync(anonRole); } catch { }
+            try { await access.DeletePermissionAsync(worldPerm); } catch { }
+            // Restore any prior state we displaced.
+            if (priorAnon is not null)  await users.UpsertAsync(priorAnon);
+            if (priorWorld is not null) await access.UpsertPermissionAsync(priorWorld);
+            await access.InvalidateAllCachesAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Anonymous_Without_Roles_Has_No_Access_Even_If_World_Exists()
+    {
+        // Python parity: world is only consulted INSIDE the role loop. An
+        // anonymous user with zero roles never hits world, so a world-granting
+        // deployment that forgets to link a role to anonymous grants nothing.
+        if (!DmartFactory.HasPg) return;
+        var (perms, users, access) = Resolve();
+        const string worldPerm = "world";
+        const string anonUser = "anonymous";
+        var priorAnon = await users.GetByShortnameAsync(anonUser);
+        var priorWorld = await access.GetPermissionAsync(worldPerm);
+        try
+        {
+            await access.UpsertPermissionAsync(BuildPerm(
+                worldPerm,
+                "management",
+                new() { [PermissionService.AllSpacesMw] = new() { PermissionService.AllSubpathsMw } },
+                actions: new() { "view" },
+                resourceTypes: new() { "content" }));
+            // Anonymous user with NO roles — mirrors "forgot to link" deployments.
+            await users.UpsertAsync(BuildUser(anonUser /* no roles */));
+            await access.InvalidateAllCachesAsync();
+
+            var l = new Locator(ResourceType.Content, "any", "/", "x");
+            (await perms.CanReadAsync(null, l)).ShouldBeFalse(
+                "anonymous with zero roles must NOT see world grants — Python parity");
+        }
+        finally
+        {
+            try { await users.DeleteAsync(anonUser); } catch { }
+            try { await access.DeletePermissionAsync(worldPerm); } catch { }
+            if (priorAnon is not null)  await users.UpsertAsync(priorAnon);
+            if (priorWorld is not null) await access.UpsertPermissionAsync(priorWorld);
+            await access.InvalidateAllCachesAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Anonymous_Without_World_Or_Anonymous_User_Has_No_Access()
+    {
+        // Vanilla deployment with no anonymous-user row AND no world permission:
+        // bare null actor resolves to zero permissions. No read, no write.
+        if (!DmartFactory.HasPg) return;
+        var (perms, users, access) = Resolve();
+
+        // Guarantee a clean slate — remove any stray anonymous/world rows.
+        var priorAnon = await users.GetByShortnameAsync("anonymous");
+        var priorWorld = await access.GetPermissionAsync("world");
+        if (priorAnon is not null) await users.DeleteAsync("anonymous");
+        if (priorWorld is not null) await access.DeletePermissionAsync("world");
+        await access.InvalidateAllCachesAsync();
+
+        try
+        {
+            var l = new Locator(ResourceType.Content, "any", "/", "x");
+            (await perms.CanReadAsync(null, l)).ShouldBeFalse("no anon/world → no access");
+            (await perms.CanCreateAsync(null, l)).ShouldBeFalse();
+            (await perms.CanUpdateAsync(null, l)).ShouldBeFalse();
+            (await perms.CanDeleteAsync(null, l)).ShouldBeFalse();
+        }
+        finally
+        {
+            if (priorAnon is not null)  await users.UpsertAsync(priorAnon);
+            if (priorWorld is not null) await access.UpsertPermissionAsync(priorWorld);
+            await access.InvalidateAllCachesAsync();
+        }
     }
 
     // ==================== folder walk: shortname appended to subpath ====================
