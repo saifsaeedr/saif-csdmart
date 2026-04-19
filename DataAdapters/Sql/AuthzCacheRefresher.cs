@@ -30,7 +30,7 @@ public sealed class AuthzCacheRefresher(Db db, ILogger<AuthzCacheRefresher> log)
     // The resolved access bundle for one user. Holds the User row (so callers can
     // check IsActive, Groups, etc.) plus the flattened list of Permission rows
     // reachable via user.Roles → role.Permissions → permission rows.
-    public sealed record CachedUserAccess(User User, List<Permission> Permissions);
+    public sealed record CachedUserAccess(User? User, List<Permission> Permissions);
 
     // Process-local cache. Singleton lifetime ensures every request sees the same
     // dictionary. ConcurrentDictionary is lock-free for reads on the hot path.

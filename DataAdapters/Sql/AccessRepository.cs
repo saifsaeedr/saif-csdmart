@@ -196,6 +196,33 @@ public sealed class AccessRepository(Db db, AuthzCacheRefresher refresher)
         await InvalidateAllCachesAsync(ct);
     }
 
+    // Returns true when a row was deleted, false when no matching role existed.
+    // Invalidates the MV + in-memory permission caches on success so permission
+    // decisions don't keep hitting stale mv_role_permissions/mv_user_roles rows.
+    public async Task<bool> DeleteRoleAsync(string shortname, CancellationToken ct = default)
+    {
+        await using var conn = await db.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand("DELETE FROM roles WHERE shortname = $1", conn);
+        cmd.Parameters.Add(new() { Value = shortname });
+        var rows = await cmd.ExecuteNonQueryAsync(ct);
+        if (rows == 0) return false;
+        await refresher.RefreshAsync(ct);
+        await InvalidateAllCachesAsync(ct);
+        return true;
+    }
+
+    public async Task<bool> DeletePermissionAsync(string shortname, CancellationToken ct = default)
+    {
+        await using var conn = await db.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand("DELETE FROM permissions WHERE shortname = $1", conn);
+        cmd.Parameters.Add(new() { Value = shortname });
+        var rows = await cmd.ExecuteNonQueryAsync(ct);
+        if (rows == 0) return false;
+        await refresher.RefreshAsync(ct);
+        await InvalidateAllCachesAsync(ct);
+        return true;
+    }
+
     // ----- query support (used by QueryService for management/roles and management/permissions) -----
 
     public Task<List<Role>> QueryRolesAsync(Models.Api.Query q, CancellationToken ct = default)

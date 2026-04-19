@@ -33,6 +33,12 @@ public static class RequestHandler
             {
                 var actor = http.User.Identity?.Name ?? "anonymous";
                 var responses = new List<Record>();
+                // Python parity: don't bail on the first failure — try every
+                // record and aggregate failures. Python's shape (utils.py:serve_request_delete):
+                //   failed_records.append({"record": shortname, "error": msg, "error_code": code})
+                // On any failure, router.py emits 400 with code=SOMETHING_WRONG
+                // and info=[{successfull: [...], failed: [...]}] (typo preserved).
+                var failedRecords = new List<Dictionary<string, object>>();
 
                 foreach (var rec in req.Records)
                 {
@@ -61,7 +67,16 @@ public static class RequestHandler
                              rec),
                     };
 
-                    if (result.Response.Status != Status.Success) return result.Response;
+                    if (result.Response.Status != Status.Success)
+                    {
+                        failedRecords.Add(new Dictionary<string, object>
+                        {
+                            ["record"] = rec.Shortname,
+                            ["error"] = result.Response.Error?.Message ?? "unknown error",
+                            ["error_code"] = result.Response.Error?.Code ?? InternalErrorCode.SOMETHING_WRONG,
+                        });
+                        continue;
+                    }
                     responses.Add(result.UpdatedRecord);
 
                     // Fire after-action plugin hooks for non-entry CRUD types.
@@ -105,7 +120,21 @@ public static class RequestHandler
                         }
                     }
                 }
-                return Response.Ok(responses);
+
+                if (failedRecords.Count == 0) return Response.Ok(responses);
+
+                // Python aggregate failure: HTTP 400 with info=[{successfull, failed}].
+                // The "successfull" typo is preserved — clients branch on that key.
+                var info = new List<Dictionary<string, object>>
+                {
+                    new()
+                    {
+                        ["successfull"] = responses,
+                        ["failed"] = failedRecords,
+                    },
+                };
+                return Response.Fail(InternalErrorCode.SOMETHING_WRONG,
+                    "Something went wrong", "request", info);
             });
 
     // ============================================================================
@@ -367,6 +396,55 @@ public static class RequestHandler
                 await spaces.UpsertAsync(updated, ct);
                 return (Response.Ok(), rec with { Uuid = updated.Uuid });
             }
+            // Role/Permission live in their own tables, not `entries` — falling
+            // through to EntryService.UpdateAsync would silently no-op.
+            case ResourceType.Role:
+            {
+                var existing = await access.GetRoleAsync(rec.Shortname, ct);
+                if (existing is null)
+                    return (Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "role not found", "request"), rec);
+                var attrs = rec.Attributes ?? new();
+                var updated = existing with
+                {
+                    Permissions = ExtractStringList(attrs, "permissions") ?? existing.Permissions,
+                    Tags = ExtractStringList(attrs, "tags") ?? existing.Tags,
+                    Slug = attrs.TryGetValue("slug", out var sl) ? ConvertToString(sl) : existing.Slug,
+                    Displayname = attrs.TryGetValue("displayname", out var dn) ? ParseTranslation(dn) : existing.Displayname,
+                    Description = attrs.TryGetValue("description", out var desc) ? ParseTranslation(desc) : existing.Description,
+                    IsActive = attrs.TryGetValue("is_active", out var ia) ? !IsExplicitlyFalse(ia) : existing.IsActive,
+                    UpdatedAt = DateTime.UtcNow,
+                };
+                await access.UpsertRoleAsync(updated, ct);
+                return (Response.Ok(), rec with { Uuid = updated.Uuid });
+            }
+            case ResourceType.Permission:
+            {
+                var existing = await access.GetPermissionAsync(rec.Shortname, ct);
+                if (existing is null)
+                    return (Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "permission not found", "request"), rec);
+                var attrs = rec.Attributes ?? new();
+                var updated = existing with
+                {
+                    // Subpaths has no "missing" form: ExtractSubpathsDict returns
+                    // empty when absent, which would clobber. Only replace when
+                    // `subpaths` is explicitly present on the wire.
+                    Subpaths = attrs.ContainsKey("subpaths") ? ExtractSubpathsDict(attrs) : existing.Subpaths,
+                    ResourceTypes = ExtractStringList(attrs, "resource_types") ?? existing.ResourceTypes,
+                    Actions = ExtractStringList(attrs, "actions") ?? existing.Actions,
+                    Conditions = ExtractStringList(attrs, "conditions") ?? existing.Conditions,
+                    RestrictedFields = attrs.ContainsKey("restricted_fields")
+                        ? ExtractStringList(attrs, "restricted_fields")
+                        : existing.RestrictedFields,
+                    Tags = ExtractStringList(attrs, "tags") ?? existing.Tags,
+                    Slug = attrs.TryGetValue("slug", out var sl) ? ConvertToString(sl) : existing.Slug,
+                    Displayname = attrs.TryGetValue("displayname", out var dn) ? ParseTranslation(dn) : existing.Displayname,
+                    Description = attrs.TryGetValue("description", out var desc) ? ParseTranslation(desc) : existing.Description,
+                    IsActive = attrs.TryGetValue("is_active", out var ia) ? !IsExplicitlyFalse(ia) : existing.IsActive,
+                    UpdatedAt = DateTime.UtcNow,
+                };
+                await access.UpsertPermissionAsync(updated, ct);
+                return (Response.Ok(), rec with { Uuid = updated.Uuid });
+            }
             default:
             {
                 var result = await entries.UpdateAsync(locator, rec.Attributes ?? new(), actor, ct);
@@ -396,6 +474,24 @@ public static class RequestHandler
             case ResourceType.Space:
                 await spaces.DeleteAsync(rec.Shortname, ct);
                 return (Response.Ok(), rec);
+            // Role/Permission live in their own tables, not `entries` — falling
+            // through to EntryService.DeleteAsync would silently no-op.
+            case ResourceType.Role:
+            {
+                var deleted = await access.DeleteRoleAsync(rec.Shortname, ct);
+                return deleted
+                    ? (Response.Ok(), rec)
+                    : (Response.Fail(InternalErrorCode.OBJECT_NOT_FOUND,
+                        $"role '{rec.Shortname}' not found", "request"), rec);
+            }
+            case ResourceType.Permission:
+            {
+                var deleted = await access.DeletePermissionAsync(rec.Shortname, ct);
+                return deleted
+                    ? (Response.Ok(), rec)
+                    : (Response.Fail(InternalErrorCode.OBJECT_NOT_FOUND,
+                        $"permission '{rec.Shortname}' not found", "request"), rec);
+            }
             case ResourceType.Comment:
             case ResourceType.Reply:
             case ResourceType.Reaction:
