@@ -714,4 +714,105 @@ public class QueryHelperTests
         order.ShouldContain("ORDER BY RANDOM()");
         order.ShouldNotContain("shortname");
     }
+
+    // ---- JSON-path sort (Python-parity transform_keys_to_sql) ----
+
+    [Fact]
+    public void SortBy_JsonPath_TwoLevel_EmitsArrowArrowGtGt()
+    {
+        var q = new Query { Type = QueryType.Search, SpaceName = "t", Subpath = "/",
+            SortBy = "payload.body.rank", SortType = SortType.Ascending };
+        var order = BuildOrder(q, "entries");
+        order.ShouldContain("payload::jsonb -> 'body' ->> 'rank'");
+        // Numeric-aware CASE wrap
+        order.ShouldContain("CASE WHEN");
+        order.ShouldContain("::float");
+        // Direction applied to both CASE and fallback text sort
+        order.ShouldNotContain(" DESC");
+    }
+
+    [Fact]
+    public void SortBy_JsonPath_SingleLevel_UsesArrowGtGt()
+    {
+        // payload.rank → payload::jsonb ->> 'rank' (no middle -> hops)
+        var q = new Query { Type = QueryType.Search, SpaceName = "t", Subpath = "/",
+            SortBy = "payload.rank", SortType = SortType.Descending };
+        var order = BuildOrder(q, "entries");
+        order.ShouldContain("payload::jsonb ->> 'rank'");
+        order.ShouldContain(" DESC");
+    }
+
+    [Fact]
+    public void SortBy_BodyShortcut_PrefixesWithPayload()
+    {
+        // Python shortcut: sort_by="body.rank" → payload.body.rank
+        var q = new Query { Type = QueryType.Search, SpaceName = "t", Subpath = "/",
+            SortBy = "body.rank" };
+        var order = BuildOrder(q, "entries");
+        order.ShouldContain("payload::jsonb -> 'body' ->> 'rank'");
+    }
+
+    [Fact]
+    public void SortBy_AtPrefix_StrippedOnJsonPath()
+    {
+        var q = new Query { Type = QueryType.Search, SpaceName = "t", Subpath = "/",
+            SortBy = "@payload.body.rank" };
+        var order = BuildOrder(q, "entries");
+        order.ShouldContain("payload::jsonb -> 'body' ->> 'rank'");
+        order.ShouldNotContain("@payload");
+    }
+
+    [Fact]
+    public void SortBy_JsonPath_UnsafeSegment_Skipped()
+    {
+        // Segments must be alphanumeric/underscore. "rank; DROP TABLE" is not.
+        var q = new Query { Type = QueryType.Search, SpaceName = "t", Subpath = "/",
+            SortBy = "payload.body.rank; DROP TABLE entries" };
+        var order = BuildOrder(q, "entries");
+        // Nothing resolves → fallback
+        order.ShouldContain("ORDER BY updated_at");
+        order.ShouldNotContain("DROP");
+    }
+
+    // ---- Comma-separated multi-sort ----
+
+    [Fact]
+    public void SortBy_CommaList_BothPathAndColumn_EmitsBoth()
+    {
+        // The user's actual failing case: "payload.body.rank, shortname"
+        var q = new Query { Type = QueryType.Search, SpaceName = "t", Subpath = "/",
+            SortBy = "payload.body.rank, shortname", SortType = SortType.Ascending };
+        var order = BuildOrder(q, "entries");
+        order.ShouldContain("payload::jsonb -> 'body' ->> 'rank'");
+        order.ShouldContain("shortname ASC");
+        // A comma separates the two clauses.
+        order.ShouldContain(", shortname ASC");
+    }
+
+    [Fact]
+    public void SortBy_CommaList_AllColumnsWhitelisted()
+    {
+        var q = new Query { Type = QueryType.Search, SpaceName = "t", Subpath = "/",
+            SortBy = "created_at,shortname", SortType = SortType.Descending };
+        var order = BuildOrder(q, "entries");
+        order.ShouldContain("ORDER BY created_at DESC, shortname DESC");
+    }
+
+    [Fact]
+    public void SortBy_CommaList_DropsUnknownColumnsKeepsResolvable()
+    {
+        var q = new Query { Type = QueryType.Search, SpaceName = "t", Subpath = "/",
+            SortBy = "not_a_column, shortname" };
+        var order = BuildOrder(q, "entries");
+        order.ShouldContain("ORDER BY shortname");
+        order.ShouldNotContain("not_a_column");
+    }
+
+    [Fact]
+    public void SortBy_CommaList_AllUnknown_FallsBackToUpdatedAt()
+    {
+        var q = new Query { Type = QueryType.Search, SpaceName = "t", Subpath = "/",
+            SortBy = "bogus1, bogus2" };
+        BuildOrder(q, "entries").ShouldContain("ORDER BY updated_at");
+    }
 }

@@ -889,13 +889,12 @@ public static class QueryHelper
     // ORDER + PAGING
     // ====================================================================
 
-    // Per-table column whitelists for the Query.sort_by clause. Python's adapter
-    // accepts any attribute/JSON path, but we emit raw SQL, so an open mapping
-    // would let a hostile wire value smuggle arbitrary SQL. Whitelist is safer
-    // and still covers every column end-users actually sort by. If sort_by is
-    // null or not in the whitelist we fall back to updated_at (preserves
-    // previous default behaviour). JSON-path sort (sort_by=payload.body.x) is
-    // deferred — Python implements it via transform_keys_to_sql.
+    // Per-table whitelists of column names accepted for bare-column sort_by.
+    // JSON-path tokens (anything containing a dot) are NOT gated by this list —
+    // they're handled by BuildJsonPathSortExpression, which sanitizes each path
+    // segment via SafeSortSegmentRegex so a hostile wire value can't smuggle
+    // arbitrary SQL. When a comma-separated sort_by lists an unknown bare
+    // column AND no JSON-path token resolves, we fall back to `updated_at`.
     private static readonly HashSet<string> SharedSortColumns = new(StringComparer.Ordinal)
     {
         "shortname", "created_at", "updated_at", "displayname", "description",
@@ -904,27 +903,88 @@ public static class QueryHelper
     };
     private static readonly Dictionary<string, HashSet<string>> TableSortColumns = new(StringComparer.Ordinal)
     {
-        ["entries"] = new(SharedSortColumns, StringComparer.Ordinal) { "schema_shortname", "state" },
-        ["attachments"] = new(SharedSortColumns, StringComparer.Ordinal) { "schema_shortname" },
-        ["users"] = new(SharedSortColumns, StringComparer.Ordinal) { "email", "msisdn", "type", "language" },
-        ["spaces"] = new(SharedSortColumns, StringComparer.Ordinal) { "space_name", "subpath" },
+        ["entries"] = new(SharedSortColumns, StringComparer.Ordinal) { "schema_shortname", "state", "payload" },
+        ["attachments"] = new(SharedSortColumns, StringComparer.Ordinal) { "schema_shortname", "payload" },
+        ["users"] = new(SharedSortColumns, StringComparer.Ordinal) { "email", "msisdn", "type", "language", "payload" },
+        ["spaces"] = new(SharedSortColumns, StringComparer.Ordinal) { "space_name", "subpath", "payload" },
         ["roles"] = new(SharedSortColumns, StringComparer.Ordinal),
         ["permissions"] = new(SharedSortColumns, StringComparer.Ordinal),
         ["histories"] = new(SharedSortColumns, StringComparer.Ordinal),
     };
 
-    // Resolve the effective sort column for the given table, honoring Python's
-    // "strip attributes. prefix" convention. Returns null if the caller-supplied
-    // value is absent or not in the whitelist — caller falls back to updated_at.
-    private static string? ResolveSortColumn(string? sortBy, string? tableName)
+    // Only alphanumerics and underscore allowed per path segment — matches
+    // Python's adapter_helpers._sanitize_sql_part. Keeps the segment safe for
+    // inlining as a JSONB key literal inside the emitted SQL.
+    private static readonly Regex SafeSortSegmentRegex = new(@"^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.Compiled);
+
+    // Build the SQL expression for a JSON-path sort token like "payload.body.rank".
+    // Mirrors Python's transform_keys_to_sql + sort CASE wrap:
+    //   payload -> 'body' ->> 'rank'
+    //   CASE WHEN (<expr>) ~ '^-?[0-9]+(\.[0-9]+)?$' THEN (<expr>)::float END <dir>, (<expr>) <dir>
+    // The CASE makes numeric values sort numerically (1,2,10) while non-numeric
+    // values still sort lexically as a tiebreaker. Returns null when any segment
+    // fails validation (sanitizer rejects the whole token, we keep other tokens).
+    private static string? BuildJsonPathSortExpression(string token, string direction)
     {
-        if (string.IsNullOrWhiteSpace(sortBy)) return null;
-        var col = sortBy.StartsWith("attributes.", StringComparison.Ordinal) ? sortBy[11..] : sortBy;
-        if (col.Length == 0) return null;
+        var parts = token.Split('.');
+        foreach (var p in parts)
+            if (!SafeSortSegmentRegex.IsMatch(p)) return null;
+
+        var root = parts[0];
+        string expr;
+        if (parts.Length == 1)
+        {
+            expr = root;
+        }
+        else
+        {
+            var middle = parts.Length > 2 ? " -> " + string.Join(" -> ", parts[1..^1].Select(p => $"'{p}'")) : "";
+            expr = $"{root}::jsonb{middle} ->> '{parts[^1]}'";
+        }
+        return $"CASE WHEN ({expr}) ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN ({expr})::float END {direction}, ({expr}) {direction}";
+    }
+
+    // Resolve a single sort token into either a bare whitelisted column or a
+    // JSON-path expression. Returns null to mean "skip this token".
+    private static string? ResolveSortToken(string rawToken, string direction, string? tableName)
+    {
+        var token = rawToken.Trim();
+        if (token.Length == 0) return null;
+
+        // Python: sort_by.replace("attributes.", "") — strip anywhere (the dmart
+        // convention is to mirror the wire envelope's attributes.* into the
+        // storage columns/payload), then drop a leading '@' for consistency
+        // with the search-token syntax.
+        token = token.Replace("attributes.", "");
+        if (token.StartsWith('@')) token = token[1..];
+
+        // Python shortcut: "body.xxx" is sugar for "payload.body.xxx".
+        if (token.StartsWith("body.", StringComparison.Ordinal)) token = "payload." + token;
+
+        if (token.Contains('.'))
+            return BuildJsonPathSortExpression(token, direction);
+
         var allowed = tableName is not null && TableSortColumns.TryGetValue(tableName, out var set)
             ? set
             : SharedSortColumns;
-        return allowed.Contains(col) ? col : null;
+        return allowed.Contains(token) ? $"{token} {direction}" : null;
+    }
+
+    // Parse comma-separated sort_by into one ORDER BY clause body (without the
+    // leading "ORDER BY "). Returns null when nothing resolves → caller falls
+    // back to `updated_at DESC`.
+    private static string? BuildOrderClauseBody(string? sortBy, SortType? sortType, string? tableName)
+    {
+        if (string.IsNullOrWhiteSpace(sortBy)) return null;
+
+        var direction = sortType == SortType.Ascending ? "ASC" : "DESC";
+        var pieces = new List<string>();
+        foreach (var raw in sortBy.Split(','))
+        {
+            var expr = ResolveSortToken(raw, direction, tableName);
+            if (expr is not null) pieces.Add(expr);
+        }
+        return pieces.Count == 0 ? null : string.Join(", ", pieces);
     }
 
     public static void AppendOrderAndPaging(System.Text.StringBuilder sql, Query q, List<NpgsqlParameter> args, string? tableName = null)
@@ -933,9 +993,16 @@ public static class QueryHelper
             sql.Append("ORDER BY RANDOM() ");
         else
         {
-            var column = ResolveSortColumn(q.SortBy, tableName) ?? "updated_at";
-            sql.Append($"ORDER BY {column} ");
-            sql.Append(q.SortType == SortType.Ascending ? "ASC " : "DESC ");
+            var clause = BuildOrderClauseBody(q.SortBy, q.SortType, tableName);
+            if (clause is not null)
+            {
+                sql.Append($"ORDER BY {clause} ");
+            }
+            else
+            {
+                sql.Append("ORDER BY updated_at ");
+                sql.Append(q.SortType == SortType.Ascending ? "ASC " : "DESC ");
+            }
         }
 
         args.Add(new() { Value = Math.Max(1, q.Limit) });
