@@ -1084,6 +1084,19 @@ else
     ok "(sample_hook not deployed)"
 fi
 
+# Shell helper: true when $1 is a "route not found" response — either HTTP 404
+# or Python-parity HTTP 422 with INVALID_ROUTE (code 230). Used by the plugin
+# tests below to skip gracefully when the plugin isn't deployed (e.g. CI
+# runners that don't include the optional sample_api .so).
+_route_absent() {
+    local url=$1
+    local status
+    status=$(curl -s -o /tmp/.route_probe -w '%{http_code}' -H "$AUTH_HEADER" "$url" 2>/dev/null)
+    if [[ "$status" == "404" ]]; then return 0; fi
+    if [[ "$status" == "422" ]] && jq -e '.error.code == 230' < /tmp/.route_probe > /dev/null 2>&1; then return 0; fi
+    return 1
+}
+
 # ============================================================================
 # 63. Native API plugin endpoint responds
 # ============================================================================
@@ -1091,7 +1104,7 @@ printf '%-45s' "Native API plugin responds:" >&2
 API_PLUGIN_RESP=$(curl -s -H "$AUTH_HEADER" "$API_URL/sample_api/" 2>/dev/null)
 if echo "$API_PLUGIN_RESP" | jq -e '.status == "success" and .attributes.plugin == "sample_api"' > /dev/null 2>&1; then
     ok
-elif [[ "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH_HEADER" "$API_URL/sample_api/" 2>/dev/null)" == "404" ]]; then
+elif _route_absent "$API_URL/sample_api/"; then
     ok "(sample_api not deployed)"
 else
     nope "$API_PLUGIN_RESP"
@@ -1104,7 +1117,7 @@ printf '%-45s' "Native API plugin greet:" >&2
 GREET_RESP=$(curl -s -H "$AUTH_HEADER" "$API_URL/sample_api/greet/TestUser" 2>/dev/null)
 if echo "$GREET_RESP" | jq -e '.attributes.greeting | contains("TestUser")' > /dev/null 2>&1; then
     ok
-elif [[ "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH_HEADER" "$API_URL/sample_api/greet/TestUser" 2>/dev/null)" == "404" ]]; then
+elif _route_absent "$API_URL/sample_api/greet/TestUser"; then
     ok "(sample_api not deployed)"
 else
     nope "$GREET_RESP"
