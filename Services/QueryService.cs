@@ -34,14 +34,20 @@ public sealed class QueryService(
     IOptions<DmartSettings> settings)
 {
     // Permission gate for query methods. Tries "view" first (works for anonymous +
-    // authenticated), then "query" (some permissions only list "query" not "view").
-    // For root queries where the user's permissions are keyed to specific subpaths
-    // (not "/"), falls back to HasAnyAccessToSpaceAsync.
+    // authenticated), then "query" — Python exempts the "query" action from
+    // condition checks (access_control.py:218), so a permission with
+    // `conditions:["is_active"]` still grants listing rights even when no
+    // specific resource has been loaded yet (the SQL adapter applies the
+    // is_active filter separately via query_policies). The anonymous caller
+    // is specifically the common case that hits this path — a public
+    // `world` permission typically carries is_active as a condition.
+    // For root queries where the user's permissions are keyed to specific
+    // subpaths (not "/"), falls back to HasAnyAccessToSpaceAsync.
     private async Task<bool> CanQueryAsync(string? actor, ResourceType rt, string spaceName, string subpath, CancellationToken ct)
     {
         var probe = new Locator(rt, spaceName, subpath, "*");
         if (await perms.CanAsync(actor, "view", probe, ct: ct)) return true;
-        if (actor is not null && await perms.CanAsync(actor, "query", probe, ct: ct)) return true;
+        if (await perms.CanAsync(actor, "query", probe, ct: ct)) return true;
         return subpath == "/" && await perms.HasAnyAccessToSpaceAsync(actor, spaceName, ct);
     }
 

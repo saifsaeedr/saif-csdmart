@@ -363,11 +363,17 @@ public sealed class PermissionService(UserRepository users, AccessRepository acc
     //   - __current_user__ is replaced with the caller's shortname before comparison,
     //     so permissions like "people/__current_user__/protected" grant the caller
     //     access to their own personal subtree.
+    // Each pattern is normalized via NormalizePermissionSubpath before equality —
+    // Python does this implicitly via data_adapters.helpers.trans_magic_words,
+    // which strips leading/trailing slashes and collapses "//" to "/". Without
+    // this, permission rows stored as "/denominations" fail to match the walk
+    // key "denominations" (which BuildSubpathWalk emits slash-free).
     internal static bool MatchesAnyPattern(List<string> patterns, string subpathKey, string? actor)
     {
-        foreach (var pattern in patterns)
+        foreach (var raw in patterns)
         {
-            if (pattern == AllSubpathsMw) return true;
+            if (raw == AllSubpathsMw) return true;
+            var pattern = NormalizePermissionSubpath(raw);
             if (pattern == subpathKey) return true;
             if (actor is not null && pattern.Contains(CurrentUserMw, StringComparison.Ordinal))
             {
@@ -376,6 +382,19 @@ public sealed class PermissionService(UserRepository users, AccessRepository acc
             }
         }
         return false;
+    }
+
+    // Python-parity subpath normalization (data_adapters/helpers.py::trans_magic_words
+    // tail). Collapse "//" → "/", strip the leading "/" (unless the whole
+    // pattern is "/"), strip the trailing "/". Applied to permission subpath
+    // patterns so "/foo" and "foo" match the same walk candidate.
+    internal static string NormalizePermissionSubpath(string pattern)
+    {
+        if (string.IsNullOrEmpty(pattern)) return "/";
+        var s = pattern.Replace("//", "/");
+        if (s.Length > 1 && s[0] == '/') s = s[1..];
+        if (s.Length > 1 && s[^1] == '/') s = s[..^1];
+        return s.Length == 0 ? "/" : s;
     }
 
     // Python: check_access_conditions. Create + query actions are exempt from condition

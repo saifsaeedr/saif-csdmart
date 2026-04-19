@@ -430,6 +430,64 @@ public class PermissionServiceIntegrationTests : IClassFixture<DmartFactory>
         }
     }
 
+    // Regression guard: real-world shape. The world permission stored with
+    // `subpaths: {"evd": ["/denominations"]}` (leading slash — Python writes
+    // it that way), `conditions: ["is_active"]`, `actions: ["view", "query"]`
+    // used to zero-result on /public/query because (a) my subpath matcher
+    // didn't strip the leading slash before comparing against the walk key,
+    // and (b) CanQueryAsync gated the "query"-action fallback on `actor is
+    // not null`, so anonymous only tried "view" — which fails the condition
+    // check (no resource loaded yet → "is_active" not in achieved set).
+    [Fact]
+    public async Task Anonymous_Query_With_LeadingSlash_Subpath_And_IsActive_Condition_Succeeds()
+    {
+        if (!DmartFactory.HasPg) return;
+        var (perms, users, access) = Resolve();
+
+        const string anonUser = "anonymous";
+        const string worldPerm = "world";
+        var anonRole = $"itest_anon_role_{Guid.NewGuid():N}".Substring(0, 24);
+
+        var priorAnon = await users.GetByShortnameAsync(anonUser);
+        var priorWorld = await access.GetPermissionAsync(worldPerm);
+
+        try
+        {
+            // Exact shape from the field-reported evd deployment.
+            await access.UpsertPermissionAsync(BuildPerm(
+                worldPerm,
+                spaceName: "management",
+                subpaths: new() { ["testspace"] = new() { "/denominations" } }, // leading slash
+                actions: new() { "view", "query" },
+                resourceTypes: new() { "content" },
+                conditions: new() { "is_active" }));
+            await access.UpsertRoleAsync(BuildRole(anonRole, worldPerm));
+            await users.UpsertAsync(BuildUser(anonUser, anonRole));
+            await access.InvalidateAllCachesAsync();
+
+            // Query probe with * shortname (like QueryService.CanQueryAsync builds).
+            var probe = new Locator(ResourceType.Content, "testspace", "/denominations", "*");
+            (await perms.CanAsync(null, "query", probe)).ShouldBeTrue(
+                "query action must bypass the is_active condition for anonymous (Python parity)");
+            // view WITH a resource context that is is_active=true succeeds too
+            // — confirms subpath normalization matches "/denominations" against
+            // the walk's "denominations".
+            var activeResource = new PermissionService.ResourceContext(
+                IsActive: true, OwnerShortname: null, OwnerGroupShortname: null, Acl: null);
+            (await perms.CanAsync(null, "view", probe, resource: activeResource)).ShouldBeTrue(
+                "view with is_active=true resource must grant access against /denominations subpath");
+        }
+        finally
+        {
+            try { await users.DeleteAsync(anonUser); } catch { }
+            try { await access.DeleteRoleAsync(anonRole); } catch { }
+            try { await access.DeletePermissionAsync(worldPerm); } catch { }
+            if (priorAnon is not null)  await users.UpsertAsync(priorAnon);
+            if (priorWorld is not null) await access.UpsertPermissionAsync(priorWorld);
+            await access.InvalidateAllCachesAsync();
+        }
+    }
+
     [Fact]
     public async Task Anonymous_Without_Roles_Has_No_Access_Even_If_World_Exists()
     {

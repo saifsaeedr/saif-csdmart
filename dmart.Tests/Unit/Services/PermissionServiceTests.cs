@@ -250,6 +250,59 @@ public class PermissionServiceTests
             "anyone").ShouldBeTrue();
     }
 
+    // ==================== Slash normalization (Python trans_magic_words parity) ====================
+
+    [Fact]
+    public void Pattern_LeadingSlash_Matches_Slashless_Walk_Key()
+    {
+        // Real-world shape: `permissions.world` stored with `"/denominations"`
+        // vs the walk's `"denominations"` (slash-stripped by BuildSubpathWalk).
+        // Without the normalization these never matched → anonymous got 0 results.
+        PermissionService.MatchesAnyPattern(
+            new() { "/denominations" },
+            "denominations",
+            actor: null).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Pattern_TrailingSlash_Matches_Slashless_Walk_Key()
+    {
+        PermissionService.MatchesAnyPattern(
+            new() { "denominations/" },
+            "denominations",
+            actor: null).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Pattern_DoubleSlash_Collapses()
+    {
+        PermissionService.MatchesAnyPattern(
+            new() { "a//b" },
+            "a/b",
+            actor: null).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Pattern_RootSlash_StaysRoot()
+    {
+        PermissionService.MatchesAnyPattern(
+            new() { "/" },
+            "/",
+            actor: null).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void NormalizePermissionSubpath_Pure_Cases()
+    {
+        PermissionService.NormalizePermissionSubpath("/denominations").ShouldBe("denominations");
+        PermissionService.NormalizePermissionSubpath("denominations/").ShouldBe("denominations");
+        PermissionService.NormalizePermissionSubpath("/a/b/").ShouldBe("a/b");
+        PermissionService.NormalizePermissionSubpath("a//b").ShouldBe("a/b");
+        PermissionService.NormalizePermissionSubpath("/").ShouldBe("/");
+        PermissionService.NormalizePermissionSubpath("").ShouldBe("/");
+        PermissionService.NormalizePermissionSubpath("denominations").ShouldBe("denominations");
+    }
+
     // ==================== FlattenAttrs ====================
 
     [Fact]
