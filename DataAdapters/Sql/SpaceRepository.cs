@@ -125,30 +125,13 @@ public sealed class SpaceRepository(Db db)
     // Matches dmart Python's "delete space" semantics where the entire namespace
     // disappears with the space.
     //
-    // Retries on PostgreSQL 40P01 (deadlock detected): the
-    // resource_folders_creation plugin dispatches fire-and-forget on space
-    // create (Api/Managed/RequestHandler.cs via Task.Run) — a client that
-    // deletes its new space while that plugin is still inserting folder
-    // entries will race for the same rows and PostgreSQL resolves the cycle
-    // by aborting one transaction. Deadlocks are transient and retry-safe
-    // (the loser is fully rolled back), so we replay up to 3 times with a
-    // short linear backoff. Any non-deadlock PostgresException surfaces
-    // unchanged.
-    public async Task<bool> DeleteAsync(string shortname, CancellationToken ct = default)
-    {
-        const int maxAttempts = 3;
-        for (var attempt = 1; ; attempt++)
-        {
-            try
-            {
-                return await DeleteOnceAsync(shortname, ct);
-            }
-            catch (PostgresException ex) when (ex.SqlState == "40P01" && attempt < maxAttempts)
-            {
-                await Task.Delay(TimeSpan.FromMilliseconds(50 * attempt), ct);
-            }
-        }
-    }
+    // Wrapped in Db.ExecuteWithRetryOnDeadlockAsync to handle the race with
+    // the fire-and-forget resource_folders_creation plugin (see
+    // Api/Managed/RequestHandler.cs): a client deleting a just-created space
+    // can race the plugin's folder-insertion transaction and PostgreSQL
+    // aborts one with 40P01. Deadlocks are transient and retry-safe.
+    public Task<bool> DeleteAsync(string shortname, CancellationToken ct = default)
+        => db.ExecuteWithRetryOnDeadlockAsync(c => DeleteOnceAsync(shortname, c), ct);
 
     private async Task<bool> DeleteOnceAsync(string shortname, CancellationToken ct)
     {

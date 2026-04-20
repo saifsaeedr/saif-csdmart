@@ -32,6 +32,32 @@ public sealed class Db(IOptions<DmartSettings> settings)
         return c;
     }
 
+    // Runs a transactional operation with bounded retry on PG 40P01 (deadlock
+    // detected). Deadlocks are transient — the loser's transaction is fully
+    // rolled back, so replay from scratch is correct. Use from repositories
+    // that perform a multi-statement transaction where concurrent writers
+    // can race on row locks (e.g. SpaceRepository.DeleteAsync vs a late
+    // plugin writing into `entries`). Any PostgresException other than
+    // 40P01 bubbles up unchanged so real errors aren't masked.
+    public async Task<T> ExecuteWithRetryOnDeadlockAsync<T>(
+        Func<CancellationToken, Task<T>> operation, CancellationToken ct = default)
+    {
+        const int maxAttempts = 3;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return await operation(ct);
+            }
+            catch (PostgresException ex) when (ex.SqlState == "40P01" && attempt < maxAttempts)
+            {
+                // Linear backoff: 50ms, 100ms. Deadlocks resolve fast so
+                // exponential backoff would just add latency without benefit.
+                await Task.Delay(TimeSpan.FromMilliseconds(50 * attempt), ct);
+            }
+        }
+    }
+
     // Assemble order: explicit PostgresConnection always wins (lets ops override
     // any individual tuning knob via a raw Npgsql connection string). Otherwise
     // we build from the components. If none of the DATABASE_* fields have been
