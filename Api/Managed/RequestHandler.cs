@@ -194,7 +194,11 @@ public static class RequestHandler
         Record rec, string space, string actor, EntryService entries, CancellationToken ct)
     {
         var entry = MaterializeEntry(rec, space, actor);
-        var result = await entries.CreateAsync(entry, actor, ct);
+        // Python parity: pass record.attributes (client-supplied) to the create
+        // gate, not the synthesized Entry dict. Synthesizing is_active/tags on
+        // the gate side makes restricted_fields:["is_active"]/["tags"] deny
+        // creates the Python port allows for the same request body.
+        var result = await entries.CreateAsync(entry, actor, rec.Attributes, ct);
         return result.IsOk
             ? (Response.Ok(), rec with { Uuid = result.Value!.Uuid })
             : (Response.Fail(result.ErrorCode!, result.ErrorMessage!, "request"), rec);

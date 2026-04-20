@@ -39,12 +39,22 @@ public sealed class EntryService(
         => entries.GetBySlugAsync(slug, ct);
 
     public async Task<Result<Entry>> CreateAsync(Entry entry, string? actor, CancellationToken ct = default)
+        => await CreateAsync(entry, actor, rawAttrs: null, ct);
+
+    // Overload that accepts the client's raw record.attributes dict for the
+    // restricted_fields / allowed_fields_values gate. Python parity: the
+    // create check is passed `record.attributes` as-submitted — synthesizing
+    // defaults like is_active=true or tags=[] on the gate side would deny
+    // requests Python allows when a permission has those fields restricted.
+    public async Task<Result<Entry>> CreateAsync(
+        Entry entry, string? actor, Dictionary<string, object>? rawAttrs, CancellationToken ct = default)
     {
         var locator = new Locator(entry.ResourceType, entry.SpaceName, entry.Subpath, entry.Shortname);
-        // Pass derived attributes for restricted_fields/allowed_fields_values gating.
-        // Conditions ("own", "is_active") are not evaluated for create — Python skips
-        // them too — so we don't need a ResourceContext here.
-        var attrsForGate = EntryToAttributesDict(entry);
+        // Python passes the raw client attributes (no synthesized defaults). When
+        // a caller doesn't have them (CSV import, plugin-internal writes), fall
+        // back to the derived dict — that's strictly a superset so any deny
+        // there is at least as safe as Python would be for the same write.
+        var attrsForGate = rawAttrs ?? EntryToAttributesDict(entry);
         if (!await perms.CanCreateAsync(actor, locator, attrsForGate, ct))
             return Result<Entry>.Fail(InternalErrorCode.NOT_ALLOWED, "no create access", "auth");
 
