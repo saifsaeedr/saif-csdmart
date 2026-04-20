@@ -1,8 +1,46 @@
 # Data model
 
-This document covers (a) the wire shapes clients see, (b) the PostgreSQL
-tables backing them, and (c) the non-obvious encoding rules that bridge
-the two.
+This document covers (a) the domain vocabulary, (b) the wire shapes
+clients see, (c) the PostgreSQL tables backing them, and (d) the
+non-obvious encoding rules that bridge the two.
+
+## Terminology
+
+| Term | Meaning |
+|---|---|
+| **space** | Top-level business category. Permissions, schemas, and the folder tree are all scoped under a space. One row per space in the `spaces` table. |
+| **subpath** | Hierarchical path inside a space that leads to an entry — e.g. `content/projects/alpha`. Stored with a leading slash in the DB, stripped on the wire. |
+| **entry** | The basic coherent unit of information. Lives in the `entries` table (for most resource types) or a sibling table (users, roles, permissions, spaces, attachments). |
+| **shortname** | Unique identifier differentiating an entry among its siblings (i.e. within a subpath). Client-supplied; `"auto"` triggers UUID-prefix generation. |
+| **meta** | Meta information associated with the entry: `uuid`, `shortname`, `owner_shortname`, `created_at`/`updated_at`, `tags`, `displayname`, `description`, `is_active`, … |
+| **payload** | The actual content associated with an entry or attachment. A JSONB column holding `{schema_shortname, content_type, body}`. |
+| **schema** | An entry under the `schema` subpath that provides a JSON Schema definition. Content payloads reference it via `payload.schema_shortname` for validation. |
+| **attachment** | Extra data bound to a parent entry — comments, reactions, media, JSON fragments, locks, shares, relationships, alterations. Lives in the `attachments` table. |
+| **locator** | A first-class pointer to an entry — `(resource_type, space, subpath, shortname)`. Used by relationship attachments and by the permission walk's probe. |
+| **acl** | Per-entry access-control list: a JSONB array of `{user_shortname, allowed_actions}` rows that grant specific users specific actions on a specific entry. |
+| **permission** | A grant row listing `(actions, resource_types, subpaths, conditions, restrictions)`. Permissions are referenced by roles. |
+| **role** | A named bundle of permissions. Users are assigned roles via `users.roles`. |
+| **workflow** | A state-machine definition used by ticket entries to gate `state` transitions. |
+| **resource_type** | Enum discriminating the entry's kind: `content`, `folder`, `schema`, `user`, `role`, `permission`, `space`, `ticket`, `data_asset`, and ~20 more. Determines which table backs the entry. |
+
+## Entry composition
+
+Any entry consists of four composable layers:
+
+1. **Meta** — identity + ownership + timestamps + tags + display info.
+2. **Payload** — the structured content, validated against a schema
+   when `payload.schema_shortname` references a schema entry.
+3. **Attachments** — zero or more attached sub-entries: comments,
+   media, reactions, relationships (weak links to other entries),
+   alterations (change records), locks, shares.
+4. **History** — every create/update/delete writes a row to the
+   `histories` table with a diff + the request's headers. The entry
+   itself always refers to the latest state via
+   `last_checksum_history`.
+
+This composition lets a single logical entry carry everything that
+belongs with it (binary media, reactions, relationships) without
+scattering related data across unrelated rows.
 
 ## Wire envelope
 

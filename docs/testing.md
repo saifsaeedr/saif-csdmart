@@ -243,3 +243,22 @@ DMART_TEST_PG_CONN='...' DMART_TEST_PWD='Test1234' \
 Add `_factory.Services.GetRequiredService<ILoggerFactory>()` to a test to
 grab the logging stack; for SQL queries, temporarily set
 `Dmart.Configuration.Logging.LogLevel.Debug` via the factory config override.
+
+## Load testing
+
+The xUnit + curl.sh suites cover correctness. Capacity and latency
+testing is out-of-band — point an off-the-shelf HTTP load generator at
+a running binary:
+
+| Tool | Typical use |
+|---|---|
+| [Apache Benchmark (`ab`)](https://httpd.apache.org/docs/current/programs/ab.html) | Quick single-URL RPS snapshot. `ab -n 10000 -c 100 -H 'Authorization: Bearer $T' $URL`. |
+| [Vegeta](https://github.com/tsenart/vegeta) | Scriptable attacks + latency histograms. `echo "GET $URL" \| vegeta attack -rate=500 -duration=30s \| vegeta report`. |
+| [Locust](https://locust.io/) | Python-scripted mixed scenarios (login → query → CRUD). Useful when you need per-endpoint SLAs. |
+| [k6](https://k6.io/) | JS-scripted scenarios with built-in thresholds; plays nice with CI. |
+
+Recommendations:
+- Keep a **real DB** underneath. In-memory mocks don't surface connection-pool or MV-refresh bottlenecks.
+- Authenticate once, re-use the JWT. `/user/login` is rate-limited and its password-hashing step (Argon2id with `time_cost=3`) dominates if you retry it per request.
+- Measure both `total` and `returned` — large `retrieve_total: true` queries dominate the cost due to the extra `COUNT(*)` roundtrip. `retrieve_total: false` halves the work.
+- Watch `mv_user_roles` / `mv_role_permissions` refresh time under write-heavy workloads. `REFRESH MATERIALIZED VIEW CONCURRENTLY` is bounded by their row counts; if it starts dominating, pre-warm the user-access cache or throttle role/permission writes.

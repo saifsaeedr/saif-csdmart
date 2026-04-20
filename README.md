@@ -3,17 +3,57 @@
 A fast, AOT-native headless information-management backend on .NET 10,
 PostgreSQL, and Svelte. Ships as a single ~37 MB self-contained binary.
 
+## The problem DMART solves
+
+Valuable information — organizational and personal — tends to sprawl:
+
+- Dispersed across too many systems, each with its own access context.
+- Hard to consolidate, link, and reason about across silos.
+- Locked to vendors or application-specific formats.
+- Chaotic to discover and search as data piles up.
+- Hard to master, dedup, back up, archive, and restore.
+- Hard to protect, audit, and secure consistently.
+
+DMART is a structure-oriented information management layer (aka
+Data-as-a-Service) that lets you treat information as a first-class asset:
+authored cleanly, searched coherently, shared safely, and extended
+without vendor lock-in. It targets small-to-medium footprints (up to
+~300 million primary entries) and is deliberately not aimed at
+workloads that need heavily relational modeling or large multi-statement
+transactions.
+
 ## What is DMART?
 
-DMART is a headless information management system for applications with small-to-medium data footprints (up to 300M entries). It provides:
+A headless, low-code information inventory platform that assimilates
+structured, unstructured, and binary data under a single REST-like
+JSON API. Top highlights:
 
-- **Entry-oriented data model** — coherent information units with attachments, organized in hierarchical folders within spaces
-- **Schema validation** — JSON Schema enforcement on content entries
-- **Access control** — role-based permissions with per-entry ACLs, hierarchical subpath walks, and magic words (`__all_spaces__`, `__all_subpaths__`)
-- **Workflow engine** — configurable state machines for ticket/task management
-- **Plugin system** — built-in hooks + external native `.so` plugins loaded at runtime
-- **WebSocket** — real-time notifications via channel subscriptions
-- **Admin UI** — CXB Svelte SPA embedded in the binary
+- **Data-as-a-Service backbone** — data assets are declared in logical
+  business shapes and reused across applications and microservices
+  without each one redefining its own schema.
+- **Standardized JSON API** — a unified public API for every resource
+  type; full OpenAPI 3 spec at `/docs`.
+- **Entry-oriented** — a coherent information unit (meta + payload +
+  attachments + relationships) lives as one logical entry, not scattered
+  rows. See [docs/data-model.md](./docs/data-model.md).
+- **Schema validation** — JSON Schema enforcement on content payloads,
+  referenced from a central `schema` subpath inside each space.
+- **Built-in access control** — role-based permissions with per-entry
+  ACLs, hierarchical subpath walks, precomputed `query_policies`
+  filtering at the SQL level, and magic-word scope widening
+  (`__all_spaces__`, `__all_subpaths__`). See
+  [docs/permissions.md](./docs/permissions.md).
+- **Workflows** — configurable ticket state machines with lock, assign,
+  and progress-transition endpoints.
+- **Microservice-friendly** — JWT shared secret lets other services
+  accept a dmart session out of the box.
+- **Plugin extensibility** — built-in hooks + native `.so` plugins
+  discovered at runtime + MCP tool surface for AI agents. See
+  [docs/plugins-and-mcp.md](./docs/plugins-and-mcp.md).
+- **Real-time** — WebSocket channel subscriptions broadcast CRUD events.
+- **Admin UI** — CXB Svelte SPA embedded in the binary, served at
+  `/cxb/` with runtime-rewritten config so the same bundle works behind
+  any reverse proxy.
 
 ## Quick Start
 
