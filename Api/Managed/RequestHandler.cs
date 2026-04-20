@@ -365,6 +365,8 @@ public static class RequestHandler
                     return (Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "user not found", "request"), rec);
                 var attrs = rec.Attributes ?? new();
                 var passwordRaw = attrs.TryGetValue("password", out var p) ? ConvertToString(p) : null;
+                var newIsActive = attrs.TryGetValue("is_active", out var ia) ? !IsExplicitlyFalse(ia) : existing.IsActive;
+                var reactivating = !existing.IsActive && newIsActive;
                 var updated = existing with
                 {
                     Email = attrs.TryGetValue("email", out var e) ? ConvertToString(e) : existing.Email,
@@ -376,7 +378,8 @@ public static class RequestHandler
                     Slug = attrs.TryGetValue("slug", out var sl) ? ConvertToString(sl) : existing.Slug,
                     Displayname = attrs.TryGetValue("displayname", out var dn) ? ParseTranslation(dn) : existing.Displayname,
                     Description = attrs.TryGetValue("description", out var desc) ? ParseTranslation(desc) : existing.Description,
-                    IsActive = attrs.TryGetValue("is_active", out var ia) ? !IsExplicitlyFalse(ia) : existing.IsActive,
+                    IsActive = newIsActive,
+                    AttemptCount = reactivating ? 0 : existing.AttemptCount,
                     IsEmailVerified = attrs.TryGetValue("is_email_verified", out var iev) ? IsTruthy(iev) : existing.IsEmailVerified,
                     IsMsisdnVerified = attrs.TryGetValue("is_msisdn_verified", out var imv) ? IsTruthy(imv) : existing.IsMsisdnVerified,
                     // Python writes device_id through on user update when present

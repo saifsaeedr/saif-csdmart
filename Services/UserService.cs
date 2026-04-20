@@ -236,23 +236,21 @@ public sealed class UserService(
         if (user is null)
             return Result<(string, string, User)>.Fail(
                 InternalErrorCode.USERNAME_NOT_EXIST, "Invalid username or password", "auth");
+
         if (!user.IsActive)
             return Result<(string, string, User)>.Fail(
-                InternalErrorCode.USER_ISNT_VERIFIED, "This user is not verified", "auth");
-
-        // Account lockout after max_failed_login_attempts (Python: handle_failed_login_attempt).
-        var maxAttempts = settings.Value.MaxFailedLoginAttempts;
-        if (maxAttempts > 0 && user.AttemptCount is not null && user.AttemptCount >= maxAttempts)
-            return Result<(string, string, User)>.Fail(
-                InternalErrorCode.USER_ACCOUNT_LOCKED,
-                "Account has been locked due to too many failed login attempts.", "auth");
+                InternalErrorCode.USER_ACCOUNT_LOCKED, "Account has been locked.", "auth");
 
         if (string.IsNullOrEmpty(user.Password) || req.Password is null
             || !hasher.Verify(req.Password, user.Password))
         {
-            await users.IncrementAttemptAsync(user.Shortname, ct);
-            return Result<(string, string, User)>.Fail(
-                InternalErrorCode.PASSWORD_NOT_VALIDATED, "Invalid username or password", "auth");
+            var locked = await HandleFailedLoginAttemptAsync(user, ct);
+            return locked
+                ? Result<(string, string, User)>.Fail(
+                    InternalErrorCode.USER_ACCOUNT_LOCKED,
+                    "Account has been locked due to too many failed login attempts.", "auth")
+                : Result<(string, string, User)>.Fail(
+                    InternalErrorCode.PASSWORD_NOT_VALIDATED, "Invalid username or password", "auth");
         }
 
         // Device lock check — applies regardless of user type.
@@ -299,7 +297,7 @@ public sealed class UserService(
                 InternalErrorCode.USERNAME_NOT_EXIST, "Invalid username or password", "auth");
         if (!user.IsActive)
             return Result<(string, string, User)>.Fail(
-                InternalErrorCode.USER_ISNT_VERIFIED, "This user is not verified", "auth");
+                InternalErrorCode.USER_ACCOUNT_LOCKED, "Account has been locked.", "auth");
 
         // Validate OTP code.
         // Python parity: key is derived from the REQUEST identifier, not the
@@ -402,6 +400,28 @@ public sealed class UserService(
         await invitations.DeleteAsync(req.Invitation, ct);
 
         return await ProcessLoginAsync(updated, req, requestHeaders, ct);
+    }
+
+    private async Task<bool> HandleFailedLoginAttemptAsync(User user, CancellationToken ct)
+    {
+        await users.IncrementAttemptAsync(user.Shortname, ct);
+
+        var maxAttempts = settings.Value.MaxFailedLoginAttempts;
+        if (maxAttempts <= 0) return false;
+
+        // Load fresh — the attempt count in `user` is pre-increment and stale.
+        var refreshed = await users.GetByShortnameAsync(user.Shortname, ct);
+        if (refreshed is null) return false;
+        if (refreshed.AttemptCount is not int count || count < maxAttempts) return false;
+        if (!refreshed.IsActive) return true; // already locked by a prior attempt
+
+        var locked = refreshed with { IsActive = false, UpdatedAt = DateTime.UtcNow };
+        await users.UpsertAsync(locked, ct);
+        // Python: db.remove_user_session(shortname) — every active session is
+        // invalidated so an already-logged-in tab can't keep making requests
+        // after the account is auto-disabled.
+        await users.DeleteAllSessionsAsync(user.Shortname, ct);
+        return true;
     }
 
     // Shared post-authentication flow. Mirrors Python's process_user_login().
