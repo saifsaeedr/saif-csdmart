@@ -173,12 +173,31 @@ dotnet run -- serve
 ## Testing
 
 ```bash
-# Unit + integration tests (274 tests)
+# Unit + integration tests (450+ tests)
 dotnet test dmart.Tests/dmart.Tests.csproj -c Release
 
-# E2E smoke tests (80 checks)
+# E2E smoke tests (90 checks)
 DMART_URL=http://localhost:5099 ./curl.sh
 ```
+
+See [docs/testing.md](./docs/testing.md) for fixtures, parallelism rules,
+and the commands that include DB-backed integration tests.
+
+## Documentation
+
+Engineering reference for maintainers and contributors, with Mermaid
+architecture diagrams:
+
+- [docs/README.md](./docs/README.md) — navigation
+- [docs/architecture.md](./docs/architecture.md) — layers, request lifecycle, startup sequence
+- [docs/data-model.md](./docs/data-model.md) — ER diagram, wire format rules, repositories
+- [docs/permissions.md](./docs/permissions.md) — the permission walk, anonymous + world, ACL, conditions
+- [docs/auth.md](./docs/auth.md) — login/JWT/session flows, OAuth providers, invitations
+- [docs/plugins-and-mcp.md](./docs/plugins-and-mcp.md) — plugin lifecycle + MCP protocol + OAuth discovery
+- [docs/query.md](./docs/query.md) — query types, search syntax, sort_by, ACL filtering
+- [docs/testing.md](./docs/testing.md) — xUnit + curl.sh + parallelism + common recipes
+- [docs/debugging.md](./docs/debugging.md) — known pitfalls, AOT gotchas, SQL inspection
+- [docs/contributing.md](./docs/contributing.md) — recipes: add endpoint, repository, service, plugin
 
 ## Deployment
 
