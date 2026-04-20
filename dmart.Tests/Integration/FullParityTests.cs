@@ -91,24 +91,52 @@ public class FullParityTests : IClassFixture<DmartFactory>
     {
         if (!DmartFactory.HasPg) return;
         var users = _factory.Services.GetRequiredService<UserRepository>();
+        var hasher = _factory.Services.GetRequiredService<Dmart.Auth.PasswordHasher>();
         var db = _factory.Services.GetRequiredService<Db>();
 
-        // Set attempt_count directly to the lockout threshold (5) so the
-        // account is already locked. This avoids race conditions with other
-        // tests that might reset the counter in parallel.
-        await using (var conn = await db.OpenAsync())
-        await using (var cmd = new Npgsql.NpgsqlCommand(
-            "UPDATE users SET attempt_count = 5 WHERE shortname = $1", conn))
+        // Use a throwaway user instead of the admin so a parallel test that
+        // logs in as admin can't stumble into the locked state we're setting
+        // up here. Previously this test mutated the shared admin row with
+        // attempt_count=5, which caused intermittent failures in
+        // RecentParityTests.LoginAsync (and similar admin-login helpers) when
+        // xUnit ran them concurrently.
+        var suffix = Guid.NewGuid().ToString("N")[..12];
+        var shortname = $"lockout_{suffix}";
+        const string password = "CorrectPassword1";
+        await users.UpsertAsync(new Dmart.Models.Core.User
         {
-            cmd.Parameters.Add(new() { Value = _factory.AdminShortname });
-            await cmd.ExecuteNonQueryAsync();
-        }
+            Uuid = Guid.NewGuid().ToString(),
+            Shortname = shortname,
+            SpaceName = "management",
+            Subpath = "users",
+            OwnerShortname = shortname,
+            IsActive = true,
+            Password = hasher.Hash(password),
+            Type = Dmart.Models.Enums.UserType.Web,
+            Language = Dmart.Models.Enums.Language.En,
+            Roles = new(),
+            Groups = new(),
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        });
 
         try
         {
+            // Set attempt_count directly to the lockout threshold (5) so the
+            // account is already locked. The UpdateAsync path used elsewhere
+            // would race with HandleFailedLoginAttempt; direct SQL is
+            // deterministic.
+            await using (var conn = await db.OpenAsync())
+            await using (var cmd = new Npgsql.NpgsqlCommand(
+                "UPDATE users SET attempt_count = 5 WHERE shortname = $1", conn))
+            {
+                cmd.Parameters.Add(new() { Value = shortname });
+                await cmd.ExecuteNonQueryAsync();
+            }
+
             var client = _factory.CreateClient();
             // Even correct password should fail with lockout
-            var goodLogin = new UserLoginRequest(_factory.AdminShortname, null, null, _factory.AdminPassword, null);
+            var goodLogin = new UserLoginRequest(shortname, null, null, password, null);
             var resp = await client.PostAsJsonAsync("/user/login", goodLogin, DmartJsonContext.Default.UserLoginRequest);
             resp.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
             var body = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
@@ -116,7 +144,8 @@ public class FullParityTests : IClassFixture<DmartFactory>
         }
         finally
         {
-            await users.ResetAttemptsAsync(_factory.AdminShortname);
+            try { await users.DeleteAllSessionsAsync(shortname); } catch { }
+            try { await users.DeleteAsync(shortname); } catch { }
         }
     }
 
