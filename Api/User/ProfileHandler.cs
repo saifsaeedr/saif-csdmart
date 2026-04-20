@@ -27,27 +27,31 @@ public static class ProfileHandler
             // "space:subpath:resource_type" with allowed_actions, conditions, etc.
             var permissions = await access.GenerateUserPermissionsAsync(actor, ct);
 
+            // Python parity (dmart/api/user/router.py:563-587): optional fields
+            // are added only when truthy. StripNulls drops null + "" — matches
+            // Python's `if user.X:` guard and response_model_exclude_none.
+            var attrs = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["email"] = user.Email,
+                ["msisdn"] = user.Msisdn,
+                ["displayname"] = user.Displayname,
+                ["description"] = user.Description,
+                ["language"] = user.Language,
+                ["type"] = user.Type.ToString().ToLowerInvariant(),
+                ["roles"] = user.Roles,
+                ["groups"] = user.Groups,
+                ["is_email_verified"] = user.IsEmailVerified,
+                ["is_msisdn_verified"] = user.IsMsisdnVerified,
+                ["force_password_change"] = user.ForcePasswordChange,
+                ["payload"] = user.Payload,
+                ["permissions"] = permissions,
+            };
             var profileRecord = new Record
             {
                 ResourceType = Dmart.Models.Enums.ResourceType.User,
                 Shortname = user.Shortname,
                 Subpath = "users",
-                Attributes = new()
-                {
-                    ["email"] = user.Email ?? (object)"",
-                    ["msisdn"] = user.Msisdn ?? (object)"",
-                    ["displayname"] = user.Displayname ?? (object)"",
-                    ["description"] = user.Description ?? (object)"",
-                    ["language"] = user.Language,
-                    ["type"] = user.Type.ToString().ToLowerInvariant(),
-                    ["roles"] = user.Roles,
-                    ["groups"] = user.Groups,
-                    ["is_email_verified"] = user.IsEmailVerified,
-                    ["is_msisdn_verified"] = user.IsMsisdnVerified,
-                    ["force_password_change"] = user.ForcePasswordChange,
-                    ["payload"] = user.Payload ?? (object)new Dictionary<string, object>(),
-                    ["permissions"] = permissions,
-                },
+                Attributes = AttrHelper.StripNulls(attrs),
             };
             return Response.Ok(new[] { profileRecord });
         });
