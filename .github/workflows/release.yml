@@ -14,7 +14,7 @@ jobs:
     name: Build Source RPM
     runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -43,7 +43,7 @@ jobs:
             gh release upload "$GITHUB_REF_NAME" "$SRPM" --clobber
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: srpm
           path: dist/out/*.src.rpm
@@ -52,7 +52,7 @@ jobs:
     name: Build Fedora RPM
     runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -81,7 +81,7 @@ jobs:
             gh release upload "$GITHUB_REF_NAME" "$RPM" --clobber
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: fedora-rpm
           path: dist/out/*.x86_64.rpm
@@ -90,7 +90,7 @@ jobs:
     name: Build RHEL 9 RPM
     runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -134,7 +134,7 @@ jobs:
             gh release upload "$GITHUB_REF_NAME" "$RPM" --clobber
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: el9-rpm
           path: dist/out/*.x86_64.rpm
@@ -143,17 +143,17 @@ jobs:
     name: Build Windows (win-x64 AOT)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Setup .NET 10
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '10.0.x'
 
       - name: Setup Node (for CXB frontend)
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '20'
 
@@ -206,7 +206,7 @@ jobs:
           $zip = Get-ChildItem dist/out/*-win-x64.zip | Select-Object -First 1 -ExpandProperty FullName
           if ($zip) { gh release upload "$env:GITHUB_REF_NAME" "$zip" --clobber }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows-zip
           path: dist/out/*-win-x64.zip
@@ -218,7 +218,7 @@ jobs:
       # fetch-depth: 1 — the container build reads the source tree, not
       # git history. The RPM jobs above need fetch-depth: 0 for
       # `git describe`, but this job doesn't.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
