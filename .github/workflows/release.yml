@@ -139,6 +139,78 @@ jobs:
           name: el9-rpm
           path: dist/out/*.x86_64.rpm
 
+  build-windows:
+    name: Build Windows (win-x64 AOT)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Setup Node (for CXB frontend)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build CXB frontend
+        shell: bash
+        run: |
+          if [ -f cxb/package.json ]; then
+            cd cxb
+            npm install --global yarn
+            yarn install
+            yarn build
+            cd ..
+          fi
+
+      - name: Set version
+        id: version
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=${VERSION:-0.1.0}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish AOT win-x64
+        shell: pwsh
+        run: |
+          $v = "${{ steps.version.outputs.version }}"
+          $info = "v$v branch=${env:GITHUB_REF_NAME} date=$(Get-Date -Format yyyy-MM-dd)"
+          dotnet publish dmart.csproj -r win-x64 -c Release `
+            -p:PublishAot=true `
+            -p:StripSymbols=true `
+            -p:InformationalVersion="$info"
+
+      - name: Prune dev-only artifacts + package zip
+        shell: pwsh
+        run: |
+          $pub = "bin/Release/net10.0/win-x64/publish"
+          Get-ChildItem $pub -File | Where-Object {
+            $_.Name -match '\.pdb$|\.Development\.json$|\.deps\.json$|staticwebassets'
+          } | Remove-Item -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path dist/out | Out-Null
+          $zip = "dist/out/dmart-${{ steps.version.outputs.version }}-win-x64.zip"
+          Compress-Archive -Path "$pub/*" -DestinationPath $zip -Force
+          Get-ChildItem $zip | Format-List FullName,Length
+
+      - name: Upload Windows zip to release
+        if: github.event_name == 'release'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $zip = Get-ChildItem dist/out/*-win-x64.zip | Select-Object -First 1 -ExpandProperty FullName
+          if ($zip) { gh release upload "$env:GITHUB_REF_NAME" "$zip" --clobber }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-zip
+          path: dist/out/*-win-x64.zip
+
   build-container:
     name: Build & Push Container Image
     runs-on: self-hosted
