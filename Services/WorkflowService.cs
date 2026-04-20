@@ -23,11 +23,11 @@ public sealed class WorkflowService(
     {
         var existing = await entries.GetAsync(ticket.SpaceName, ticket.Subpath, ticket.Shortname, ticket.Type, ct);
         if (existing is null)
-            return Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "ticket not found", "request");
+            return Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "ticket not found", ErrorTypes.Request);
 
         if (string.IsNullOrEmpty(existing.WorkflowShortname))
             return Response.Fail(InternalErrorCode.WORKFLOW_BODY_NOT_FOUND,
-                "ticket has no workflow_shortname", "request");
+                "ticket has no workflow_shortname", ErrorTypes.Request);
 
         var currentState = existing.State ?? "";
         var actorRoles = await GetActorRolesAsync(actor, ct);
@@ -37,7 +37,7 @@ public sealed class WorkflowService(
 
         if (!transition.Allowed)
             return Response.Fail(InternalErrorCode.INVALID_TICKET_STATUS,
-                transition.Error ?? "transition not allowed", "request");
+                transition.Error ?? "transition not allowed", ErrorTypes.Request);
 
         // Build the patch dmart applies on a successful transition
         var patch = new Dictionary<string, object>
@@ -51,7 +51,7 @@ public sealed class WorkflowService(
         {
             if (attrs is null || !attrs.TryGetValue("resolution_reason", out var reasonObj) || reasonObj is null)
                 return Response.Fail(InternalErrorCode.MISSING_DATA,
-                    "this transition requires a resolution_reason", "request");
+                    "this transition requires a resolution_reason", ErrorTypes.Request);
             patch["resolution_reason"] = reasonObj;
         }
         else if (attrs is not null && attrs.TryGetValue("resolution_reason", out var reasonObj))

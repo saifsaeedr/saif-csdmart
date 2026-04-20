@@ -19,7 +19,7 @@ public static class ImportExportHandler
                     var form = await req.ReadFormAsync(ct);
                     var zipFile = form.Files["zip_file"];
                     if (zipFile is null)
-                        return Response.Fail(InternalErrorCode.MISSING_DATA, "zip_file required", "request");
+                        return Response.Fail(InternalErrorCode.MISSING_DATA, "zip_file required", ErrorTypes.Request);
                     zipStream = zipFile.OpenReadStream();
                 }
                 else
@@ -35,7 +35,7 @@ public static class ImportExportHandler
                    ImportExportService io, HttpContext http, CancellationToken ct) =>
             {
                 if (string.IsNullOrEmpty(space))
-                    return Results.BadRequest(Response.Fail(InternalErrorCode.INVALID_SPACE_NAME, "space required", "request"));
+                    return Results.BadRequest(Response.Fail(InternalErrorCode.INVALID_SPACE_NAME, "space required", ErrorTypes.Request));
                 var stream = await io.ExportAsync(space, subpath, http.Actor(), ct);
                 return Results.Stream(stream, "application/zip", $"{space}.zip");
             });

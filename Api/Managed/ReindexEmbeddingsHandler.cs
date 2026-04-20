@@ -32,7 +32,7 @@ public static class ReindexEmbeddingsHandler
             var actor = http.Actor();
             if (string.IsNullOrEmpty(actor))
                 return Response.Fail(InternalErrorCode.NOT_AUTHENTICATED,
-                    "login required", "auth");
+                    "login required", ErrorTypes.Auth);
 
             string? space = null;
             var onlyMissing = true;
@@ -45,7 +45,7 @@ public static class ReindexEmbeddingsHandler
                 catch (JsonException ex)
                 {
                     return Response.Fail(InternalErrorCode.INVALID_DATA,
-                        $"invalid body: {ex.Message}", "request");
+                        $"invalid body: {ex.Message}", ErrorTypes.Request);
                 }
                 using var _ = doc;
                 var root = doc.RootElement;
@@ -74,7 +74,7 @@ public static class ReindexEmbeddingsHandler
             var stats = await svc.ReindexAllAsync(space, onlyMissing, maxPerSpace, ct);
             if (stats.Error is not null)
                 return Response.Fail(InternalErrorCode.NOT_SUPPORTED_TYPE,
-                    $"reindex skipped: {stats.Error}", "request");
+                    $"reindex skipped: {stats.Error}", ErrorTypes.Request);
 
             return Response.Ok(attributes: new()
             {

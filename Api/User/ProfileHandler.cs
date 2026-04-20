@@ -17,10 +17,10 @@ public static class ProfileHandler
         {
             var actor = http.Actor();
             if (actor is null)
-                return Response.Fail(InternalErrorCode.NOT_AUTHENTICATED, "login required", "auth");
+                return Response.Fail(InternalErrorCode.NOT_AUTHENTICATED, "login required", ErrorTypes.Auth);
             var user = await svc.GetByShortnameAsync(actor, ct);
             if (user is null)
-                return Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "user missing", "db");
+                return Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "user missing", ErrorTypes.Db);
 
             // Python: attributes["permissions"] = await db.get_user_permissions(shortname)
             // Resolves user → roles → permissions into a dict keyed by
@@ -60,7 +60,7 @@ public static class ProfileHandler
         {
             var actor = http.Actor();
             if (actor is null)
-                return Response.Fail(InternalErrorCode.NOT_AUTHENTICATED, "login required", "auth");
+                return Response.Fail(InternalErrorCode.NOT_AUTHENTICATED, "login required", ErrorTypes.Auth);
 
             // Python parity: set_user_profile(profile: core.Record, ...) — the
             // POST body is a Record envelope where every field the handler
@@ -75,7 +75,7 @@ public static class ProfileHandler
                 using var doc = await JsonDocument.ParseAsync(req.Body, cancellationToken: ct);
                 var root = doc.RootElement;
                 if (root.ValueKind != JsonValueKind.Object)
-                    return Response.Fail(InternalErrorCode.INVALID_DATA, "body must be a JSON object", "request");
+                    return Response.Fail(InternalErrorCode.INVALID_DATA, "body must be a JSON object", ErrorTypes.Request);
 
                 if (root.TryGetProperty("attributes", out var attrsEl)
                     && attrsEl.ValueKind == JsonValueKind.Object)
@@ -91,11 +91,11 @@ public static class ProfileHandler
             }
             catch (JsonException ex)
             {
-                return Response.Fail(InternalErrorCode.INVALID_DATA, ex.Message, "request");
+                return Response.Fail(InternalErrorCode.INVALID_DATA, ex.Message, ErrorTypes.Request);
             }
 
             if (patch is null)
-                return Response.Fail(InternalErrorCode.INVALID_DATA, "missing body", "request");
+                return Response.Fail(InternalErrorCode.INVALID_DATA, "missing body", ErrorTypes.Request);
 
             // Python threads `auth_token` into set_user_profile so a
             // firebase_token update lands on the caller's session row only.
@@ -111,7 +111,7 @@ public static class ProfileHandler
         {
             var actor = http.Actor();
             if (actor is null)
-                return Response.Fail(InternalErrorCode.NOT_AUTHENTICATED, "login required", "auth");
+                return Response.Fail(InternalErrorCode.NOT_AUTHENTICATED, "login required", ErrorTypes.Auth);
             await svc.DeleteAsync(actor, ct);
             return Response.Ok();
         });
@@ -128,7 +128,7 @@ public static class ProfileHandler
         {
             var actor = http.Actor();
             if (actor is null)
-                return Response.Fail(InternalErrorCode.NOT_AUTHENTICATED, "login required", "auth");
+                return Response.Fail(InternalErrorCode.NOT_AUTHENTICATED, "login required", ErrorTypes.Auth);
 
             Dictionary<string, object>? body;
             try
@@ -137,15 +137,15 @@ public static class ProfileHandler
             }
             catch (JsonException ex)
             {
-                return Response.Fail(InternalErrorCode.INVALID_DATA, ex.Message, "request");
+                return Response.Fail(InternalErrorCode.INVALID_DATA, ex.Message, ErrorTypes.Request);
             }
             var target = body?.TryGetValue("shortname", out var sn) == true ? sn?.ToString() : null;
             if (string.IsNullOrEmpty(target))
-                return Response.Fail(InternalErrorCode.MISSING_DATA, "shortname required", "request");
+                return Response.Fail(InternalErrorCode.MISSING_DATA, "shortname required", ErrorTypes.Request);
 
             var existing = await users.GetByShortnameAsync(target, ct);
             if (existing is null)
-                return Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "user not found", "request");
+                return Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "user not found", ErrorTypes.Request);
 
             await users.ResetAttemptsAsync(target, ct);
             // Flip the flag so the next login forces a fresh password choice.
@@ -178,7 +178,7 @@ public static class ProfileHandler
         {
             var actor = http.Actor();
             if (actor is null)
-                return Response.Fail(InternalErrorCode.NOT_AUTHENTICATED, "login required", "auth");
+                return Response.Fail(InternalErrorCode.NOT_AUTHENTICATED, "login required", ErrorTypes.Auth);
 
             Dictionary<string, object>? body;
             try
@@ -187,11 +187,11 @@ public static class ProfileHandler
             }
             catch (JsonException ex)
             {
-                return Response.Fail(InternalErrorCode.INVALID_DATA, ex.Message, "request");
+                return Response.Fail(InternalErrorCode.INVALID_DATA, ex.Message, ErrorTypes.Request);
             }
             var password = body?.TryGetValue("password", out var pw) == true ? pw?.ToString() : null;
             if (string.IsNullOrEmpty(password))
-                return Response.Fail(InternalErrorCode.MISSING_DATA, "password required", "request");
+                return Response.Fail(InternalErrorCode.MISSING_DATA, "password required", ErrorTypes.Request);
 
             var valid = await svc.ValidatePasswordAsync(actor, password, ct);
             return Response.Ok(attributes: new() { ["valid"] = valid });

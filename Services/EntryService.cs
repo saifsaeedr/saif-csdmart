@@ -56,17 +56,17 @@ public sealed class EntryService(
         // there is at least as safe as Python would be for the same write.
         var attrsForGate = rawAttrs ?? EntryToAttributesDict(entry);
         if (!await perms.CanCreateAsync(actor, locator, attrsForGate, ct))
-            return Result<Entry>.Fail(InternalErrorCode.NOT_ALLOWED, "no create access", "auth");
+            return Result<Entry>.Fail(InternalErrorCode.NOT_ALLOWED, "no create access", ErrorTypes.Auth);
 
         var existing = await entries.GetAsync(entry.SpaceName, entry.Subpath, entry.Shortname, entry.ResourceType, ct);
         if (existing is not null)
-            return Result<Entry>.Fail(InternalErrorCode.SHORTNAME_ALREADY_EXIST, "entry exists", "db");
+            return Result<Entry>.Fail(InternalErrorCode.SHORTNAME_ALREADY_EXIST, "entry exists", ErrorTypes.Db);
 
         // dmart's schema validation: if the payload references a schema_shortname,
         // load the schema entry from the same space and validate the body against it.
         var validationError = await ValidatePayloadAsync(entry, ct);
         if (validationError is not null)
-            return Result<Entry>.Fail(InternalErrorCode.INVALID_DATA, validationError, "request");
+            return Result<Entry>.Fail(InternalErrorCode.INVALID_DATA, validationError, ErrorTypes.Request);
 
         // Ticket initialization: resolve initial_state from the workflow definition
         // and set is_open = true. Mirrors Python's set_init_state_from_record().
@@ -101,7 +101,7 @@ public sealed class EntryService(
         {
             log.LogWarning(ex, "before-create plugin hook rejected {Space}/{Subpath}/{Shortname}",
                 toSave.SpaceName, toSave.Subpath, toSave.Shortname);
-            return Result<Entry>.Fail(InternalErrorCode.INVALID_DATA, "plugin rejected create", "request");
+            return Result<Entry>.Fail(InternalErrorCode.INVALID_DATA, "plugin rejected create", ErrorTypes.Request);
         }
 
         await entries.UpsertAsync(toSave, ct);
@@ -134,16 +134,16 @@ public sealed class EntryService(
         // "own"/"is_active" conditions and the patch dict for field-restriction gating.
         var existing = await entries.GetAsync(locator.SpaceName, locator.Subpath, locator.Shortname, locator.Type, ct);
         if (existing is null)
-            return Result<Entry>.Fail(InternalErrorCode.OBJECT_NOT_FOUND, "entry missing", "db");
+            return Result<Entry>.Fail(InternalErrorCode.OBJECT_NOT_FOUND, "entry missing", ErrorTypes.Db);
         if (!await perms.CanUpdateAsync(actor, locator, PermissionService.FromEntry(existing), patch, ct))
-            return Result<Entry>.Fail(InternalErrorCode.NOT_ALLOWED, "no update access", "auth");
+            return Result<Entry>.Fail(InternalErrorCode.NOT_ALLOWED, "no update access", ErrorTypes.Auth);
 
         var merged = ApplyPatch(existing, patch);
 
         // Validate the MERGED entry (not the old one) so patches can't bypass schema rules.
         var validationError = await ValidatePayloadAsync(merged, ct);
         if (validationError is not null)
-            return Result<Entry>.Fail(InternalErrorCode.INVALID_DATA, validationError, "request");
+            return Result<Entry>.Fail(InternalErrorCode.INVALID_DATA, validationError, ErrorTypes.Request);
 
         var beforeEvent = BuildEvent(merged, ActionType.Update, actor);
         try { await plugins.BeforeActionAsync(beforeEvent, ct); }
@@ -151,7 +151,7 @@ public sealed class EntryService(
         {
             log.LogWarning(ex, "before-update plugin hook rejected {Space}/{Subpath}/{Shortname}",
                 locator.SpaceName, locator.Subpath, locator.Shortname);
-            return Result<Entry>.Fail(InternalErrorCode.INVALID_DATA, "plugin rejected update", "request");
+            return Result<Entry>.Fail(InternalErrorCode.INVALID_DATA, "plugin rejected update", ErrorTypes.Request);
         }
 
         await entries.UpsertAsync(merged, ct);
@@ -174,7 +174,7 @@ public sealed class EntryService(
         var existing = await entries.GetAsync(locator.SpaceName, locator.Subpath, locator.Shortname, locator.Type, ct);
         var ctx = existing is not null ? PermissionService.FromEntry(existing) : null;
         if (!await perms.CanDeleteAsync(actor, locator, ctx, ct))
-            return Result<bool>.Fail(InternalErrorCode.NOT_ALLOWED, "no delete access", "auth");
+            return Result<bool>.Fail(InternalErrorCode.NOT_ALLOWED, "no delete access", ErrorTypes.Auth);
 
         // Build a delete Event from whatever we know (prefer the loaded entry so
         // plugin filters on resource_type/schema_shortname see real values).
@@ -195,7 +195,7 @@ public sealed class EntryService(
         {
             log.LogWarning(ex, "before-delete plugin hook rejected {Space}/{Subpath}/{Shortname}",
                 locator.SpaceName, locator.Subpath, locator.Shortname);
-            return Result<bool>.Fail(InternalErrorCode.INVALID_DATA, "plugin rejected delete", "request");
+            return Result<bool>.Fail(InternalErrorCode.INVALID_DATA, "plugin rejected delete", ErrorTypes.Request);
         }
 
         var ok = await entries.DeleteAsync(locator.SpaceName, locator.Subpath, locator.Shortname, locator.Type, ct);
@@ -216,11 +216,11 @@ public sealed class EntryService(
         // owner/is_active context. The create check skips conditions per Python.
         var srcEntry = await entries.GetAsync(from.SpaceName, from.Subpath, from.Shortname, from.Type, ct);
         if (srcEntry is null)
-            return Result<Entry>.Fail(InternalErrorCode.OBJECT_NOT_FOUND, "source entry missing", "db");
+            return Result<Entry>.Fail(InternalErrorCode.OBJECT_NOT_FOUND, "source entry missing", ErrorTypes.Db);
         var srcCtx = PermissionService.FromEntry(srcEntry);
         if (!await perms.CanUpdateAsync(actor, from, srcCtx, null, ct) ||
             !await perms.CanCreateAsync(actor, to, EntryToAttributesDict(srcEntry), ct))
-            return Result<Entry>.Fail(InternalErrorCode.NOT_ALLOWED, "no move access", "auth");
+            return Result<Entry>.Fail(InternalErrorCode.NOT_ALLOWED, "no move access", ErrorTypes.Auth);
         // Python fires a single "move" event keyed on the destination subpath and
         // passes the source shortname as an attribute. Mirror that so hook
         // plugins can see both the old and new names on the same event.
@@ -240,7 +240,7 @@ public sealed class EntryService(
         {
             log.LogWarning(ex, "before-move plugin hook rejected {FromSpace}/{FromSubpath}/{FromShortname} → {ToSpace}/{ToSubpath}/{ToShortname}",
                 from.SpaceName, from.Subpath, from.Shortname, to.SpaceName, to.Subpath, to.Shortname);
-            return Result<Entry>.Fail(InternalErrorCode.INVALID_DATA, "plugin rejected move", "request");
+            return Result<Entry>.Fail(InternalErrorCode.INVALID_DATA, "plugin rejected move", ErrorTypes.Request);
         }
 
         await entries.MoveAsync(from, to, ct);
@@ -249,7 +249,7 @@ public sealed class EntryService(
         await plugins.AfterActionAsync(moveEvent, ct);
         var moved = await entries.GetAsync(to.SpaceName, to.Subpath, to.Shortname, to.Type, ct);
         return moved is null
-            ? Result<Entry>.Fail(InternalErrorCode.OBJECT_NOT_FOUND, "moved entry missing", "db")
+            ? Result<Entry>.Fail(InternalErrorCode.OBJECT_NOT_FOUND, "moved entry missing", ErrorTypes.Db)
             : Result<Entry>.Ok(moved);
     }
 

@@ -67,7 +67,7 @@ public static class RequestHandler
                             await DispatchUpdateAclAsync(rec, req.SpaceName, actor, entries, ct),
                         _ =>
                             ((Response Response, Record UpdatedRecord))(Response.Fail(InternalErrorCode.NOT_SUPPORTED_TYPE,
-                                $"{req.RequestType} not supported", "request"),
+                                $"{req.RequestType} not supported", ErrorTypes.Request),
                              rec),
                     };
 
@@ -138,7 +138,7 @@ public static class RequestHandler
                     },
                 };
                 return Response.Fail(InternalErrorCode.SOMETHING_WRONG,
-                    "Something went wrong", "request", info);
+                    "Something went wrong", ErrorTypes.Request, info);
             });
 
     // ============================================================================
@@ -201,7 +201,7 @@ public static class RequestHandler
         var result = await entries.CreateAsync(entry, actor, rec.Attributes, ct);
         return result.IsOk
             ? (Response.Ok(), rec with { Uuid = result.Value!.Uuid })
-            : (Response.Fail(result.ErrorCode!, result.ErrorMessage!, "request"), rec);
+            : (Response.Fail(result.ErrorCode!, result.ErrorMessage!, ErrorTypes.Request), rec);
     }
 
     private static async Task<(Response Response, Record UpdatedRecord)> CreateUserAsync(
@@ -211,7 +211,7 @@ public static class RequestHandler
         var existing = await users.GetByShortnameAsync(rec.Shortname, ct);
         if (existing is not null)
             return (Response.Fail(InternalErrorCode.SHORTNAME_ALREADY_EXIST,
-                $"user {rec.Shortname} already exists", "request"), rec);
+                $"user {rec.Shortname} already exists", ErrorTypes.Request), rec);
 
         var rolesList = ExtractStringList(attrs, "roles");
         var groupsList = ExtractStringList(attrs, "groups");
@@ -300,7 +300,7 @@ public static class RequestHandler
         var existing = await spaces.GetAsync(rec.Shortname, ct);
         if (existing is not null)
             return (Response.Fail(InternalErrorCode.ALREADY_EXIST_SPACE_NAME,
-                $"space {rec.Shortname} already exists", "request"), rec);
+                $"space {rec.Shortname} already exists", ErrorTypes.Request), rec);
 
         // Python's Meta.from_record passes ALL attributes to the Space constructor,
         // including active_plugins. Without active_plugins, no hooks fire for this
@@ -366,7 +366,7 @@ public static class RequestHandler
             {
                 var existing = await users.GetByShortnameAsync(rec.Shortname, ct);
                 if (existing is null)
-                    return (Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "user not found", "request"), rec);
+                    return (Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "user not found", ErrorTypes.Request), rec);
                 var attrs = rec.Attributes ?? new();
                 var passwordRaw = attrs.TryGetValue("password", out var p) ? ConvertToString(p) : null;
                 var newIsActive = attrs.TryGetValue("is_active", out var ia) ? !IsExplicitlyFalse(ia) : existing.IsActive;
@@ -400,7 +400,7 @@ public static class RequestHandler
             {
                 var existing = await spaces.GetAsync(rec.Shortname, ct);
                 if (existing is null)
-                    return (Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "space not found", "request"), rec);
+                    return (Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "space not found", ErrorTypes.Request), rec);
                 var attrs = rec.Attributes ?? new();
 
                 // Python parity: every Space-specific attribute on the wire is
@@ -447,7 +447,7 @@ public static class RequestHandler
             {
                 var existing = await access.GetRoleAsync(rec.Shortname, ct);
                 if (existing is null)
-                    return (Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "role not found", "request"), rec);
+                    return (Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "role not found", ErrorTypes.Request), rec);
                 var attrs = rec.Attributes ?? new();
                 var updated = existing with
                 {
@@ -466,7 +466,7 @@ public static class RequestHandler
             {
                 var existing = await access.GetPermissionAsync(rec.Shortname, ct);
                 if (existing is null)
-                    return (Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "permission not found", "request"), rec);
+                    return (Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "permission not found", ErrorTypes.Request), rec);
                 var attrs = rec.Attributes ?? new();
                 var updated = existing with
                 {
@@ -495,7 +495,7 @@ public static class RequestHandler
                 var result = await entries.UpdateAsync(locator, rec.Attributes ?? new(), actor, ct);
                 return result.IsOk
                     ? (Response.Ok(), rec with { Uuid = result.Value!.Uuid })
-                    : (Response.Fail(result.ErrorCode!, result.ErrorMessage!, "request"), rec);
+                    : (Response.Fail(result.ErrorCode!, result.ErrorMessage!, ErrorTypes.Request), rec);
             }
         }
     }
@@ -521,7 +521,7 @@ public static class RequestHandler
                 // management space — it's where users/roles/permissions live.
                 if (string.Equals(rec.Shortname, managementSpace, StringComparison.Ordinal))
                     return (Response.Fail(InternalErrorCode.CANNT_DELETE,
-                        $"cannot delete the management space '{managementSpace}'", "request"), rec);
+                        $"cannot delete the management space '{managementSpace}'", ErrorTypes.Request), rec);
                 await spaces.DeleteAsync(rec.Shortname, ct);
                 return (Response.Ok(), rec);
             // Role/Permission live in their own tables, not `entries` — falling
@@ -532,7 +532,7 @@ public static class RequestHandler
                 return deleted
                     ? (Response.Ok(), rec)
                     : (Response.Fail(InternalErrorCode.OBJECT_NOT_FOUND,
-                        $"role '{rec.Shortname}' not found", "request"), rec);
+                        $"role '{rec.Shortname}' not found", ErrorTypes.Request), rec);
             }
             case ResourceType.Permission:
             {
@@ -540,7 +540,7 @@ public static class RequestHandler
                 return deleted
                     ? (Response.Ok(), rec)
                     : (Response.Fail(InternalErrorCode.OBJECT_NOT_FOUND,
-                        $"permission '{rec.Shortname}' not found", "request"), rec);
+                        $"permission '{rec.Shortname}' not found", ErrorTypes.Request), rec);
             }
             case ResourceType.Comment:
             case ResourceType.Reply:
@@ -564,7 +564,7 @@ public static class RequestHandler
                 var result = await entries.DeleteAsync(locator, actor, ct);
                 return result.IsOk
                     ? (Response.Ok(), rec)
-                    : (Response.Fail(result.ErrorCode!, result.ErrorMessage!, "request"), rec);
+                    : (Response.Fail(result.ErrorCode!, result.ErrorMessage!, ErrorTypes.Request), rec);
             }
         }
     }
@@ -580,7 +580,7 @@ public static class RequestHandler
         if (!TryGetString(attrs, "dest_subpath", out var destSubpath)
             || !TryGetString(attrs, "dest_shortname", out var destShortname))
             return (Response.Fail(InternalErrorCode.MISSING_DESTINATION_OR_SHORTNAME,
-                "move requires dest_subpath and dest_shortname", "request"), rec);
+                "move requires dest_subpath and dest_shortname", ErrorTypes.Request), rec);
 
         // Python supports cross-space move via src_space_name / dest_space_name.
         var srcSpace = TryGetString(attrs, "src_space_name", out var ss) && ss is not null ? ss : space;
@@ -591,7 +591,7 @@ public static class RequestHandler
         var result = await entries.MoveAsync(locator, to, actor, ct);
         return result.IsOk
             ? (Response.Ok(), rec with { Subpath = to.Subpath, Shortname = to.Shortname })
-            : (Response.Fail(result.ErrorCode!, result.ErrorMessage!, "request"), rec);
+            : (Response.Fail(result.ErrorCode!, result.ErrorMessage!, ErrorTypes.Request), rec);
     }
 
     // ============================================================================
@@ -609,7 +609,7 @@ public static class RequestHandler
         var result = await entries.UpdateAsync(locator, patch, actor, ct);
         return result.IsOk
             ? (Response.Ok(), rec with { Uuid = result.Value!.Uuid })
-            : (Response.Fail(result.ErrorCode!, result.ErrorMessage!, "request"), rec);
+            : (Response.Fail(result.ErrorCode!, result.ErrorMessage!, ErrorTypes.Request), rec);
     }
 
     // ============================================================================
@@ -626,7 +626,7 @@ public static class RequestHandler
         var result = await entries.UpdateAsync(locator, patch, actor, ct);
         return result.IsOk
             ? (Response.Ok(), rec with { Uuid = result.Value!.Uuid })
-            : (Response.Fail(result.ErrorCode!, result.ErrorMessage!, "request"), rec);
+            : (Response.Fail(result.ErrorCode!, result.ErrorMessage!, ErrorTypes.Request), rec);
     }
 
     // ============================================================================

@@ -9,5 +9,5 @@ public static class ValidateHandler
         g.MapPost("/validate", async (string payload, QrService qr, CancellationToken ct)
             => await qr.ValidateAsync(payload, ct)
                 ? Response.Ok()
-                : Response.Fail(InternalErrorCode.QR_INVALID, "qr payload could not be validated", "qr"));
+                : Response.Fail(InternalErrorCode.QR_INVALID, "qr payload could not be validated", ErrorTypes.Qr));
 }

@@ -21,10 +21,10 @@ public static class QueryHandler
             catch (JsonException ex)
             {
                 return Response.Fail(InternalErrorCode.INVALID_DATA,
-                    $"invalid Query JSON: {ex.Message}", "request");
+                    $"invalid Query JSON: {ex.Message}", ErrorTypes.Request);
             }
             if (q is null)
-                return Response.Fail(InternalErrorCode.INVALID_DATA, "empty body", "request");
+                return Response.Fail(InternalErrorCode.INVALID_DATA, "empty body", ErrorTypes.Request);
             return await svc.ExecuteAsync(q, actor: null, ct);
         });
 
@@ -37,7 +37,7 @@ public static class QueryHandler
         {
             if (!Enum.TryParse<Dmart.Models.Enums.QueryType>(type, ignoreCase: true, out var qt))
                 return Response.Fail(InternalErrorCode.NOT_SUPPORTED_TYPE,
-                    $"unknown query type: {type}", "request");
+                    $"unknown query type: {type}", ErrorTypes.Request);
             var q = new Query
             {
                 Type = qt,

@@ -24,7 +24,7 @@ public static class SubmitHandler
             {
                 if (!Enum.TryParse<ResourceType>(resource_type, true, out var rt))
                     return Response.Fail(InternalErrorCode.NOT_SUPPORTED_TYPE,
-                        "unknown resource type", "request");
+                        "unknown resource type", ErrorTypes.Request);
                 return await SubmitAsync(space, rt, schema, subpath, workflow: null, req, entries, settings, ct);
             });
 
@@ -34,7 +34,7 @@ public static class SubmitHandler
             {
                 if (!Enum.TryParse<ResourceType>(resource_type, true, out var rt))
                     return Response.Fail(InternalErrorCode.NOT_SUPPORTED_TYPE,
-                        "unknown resource type", "request");
+                        "unknown resource type", ErrorTypes.Request);
                 return await SubmitAsync(space, rt, schema, subpath, workflow, req, entries, settings, ct);
             });
     }
@@ -51,7 +51,7 @@ public static class SubmitHandler
             var key = $"{space}.{schema}";
             if (!pairs.Contains(key, StringComparer.OrdinalIgnoreCase))
                 return Response.Fail(InternalErrorCode.NOT_ALLOWED,
-                    $"submit not allowed for {key}", "auth");
+                    $"submit not allowed for {key}", ErrorTypes.Auth);
         }
 
         // Read the body as a raw JsonElement so we can carry it into Payload.Body losslessly.

@@ -17,7 +17,7 @@ public static class ProgressTicketHandler
                 var parts = RouteParts.SplitProgressTicketParts(rest);
                 if (parts is null)
                     return Response.Fail(InternalErrorCode.MISSING_DATA,
-                        "expected /progress-ticket/{space}/{subpath}/{shortname}/{action}", "request");
+                        "expected /progress-ticket/{space}/{subpath}/{shortname}/{action}", ErrorTypes.Request);
                 var (subpath, shortname, action) = parts.Value;
                 return await wf.ProgressAsync(
                     new Locator(ResourceType.Ticket, space, subpath, shortname),

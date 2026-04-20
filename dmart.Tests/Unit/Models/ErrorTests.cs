@@ -37,7 +37,7 @@ public class ErrorTests
     [Fact]
     public void Response_Fail_Builds_Failed_Status_With_Error()
     {
-        var resp = Response.Fail(InternalErrorCode.OTP_INVALID, "code mismatch", "auth");
+        var resp = Response.Fail(InternalErrorCode.OTP_INVALID, "code mismatch", ErrorTypes.Auth);
         resp.Status.ShouldBe(Status.Failed);
         resp.Error.ShouldNotBeNull();
         resp.Error!.Code.ShouldBe(InternalErrorCode.OTP_INVALID);
@@ -47,7 +47,7 @@ public class ErrorTests
     [Fact]
     public void Response_Fail_Accepts_Int_Code_Directly()
     {
-        var resp = Response.Fail(InternalErrorCode.LOCKED_ENTRY, "already locked", "db");
+        var resp = Response.Fail(InternalErrorCode.LOCKED_ENTRY, "already locked", ErrorTypes.Db);
         resp.Status.ShouldBe(Status.Failed);
         resp.Error!.Code.ShouldBe(InternalErrorCode.LOCKED_ENTRY);  // == 31
         resp.Error.Code.ShouldBe(31);

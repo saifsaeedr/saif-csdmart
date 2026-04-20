@@ -16,10 +16,10 @@ public static class LockHandler
                    LockService svc, HttpContext http, CancellationToken ct) =>
             {
                 if (!Enum.TryParse<ResourceType>(resource_type, true, out var rt))
-                    return Response.Fail(InternalErrorCode.NOT_SUPPORTED_TYPE, "unknown resource type", "request");
+                    return Response.Fail(InternalErrorCode.NOT_SUPPORTED_TYPE, "unknown resource type", ErrorTypes.Request);
                 var (subpath, shortname) = RouteParts.SplitSubpathAndShortname(rest);
                 if (string.IsNullOrEmpty(shortname))
-                    return Response.Fail(InternalErrorCode.MISSING_DATA, "shortname required", "request");
+                    return Response.Fail(InternalErrorCode.MISSING_DATA, "shortname required", ErrorTypes.Request);
                 return await svc.LockAsync(new Locator(rt, space, subpath, shortname),
                     http.Actor(), ct);
             });
@@ -31,7 +31,7 @@ public static class LockHandler
             {
                 var (subpath, shortname) = RouteParts.SplitSubpathAndShortname(rest);
                 if (string.IsNullOrEmpty(shortname))
-                    return Response.Fail(InternalErrorCode.MISSING_DATA, "shortname required", "request");
+                    return Response.Fail(InternalErrorCode.MISSING_DATA, "shortname required", ErrorTypes.Request);
                 return await svc.UnlockAsync(
                     new Locator(ResourceType.Content, space, subpath, shortname),
                     http.Actor(), ct);

@@ -23,7 +23,7 @@ public static class ExecuteTaskHandler
             {
                 if (!string.Equals(task_type, "query", StringComparison.OrdinalIgnoreCase))
                     return Response.Fail(InternalErrorCode.NOT_SUPPORTED_TYPE,
-                        $"unknown task type '{task_type}'", "request");
+                        $"unknown task type '{task_type}'", ErrorTypes.Request);
 
                 Dictionary<string, object>? body = null;
                 try
@@ -38,13 +38,13 @@ public static class ExecuteTaskHandler
 
                 if (string.IsNullOrEmpty(taskShortname))
                     return Response.Fail(InternalErrorCode.MISSING_DATA,
-                        "task shortname required in body", "request");
+                        "task shortname required in body", ErrorTypes.Request);
 
                 // dmart treats tasks as Content entries with a Query in payload.body.
                 var taskEntry = await entries.GetAsync(space_name, taskSubpath, taskShortname, ResourceType.Content, ct);
                 if (taskEntry?.Payload?.Body is null)
                     return Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST,
-                        $"task '{taskShortname}' not found at {space_name}{taskSubpath}", "request");
+                        $"task '{taskShortname}' not found at {space_name}{taskSubpath}", ErrorTypes.Request);
 
                 Query? query;
                 try
@@ -55,10 +55,10 @@ public static class ExecuteTaskHandler
                 catch (JsonException ex)
                 {
                     return Response.Fail(InternalErrorCode.INVALID_DATA,
-                        $"task body is not a valid Query: {ex.Message}", "request");
+                        $"task body is not a valid Query: {ex.Message}", ErrorTypes.Request);
                 }
                 if (query is null)
-                    return Response.Fail(InternalErrorCode.INVALID_DATA, "task body is empty", "request");
+                    return Response.Fail(InternalErrorCode.INVALID_DATA, "task body is empty", ErrorTypes.Request);
 
                 // Apply caller-provided overrides (e.g. limit, offset, search) onto the
                 // saved query before executing.

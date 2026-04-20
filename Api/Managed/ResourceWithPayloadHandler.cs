@@ -48,14 +48,14 @@ public static class ResourceWithPayloadHandler
                                   HttpRequest req, CsvService csv, HttpContext http, CancellationToken ct) =>
             {
                 if (!Enum.TryParse<ResourceType>(resource_type, true, out var rt))
-                    return Response.Fail(InternalErrorCode.NOT_SUPPORTED_TYPE, "unknown resource type", "request");
+                    return Response.Fail(InternalErrorCode.NOT_SUPPORTED_TYPE, "unknown resource type", ErrorTypes.Request);
                 if (!req.HasFormContentType)
-                    return Response.Fail(InternalErrorCode.INVALID_DATA, "expected multipart/form-data", "request");
+                    return Response.Fail(InternalErrorCode.INVALID_DATA, "expected multipart/form-data", ErrorTypes.Request);
 
                 var form = await req.ReadFormAsync(ct);
                 var csvFile = form.Files["resources_file"] ?? form.Files.FirstOrDefault();
                 if (csvFile is null)
-                    return Response.Fail(InternalErrorCode.MISSING_DATA, "csv file required", "request");
+                    return Response.Fail(InternalErrorCode.MISSING_DATA, "csv file required", ErrorTypes.Request);
 
                 await using var stream = csvFile.OpenReadStream();
                 return await csv.ImportAsync(space, "/" + subpath.TrimStart('/'), rt,
@@ -70,7 +70,7 @@ public static class ResourceWithPayloadHandler
         string actor, ILogger log, CancellationToken ct)
     {
         if (!req.HasFormContentType)
-            return Response.Fail(InternalErrorCode.INVALID_DATA, "expected multipart/form-data", "request");
+            return Response.Fail(InternalErrorCode.INVALID_DATA, "expected multipart/form-data", ErrorTypes.Request);
 
         var form = await req.ReadFormAsync(ct);
         var spaceName = form["space_name"].ToString();
@@ -79,11 +79,11 @@ public static class ResourceWithPayloadHandler
         var requestRecordFile = form.Files["request_record"];
 
         if (string.IsNullOrEmpty(spaceName))
-            return Response.Fail(InternalErrorCode.INVALID_SPACE_NAME, "space_name is required", "request");
+            return Response.Fail(InternalErrorCode.INVALID_SPACE_NAME, "space_name is required", ErrorTypes.Request);
         if (payloadFile is null)
-            return Response.Fail(InternalErrorCode.MISSING_DATA, "payload_file is required", "request");
+            return Response.Fail(InternalErrorCode.MISSING_DATA, "payload_file is required", ErrorTypes.Request);
         if (requestRecordFile is null)
-            return Response.Fail(InternalErrorCode.MISSING_DATA, "request_record is required", "request");
+            return Response.Fail(InternalErrorCode.MISSING_DATA, "request_record is required", ErrorTypes.Request);
 
         Record? record;
         try
@@ -93,10 +93,10 @@ public static class ResourceWithPayloadHandler
         }
         catch (JsonException)
         {
-            return Response.Fail(InternalErrorCode.INVALID_DATA, "invalid request body", "request");
+            return Response.Fail(InternalErrorCode.INVALID_DATA, "invalid request body", ErrorTypes.Request);
         }
         if (record is null)
-            return Response.Fail(InternalErrorCode.INVALID_DATA, "request_record is empty", "request");
+            return Response.Fail(InternalErrorCode.INVALID_DATA, "request_record is empty", ErrorTypes.Request);
 
         // Python: shortname "auto" → generate from UUID first 8 chars.
         record = RequestHandler.ResolveAutoShortname(record);
@@ -113,11 +113,11 @@ public static class ResourceWithPayloadHandler
 
         const int MaxPayloadSize = 50 * 1024 * 1024; // 50 MB
         if (fileBytes.Length > MaxPayloadSize)
-            return Response.Fail(InternalErrorCode.INVALID_DATA, $"payload file exceeds {MaxPayloadSize / (1024 * 1024)}MB limit", "request");
+            return Response.Fail(InternalErrorCode.INVALID_DATA, $"payload file exceeds {MaxPayloadSize / (1024 * 1024)}MB limit", ErrorTypes.Request);
 
         var checksum = Convert.ToHexString(SHA256.HashData(fileBytes)).ToLowerInvariant();
         if (!string.IsNullOrEmpty(sha) && !string.Equals(sha, checksum, StringComparison.OrdinalIgnoreCase))
-            return Response.Fail(InternalErrorCode.INVALID_DATA, "the provided file doesn't match the sha", "request");
+            return Response.Fail(InternalErrorCode.INVALID_DATA, "the provided file doesn't match the sha", ErrorTypes.Request);
 
         var ext = (Path.GetExtension(payloadFile.FileName) ?? "").TrimStart('.').ToLowerInvariant();
         var resourceContentType = InferContentType(payloadFile.ContentType, ext);
@@ -170,7 +170,7 @@ public static class ResourceWithPayloadHandler
             log.LogError(ex, "failed to save attachment {Space}/{Subpath}/{Shortname}",
                 spaceName, record.Subpath, record.Shortname);
             return Response.Fail(InternalErrorCode.OBJECT_NOT_SAVED,
-                "failed to save attachment", "attachment");
+                "failed to save attachment", ErrorTypes.Attachment);
         }
 
         return Response.Ok(records: new[] { record with { Uuid = attachment.Uuid } });
@@ -192,7 +192,7 @@ public static class ResourceWithPayloadHandler
         catch (JsonException)
         {
             return Response.Fail(InternalErrorCode.INVALID_DATA,
-                "invalid request body", "request");
+                "invalid request body", ErrorTypes.Request);
         }
 
         // Mirrors Python's api/managed/utils.py::create_or_update_resource_with_payload_handler

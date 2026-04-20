@@ -65,7 +65,7 @@ public sealed class QueryService(
         q = q with { Limit = limit };
 
         if (string.IsNullOrEmpty(q.SpaceName))
-            return Response.Fail(InternalErrorCode.INVALID_DATA, "space_name is required", "request");
+            return Response.Fail(InternalErrorCode.INVALID_DATA, "space_name is required", ErrorTypes.Request);
 
         return q.Type switch
         {
@@ -78,7 +78,7 @@ public sealed class QueryService(
             QueryType.Counters => await QueryCountersAsync(q, actor, ct),
             QueryType.Events => Response.Fail(InternalErrorCode.NOT_SUPPORTED_TYPE,
                 "events query is Python-only (reads spaces_folder/<space>/.dm/events.jsonl from disk); the C# port keeps all data in PostgreSQL",
-                "request"),
+                ErrorTypes.Request),
             _ => await DispatchTableQuery(q, actor, ct),
         };
     }
@@ -117,7 +117,7 @@ public sealed class QueryService(
         if (!string.Equals(q.SpaceName, managementSpace, StringComparison.Ordinal) || normalizedSubpath != "/")
             return Response.Fail(InternalErrorCode.INVALID_DATA,
                 $"spaces query requires space_name=\"{managementSpace}\" and subpath=\"/\"",
-                "request");
+                ErrorTypes.Request);
 
         var all = await spaces.ListAsync(ct);
         // Batched: walk the user's permissions ONCE and intersect with the space
@@ -219,7 +219,7 @@ public sealed class QueryService(
         // Python blocks anonymous users for history queries.
         if (actor is null)
             return Response.Fail(InternalErrorCode.NOT_AUTHENTICATED,
-                "history queries require authentication", "auth");
+                "history queries require authentication", ErrorTypes.Auth);
 
         if (!await CanQueryAsync(actor, ResourceType.Content, q.SpaceName, q.Subpath ?? "/", ct))
             return EmptyQueryResponse();
@@ -358,7 +358,7 @@ public sealed class QueryService(
 
         if (q.AggregationData is null)
             return Response.Fail(InternalErrorCode.MISSING_DATA,
-                "aggregation_data required for aggregation queries", "request");
+                "aggregation_data required for aggregation queries", ErrorTypes.Request);
 
         var rows = await QueryHelper.RunAggregationAsync(db, tableName, q, ct);
 

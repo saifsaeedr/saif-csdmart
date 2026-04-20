@@ -7,6 +7,7 @@ using Dmart.Auth;
 using Dmart.Config;
 using Dmart.DataAdapters.Sql;
 using Dmart.Middleware;
+using Dmart.Models.Api;
 using Dmart.Models.Json;
 using Dmart.Plugins;
 using Dmart.Plugins.BuiltIn;
@@ -853,7 +854,7 @@ app.Use(async (ctx, next) =>
             ctx.Response.ContentType = "application/json";
             var body = Dmart.Models.Api.Response.Fail(
                 Dmart.Models.Api.InternalErrorCode.SOMETHING_WRONG,
-                $"An internal error occurred. Reference: {cid}", "exception");
+                $"An internal error occurred. Reference: {cid}", ErrorTypes.Exception);
             await ctx.Response.WriteAsJsonAsync(body, DmartJsonContext.Default.Response);
         }
     }
@@ -910,7 +911,7 @@ app.UseDmartResponseHeaders();
             var body = Dmart.Models.Api.Response.Fail(
                 Dmart.Models.Api.InternalErrorCode.INVALID_ROUTE,
                 $"Route not found: {ctx.Request.Method} {ctx.Request.Path}",
-                "request");
+                ErrorTypes.Request);
             ctx.Response.StatusCode = 422;
             await ctx.Response.WriteAsJsonAsync(body, Dmart.Models.Json.DmartJsonContext.Default.Response);
         }

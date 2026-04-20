@@ -40,19 +40,19 @@ public static class EntryHandler
                 // body (matches Python api.Error bindings + existing tests).
                 static IResult NotFoundMedia() => Results.Json(
                     Response.Fail(InternalErrorCode.OBJECT_NOT_FOUND,
-                        "Request object is not available", "media"),
+                        "Request object is not available", ErrorTypes.Media),
                     DmartJsonContext.Default.Response, statusCode: 404);
 
                 if (!Enum.TryParse<ResourceType>(resource_type, true, out var rt))
                     return Results.Json(
                         Response.Fail(InternalErrorCode.INVALID_DATA,
-                            $"invalid resource_type '{resource_type}'", "request"),
+                            $"invalid resource_type '{resource_type}'", ErrorTypes.Request),
                         DmartJsonContext.Default.Response, statusCode: 400);
                 var (subpath, shortname) = RouteParts.SplitSubpathAndShortname(rest);
                 if (string.IsNullOrEmpty(shortname))
                     return Results.Json(
                         Response.Fail(InternalErrorCode.INVALID_DATA,
-                            "shortname required", "request"),
+                            "shortname required", ErrorTypes.Request),
                         DmartJsonContext.Default.Response, statusCode: 400);
 
                 var actor = http.Actor();

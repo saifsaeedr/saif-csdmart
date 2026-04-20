@@ -49,11 +49,11 @@ public sealed class UserService(
         var s = settings.Value;
         if (!s.IsRegistrable)
             return Result<(User, string, string)>.Fail(
-                InternalErrorCode.SESSION, "Register API is disabled", "create");
+                InternalErrorCode.SESSION, "Register API is disabled", ErrorTypes.Create);
 
         if (string.IsNullOrWhiteSpace(rec.Shortname))
             return Result<(User, string, string)>.Fail(
-                InternalErrorCode.INVALID_IDENTIFIER, "shortname required", "request");
+                InternalErrorCode.INVALID_IDENTIFIER, "shortname required", ErrorTypes.Request);
 
         var attrs = rec.Attributes ?? new();
         var email = ConvertToString(attrs.GetValueOrDefault("email"))?.ToLowerInvariant();
@@ -75,11 +75,11 @@ public sealed class UserService(
             validationMessage = "password dose not match required rules";
         if (validationMessage is not null)
             return Result<(User, string, string)>.Fail(
-                InternalErrorCode.SESSION, validationMessage, "create");
+                InternalErrorCode.SESSION, validationMessage, ErrorTypes.Create);
 
         if (await users.ExistsAsync(rec.Shortname, email, msisdn, ct))
             return Result<(User, string, string)>.Fail(
-                InternalErrorCode.SHORTNAME_ALREADY_EXIST, "user already exists", "db");
+                InternalErrorCode.SHORTNAME_ALREADY_EXIST, "user already exists", ErrorTypes.Db);
 
         // OTP verification (Python uses verify_user = peek; OTP is NOT consumed
         // so a subsequent /otp-confirm can still use it). Skipped entirely when
@@ -94,7 +94,7 @@ public sealed class UserService(
                 var stored = await otp.GetCodeAsync(msisdn, ct);
                 if (stored is null || stored != msisdnOtp)
                     return Result<(User, string, string)>.Fail(
-                        InternalErrorCode.SESSION, "Invalid MSISDN OTP", "create");
+                        InternalErrorCode.SESSION, "Invalid MSISDN OTP", ErrorTypes.Create);
             }
             msisdnVerified = true;
         }
@@ -105,7 +105,7 @@ public sealed class UserService(
                 var stored = await otp.GetCodeAsync(email, ct);
                 if (stored is null || stored != emailOtp)
                     return Result<(User, string, string)>.Fail(
-                        InternalErrorCode.SESSION, "Invalid Email OTP", "create");
+                        InternalErrorCode.SESSION, "Invalid Email OTP", ErrorTypes.Create);
             }
             emailVerified = true;
         }
@@ -235,7 +235,7 @@ public sealed class UserService(
         var user = await ResolveUserAsync(req, ct);
         if (user is null)
             return Result<(string, string, User)>.Fail(
-                InternalErrorCode.USERNAME_NOT_EXIST, "Invalid username or password", "auth");
+                InternalErrorCode.USERNAME_NOT_EXIST, "Invalid username or password", ErrorTypes.Auth);
 
         // Pre-check: attempt_count >= max means a prior run of
         // HandleFailedLoginAttemptAsync already locked the account (or an
@@ -246,7 +246,7 @@ public sealed class UserService(
         if (maxAttempts > 0 && user.AttemptCount is int count && count >= maxAttempts)
             return Result<(string, string, User)>.Fail(
                 InternalErrorCode.USER_ACCOUNT_LOCKED,
-                "Account has been locked due to too many failed login attempts.", "auth");
+                "Account has been locked due to too many failed login attempts.", ErrorTypes.Auth);
 
         if (RejectIfNotActive(user) is { } inactiveReject) return inactiveReject;
 
@@ -257,9 +257,9 @@ public sealed class UserService(
             return locked
                 ? Result<(string, string, User)>.Fail(
                     InternalErrorCode.USER_ACCOUNT_LOCKED,
-                    "Account has been locked due to too many failed login attempts.", "auth")
+                    "Account has been locked due to too many failed login attempts.", ErrorTypes.Auth)
                 : Result<(string, string, User)>.Fail(
-                    InternalErrorCode.PASSWORD_NOT_VALIDATED, "Invalid username or password", "auth");
+                    InternalErrorCode.PASSWORD_NOT_VALIDATED, "Invalid username or password", ErrorTypes.Auth);
         }
 
         // Device lock check — applies regardless of user type.
@@ -268,7 +268,7 @@ public sealed class UserService(
         {
             return Result<(string, string, User)>.Fail(
                 InternalErrorCode.USER_ACCOUNT_LOCKED,
-                "This account is locked to a unique device !", "auth");
+                "This account is locked to a unique device !", ErrorTypes.Auth);
         }
         // New device detection for mobile users (OTP required). Python uses
         // OTP_NEEDED (115) — clients inspect the numeric code to route the
@@ -303,7 +303,7 @@ public sealed class UserService(
         var user = await ResolveUserAsync(req, ct);
         if (user is null)
             return Result<(string, string, User)>.Fail(
-                InternalErrorCode.USERNAME_NOT_EXIST, "Invalid username or password", "auth");
+                InternalErrorCode.USERNAME_NOT_EXIST, "Invalid username or password", ErrorTypes.Auth);
         if (RejectIfNotActive(user) is { } inactiveReject) return inactiveReject;
 
         // Validate OTP code.
@@ -317,7 +317,7 @@ public sealed class UserService(
         if (string.IsNullOrEmpty(dest) || string.IsNullOrEmpty(req.Otp)
             || !await otp.VerifyAndConsumeAsync(dest, req.Otp, ct))
             return Result<(string, string, User)>.Fail(
-                InternalErrorCode.OTP_INVALID, "Wrong OTP", "auth");
+                InternalErrorCode.OTP_INVALID, "Wrong OTP", ErrorTypes.Auth);
 
         // Python also optionally verifies password if provided alongside OTP.
         if (!string.IsNullOrEmpty(req.Password)
@@ -325,7 +325,7 @@ public sealed class UserService(
             && !hasher.Verify(req.Password, user.Password))
         {
             return Result<(string, string, User)>.Fail(
-                InternalErrorCode.PASSWORD_NOT_VALIDATED, "Invalid username or password", "auth");
+                InternalErrorCode.PASSWORD_NOT_VALIDATED, "Invalid username or password", ErrorTypes.Auth);
         }
 
         return await ProcessLoginAsync(user, req, requestHeaders, ct);
@@ -351,23 +351,23 @@ public sealed class UserService(
         // can distinguish token problems from plain auth failures.
         if (string.IsNullOrWhiteSpace(req.Invitation))
             return Result<(string, string, User)>.Fail(
-                InternalErrorCode.INVALID_INVITATION, "Expired or invalid invitation", "jwtauth");
+                InternalErrorCode.INVALID_INVITATION, "Expired or invalid invitation", ErrorTypes.JwtAuth);
 
         if (!invitationJwt.TryVerify(req.Invitation, out var shortname, out var channel))
             return Result<(string, string, User)>.Fail(
-                InternalErrorCode.INVALID_INVITATION, "Expired or invalid invitation", "jwtauth");
+                InternalErrorCode.INVALID_INVITATION, "Expired or invalid invitation", ErrorTypes.JwtAuth);
 
         // DB row is the single-use enforcement — a consumed or never-minted
         // JWT is rejected even if the signature and expiry check out.
         var storedValue = await invitations.GetValueAsync(req.Invitation, ct);
         if (storedValue is null)
             return Result<(string, string, User)>.Fail(
-                InternalErrorCode.INVALID_INVITATION, "Expired or invalid invitation", "jwtauth");
+                InternalErrorCode.INVALID_INVITATION, "Expired or invalid invitation", ErrorTypes.JwtAuth);
 
         var user = await users.GetByShortnameAsync(shortname, ct);
         if (user is null)
             return Result<(string, string, User)>.Fail(
-                InternalErrorCode.INVALID_INVITATION, "Expired or invalid invitation", "jwtauth");
+                InternalErrorCode.INVALID_INVITATION, "Expired or invalid invitation", ErrorTypes.JwtAuth);
         if (RejectIfNotActive(user) is { } inactiveReject) return inactiveReject;
 
         // Optional body-level cross-check: if the client passed shortname/email/msisdn
@@ -379,7 +379,7 @@ public sealed class UserService(
         var anyProvided = req.Shortname is not null || req.Email is not null || req.Msisdn is not null;
         if (anyProvided && !anyMatch)
             return Result<(string, string, User)>.Fail(
-                InternalErrorCode.INVALID_INVITATION, "Invalid invitation or data provided", "jwtauth");
+                InternalErrorCode.INVALID_INVITATION, "Invalid invitation or data provided", ErrorTypes.JwtAuth);
 
         // Device lock checks — same enforcement as password login.
         if (user.LockedToDevice && !string.IsNullOrEmpty(user.DeviceId)
@@ -387,7 +387,7 @@ public sealed class UserService(
         {
             return Result<(string, string, User)>.Fail(
                 InternalErrorCode.USER_ACCOUNT_LOCKED,
-                "This account is locked to a unique device !", "auth");
+                "This account is locked to a unique device !", ErrorTypes.Auth);
         }
 
         var updated = user with
@@ -417,7 +417,7 @@ public sealed class UserService(
         => user.IsActive
             ? null
             : Result<(string, string, User)>.Fail(
-                InternalErrorCode.USER_ISNT_VERIFIED, "This user is not verified", "auth");
+                InternalErrorCode.USER_ISNT_VERIFIED, "This user is not verified", ErrorTypes.Auth);
 
     private async Task<bool> HandleFailedLoginAttemptAsync(User user, CancellationToken ct)
     {
@@ -521,7 +521,7 @@ public sealed class UserService(
         var user = await users.GetByShortnameAsync(shortname, ct);
         if (user is null)
             return Result<User>.Fail(
-                InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "user missing", "db");
+                InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "user missing", ErrorTypes.Db);
 
         // Reject patches targeting protected payload fields.
         var protectedCsv = settings.Value.UserProfilePayloadProtectedFields;
@@ -533,7 +533,7 @@ public sealed class UserService(
                 if (protectedFields.Contains(key, StringComparer.OrdinalIgnoreCase))
                     return Result<User>.Fail(
                         InternalErrorCode.PROTECTED_FIELD,
-                        $"field '{key}' is protected and cannot be updated", "request");
+                        $"field '{key}' is protected and cannot be updated", ErrorTypes.Request);
             }
         }
 
@@ -546,7 +546,7 @@ public sealed class UserService(
             // the PASSWORD regex with INVALID_PASSWORD_RULES under type=jwtauth.
             if (!string.IsNullOrEmpty(newPw) && !Auth.PasswordRules.IsValid(newPw))
                 return Result<User>.Fail(
-                    InternalErrorCode.INVALID_PASSWORD_RULES, "Invalid username or password", "jwtauth");
+                    InternalErrorCode.INVALID_PASSWORD_RULES, "Invalid username or password", ErrorTypes.JwtAuth);
             if (!user.ForcePasswordChange)
             {
                 // Python parity (api/user/router.py:665-682, set_user_profile):
@@ -557,11 +557,11 @@ public sealed class UserService(
                 if (!patch.TryGetValue("old_password", out var oldPwObj) || oldPwObj is null)
                     return Result<User>.Fail(
                         InternalErrorCode.PASSWORD_RESET_ERROR,
-                        "Wrong password have been provided!", "auth");
+                        "Wrong password have been provided!", ErrorTypes.Auth);
                 if (string.IsNullOrEmpty(user.Password) || !hasher.Verify(oldPwObj.ToString()!, user.Password))
                     return Result<User>.Fail(
                         InternalErrorCode.UNMATCHED_DATA,
-                        "mismatch with the information provided", "request");
+                        "mismatch with the information provided", ErrorTypes.Request);
             }
             newPasswordHash = string.IsNullOrEmpty(newPw) ? null : hasher.Hash(newPw!);
         }

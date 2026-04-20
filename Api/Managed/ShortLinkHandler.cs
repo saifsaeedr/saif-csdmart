@@ -25,7 +25,7 @@ public static class ShortLinkHandler
         {
             var parts = rest.Split('/');
             if (parts.Length < 1)
-                return Response.Fail(InternalErrorCode.MISSING_DATA, "shortname required", "request");
+                return Response.Fail(InternalErrorCode.MISSING_DATA, "shortname required", ErrorTypes.Request);
             var shortname = parts[^1];
             var subpath = parts.Length > 1 ? string.Join("/", parts[..^1]) : "/";
             var token = Guid.NewGuid().ToString("N")[..8];

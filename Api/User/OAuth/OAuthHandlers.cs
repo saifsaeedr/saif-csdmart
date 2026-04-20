@@ -216,6 +216,6 @@ public static class OAuthHandlers
 
     private static IResult ProviderError(string message) =>
         Results.Json(
-            Response.Fail(InternalErrorCode.INVALID_DATA, message, "auth"),
+            Response.Fail(InternalErrorCode.INVALID_DATA, message, ErrorTypes.Auth),
             DmartJsonContext.Default.Response, statusCode: 401);
 }

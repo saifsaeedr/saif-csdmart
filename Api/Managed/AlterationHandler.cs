@@ -35,16 +35,16 @@ public static class AlterationHandler
                 }
                 if (alteration?.Payload?.Body is null)
                     return Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST,
-                        $"alteration '{alteration_name}' not found", "request");
+                        $"alteration '{alteration_name}' not found", ErrorTypes.Request);
 
                 var bodyJson = JsonSerializer.Serialize(alteration.Payload.Body!.Value, DmartJsonContext.Default.JsonElement);
                 using var doc = JsonDocument.Parse(bodyJson);
                 var root = doc.RootElement;
 
                 if (!root.TryGetProperty("target_query", out var qEl) || qEl.ValueKind != JsonValueKind.Object)
-                    return Response.Fail(InternalErrorCode.MISSING_DATA, "alteration body missing target_query", "request");
+                    return Response.Fail(InternalErrorCode.MISSING_DATA, "alteration body missing target_query", ErrorTypes.Request);
                 if (!root.TryGetProperty("patch", out var patchEl) || patchEl.ValueKind != JsonValueKind.Object)
-                    return Response.Fail(InternalErrorCode.MISSING_DATA, "alteration body missing patch", "request");
+                    return Response.Fail(InternalErrorCode.MISSING_DATA, "alteration body missing patch", ErrorTypes.Request);
 
                 Query? query;
                 try
@@ -53,10 +53,10 @@ public static class AlterationHandler
                 }
                 catch (JsonException)
                 {
-                    return Response.Fail(InternalErrorCode.INVALID_DATA, "invalid request body", "request");
+                    return Response.Fail(InternalErrorCode.INVALID_DATA, "invalid request body", ErrorTypes.Request);
                 }
                 if (query is null)
-                    return Response.Fail(InternalErrorCode.MISSING_DATA, "target_query empty", "request");
+                    return Response.Fail(InternalErrorCode.MISSING_DATA, "target_query empty", ErrorTypes.Request);
 
                 var patchDict = JsonElementToDict(patchEl);
 

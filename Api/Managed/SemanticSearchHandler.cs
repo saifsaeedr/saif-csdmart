@@ -33,13 +33,13 @@ public static class SemanticSearchHandler
                 catch (JsonException ex)
                 {
                     return Response.Fail(InternalErrorCode.INVALID_DATA,
-                        $"invalid request body: {ex.Message}", "request");
+                        $"invalid request body: {ex.Message}", ErrorTypes.Request);
                 }
                 using var _ = doc;
                 var root = doc.RootElement;
                 if (root.ValueKind != JsonValueKind.Object)
                     return Response.Fail(InternalErrorCode.INVALID_DATA,
-                        "expected object body", "request");
+                        "expected object body", ErrorTypes.Request);
 
                 string? query = null;
                 string? space = null;
@@ -81,7 +81,7 @@ public static class SemanticSearchHandler
 
                 if (string.IsNullOrEmpty(query))
                     return Response.Fail(InternalErrorCode.MISSING_DATA,
-                        "`query` is required", "request");
+                        "`query` is required", ErrorTypes.Request);
 
                 return await svc.SearchAsync(query, space, subpath, types, limit,
                     http.Actor(), ct);

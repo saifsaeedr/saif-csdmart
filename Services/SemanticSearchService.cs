@@ -37,24 +37,24 @@ public sealed class SemanticSearchService(
     {
         if (string.IsNullOrWhiteSpace(query))
             return Response.Fail(InternalErrorCode.MISSING_DATA,
-                "semantic_search requires a non-empty `query`", "request");
+                "semantic_search requires a non-empty `query`", ErrorTypes.Request);
 
         // Specific diagnostic per missing piece so operators don't have to
         // guess which side of the pairing isn't wired yet.
         if (!embeddings.IsProviderConfigured)
             return Response.Fail(InternalErrorCode.NOT_SUPPORTED_TYPE,
                 "semantic search not configured — set EMBEDDING_API_URL (and EMBEDDING_API_KEY) in config.env",
-                "request");
+                ErrorTypes.Request);
         if (!await embeddings.IsPgVectorAvailableAsync(ct))
             return Response.Fail(InternalErrorCode.NOT_SUPPORTED_TYPE,
                 "semantic search not available — pgvector extension is not installed in the dmart database. " +
                 "Ask a DBA to run: CREATE EXTENSION vector",
-                "request");
+                ErrorTypes.Request);
 
         var vec = await embeddings.EmbedAsync(query, ct);
         if (vec is null)
             return Response.Fail(InternalErrorCode.SOMETHING_WRONG,
-                "embedding provider returned no vector — check logs", "internal");
+                "embedding provider returned no vector — check logs", ErrorTypes.Internal);
 
         var clampedLimit = Math.Min(Math.Max(1, limit), AbsoluteMaxLimit);
         var overFetch = clampedLimit * OverFetchMultiplier;

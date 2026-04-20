@@ -57,14 +57,14 @@ public static class OtpHandler
             var s = settings.Value;
             if (user is null && !s.IsRegistrable)
                 return Response.Fail(InternalErrorCode.USERNAME_NOT_EXIST,
-                    "No user found with the provided information", "request");
+                    "No user found with the provided information", ErrorTypes.Request);
 
             if (dest is not null)
             {
                 var since = await repo.GetCreatedSinceAsync(dest, ct);
                 if (since is int elapsed && elapsed < s.AllowOtpResendAfter)
                     return Response.Fail(InternalErrorCode.OTP_RESEND_BLOCKED,
-                        $"Resend OTP is allowed after {s.AllowOtpResendAfter - elapsed} seconds", "request");
+                        $"Resend OTP is allowed after {s.AllowOtpResendAfter - elapsed} seconds", ErrorTypes.Request);
 
                 var code = otp.Generate();
                 var expiresAt = DateTime.UtcNow.AddSeconds(s.OtpTokenTtl);
@@ -145,7 +145,7 @@ public static class OtpHandler
             var ok = await repo.VerifyAndConsumeAsync(dest, req.Code, ct);
             if (!ok)
                 return Response.Fail(InternalErrorCode.OTP_INVALID,
-                    "code mismatch or expired", "auth");
+                    "code mismatch or expired", ErrorTypes.Auth);
 
             // If the caller is authenticated, update their verified flags.
             var actor = http.Actor();

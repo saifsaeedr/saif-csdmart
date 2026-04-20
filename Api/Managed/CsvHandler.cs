@@ -22,9 +22,9 @@ public static class CsvHandler
             }
             catch (JsonException ex)
             {
-                return Results.BadRequest(Response.Fail(InternalErrorCode.INVALID_DATA, ex.Message, "request"));
+                return Results.BadRequest(Response.Fail(InternalErrorCode.INVALID_DATA, ex.Message, ErrorTypes.Request));
             }
-            if (q is null) return Results.BadRequest(Response.Fail(InternalErrorCode.MISSING_DATA, "empty body", "request"));
+            if (q is null) return Results.BadRequest(Response.Fail(InternalErrorCode.MISSING_DATA, "empty body", ErrorTypes.Request));
             var stream = await csv.ExportAsync(q, http.Actor(), ct);
             return Results.Stream(stream, "text/csv", "export.csv");
         });
@@ -43,7 +43,7 @@ public static class CsvHandler
                 }
                 catch (JsonException ex)
                 {
-                    return Results.BadRequest(Response.Fail(InternalErrorCode.INVALID_DATA, ex.Message, "request"));
+                    return Results.BadRequest(Response.Fail(InternalErrorCode.INVALID_DATA, ex.Message, ErrorTypes.Request));
                 }
                 if (q is null) q = new Query { Type = QueryType.Search, SpaceName = space_name, Subpath = "/" };
                 var stream = await csv.ExportAsync(q, http.Actor(), ct);

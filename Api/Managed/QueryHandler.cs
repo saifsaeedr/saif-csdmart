@@ -17,10 +17,10 @@ public static class QueryHandler
             }
             catch (JsonException)
             {
-                return Response.Fail(InternalErrorCode.INVALID_DATA, "invalid request body", "request");
+                return Response.Fail(InternalErrorCode.INVALID_DATA, "invalid request body", ErrorTypes.Request);
             }
             if (q is null)
-                return Response.Fail(InternalErrorCode.INVALID_DATA, "empty body", "request");
+                return Response.Fail(InternalErrorCode.INVALID_DATA, "empty body", ErrorTypes.Request);
             return await svc.ExecuteAsync(q, http.Actor(), ct);
         });
 }

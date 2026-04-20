@@ -15,7 +15,7 @@ public static class ExecuteTaskHandler
         {
             if (task_type != "query")
                 return Response.Fail(InternalErrorCode.NOT_SUPPORTED_TYPE,
-                    $"public task type '{task_type}' not supported", "request");
+                    $"public task type '{task_type}' not supported", ErrorTypes.Request);
             var adjusted = q with { SpaceName = space_name };
             return await queryService.ExecuteAsync(adjusted, null, ct);
         });

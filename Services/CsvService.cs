@@ -69,7 +69,7 @@ public sealed class CsvService(QueryService queries, EntryService entries)
         using var reader = new StreamReader(csv, Encoding.UTF8);
         var headerLine = await reader.ReadLineAsync(ct);
         if (string.IsNullOrEmpty(headerLine))
-            return Response.Fail(InternalErrorCode.MISSING_DATA, "csv has no header row", "request");
+            return Response.Fail(InternalErrorCode.MISSING_DATA, "csv has no header row", ErrorTypes.Request);
 
         var headers = ParseCsvLine(headerLine);
         var inserted = 0;

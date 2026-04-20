@@ -130,7 +130,7 @@ public static class JwtBearerSetup
 
                         ctx.Response.StatusCode = 401;
                         ctx.Response.ContentType = "application/json";
-                        var body = Response.Fail(code, message, "jwtauth");
+                        var body = Response.Fail(code, message, ErrorTypes.JwtAuth);
                         await ctx.Response.WriteAsync(
                             JsonSerializer.Serialize(body, DmartJsonContext.Default.Response));
                     },

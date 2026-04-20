@@ -29,12 +29,12 @@ public static class RegistrationHandler
             catch (JsonException ex)
             {
                 return Results.Json(
-                    Response.Fail(InternalErrorCode.INVALID_DATA, ex.Message, "request"),
+                    Response.Fail(InternalErrorCode.INVALID_DATA, ex.Message, ErrorTypes.Request),
                     DmartJsonContext.Default.Response, statusCode: 400);
             }
             if (record is null)
                 return Results.Json(
-                    Response.Fail(InternalErrorCode.INVALID_DATA, "missing body", "request"),
+                    Response.Fail(InternalErrorCode.INVALID_DATA, "missing body", ErrorTypes.Request),
                     DmartJsonContext.Default.Response, statusCode: 400);
 
             // Python strips authorization/cookie from request_headers before
