@@ -549,10 +549,15 @@ public class PermissionServiceIntegrationTests : IClassFixture<DmartFactory>
         if (!DmartFactory.HasPg) return;
         var (perms, users, access) = Resolve();
 
-        // Guarantee a clean slate — remove any stray anonymous/world rows.
+        // Guarantee a clean slate — strip anonymous's roles and remove the
+        // world permission so the null-actor lookup sees no grants. We
+        // deliberately DON'T delete the anonymous user row: on a dev DB
+        // that's been used for real work, existing entries.owner_shortname
+        // FKs block the delete (CI's fresh DB doesn't hit this).
         var priorAnon = await users.GetByShortnameAsync("anonymous");
         var priorWorld = await access.GetPermissionAsync("world");
-        if (priorAnon is not null) await users.DeleteAsync("anonymous");
+        if (priorAnon is not null)
+            await users.UpsertAsync(priorAnon with { Roles = new(), Groups = new() });
         if (priorWorld is not null) await access.DeletePermissionAsync("world");
         await access.InvalidateAllCachesAsync();
 
@@ -683,6 +688,13 @@ public class PermissionServiceIntegrationTests : IClassFixture<DmartFactory>
         var roleName = $"itest_role_ha_{Guid.NewGuid():N}".Substring(0, 24);
         var userName = $"itest_user_ha_{Guid.NewGuid():N}".Substring(0, 24);
 
+        // The null-actor assertion below assumes no world permission grants
+        // access to "test". On a dev DB with an existing world permission
+        // that does, it fails. Strip anonymous's roles for the duration.
+        var priorAnon = await users.GetByShortnameAsync("anonymous");
+        if (priorAnon is not null)
+            await users.UpsertAsync(priorAnon with { Roles = new(), Groups = new() });
+
         try
         {
             // Permission only covers "test" space with resource_type "content" — no "space".
@@ -712,6 +724,8 @@ public class PermissionServiceIntegrationTests : IClassFixture<DmartFactory>
         finally
         {
             await CleanupUserAsync(users, access, userName, roleName, permName);
+            if (priorAnon is not null) await users.UpsertAsync(priorAnon);
+            await access.InvalidateAllCachesAsync();
         }
     }
 }

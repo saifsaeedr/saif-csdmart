@@ -76,7 +76,9 @@ public sealed class QueryService(
             QueryType.Aggregation => await QueryAggregationAsync(q, actor, "entries", ct),
             QueryType.AttachmentsAggregation => await QueryAggregationAsync(q, actor, "attachments", ct),
             QueryType.Counters => await QueryCountersAsync(q, actor, ct),
-            QueryType.Events => await QueryEventsAsync(q, actor, ct),
+            QueryType.Events => Response.Fail(InternalErrorCode.NOT_SUPPORTED_TYPE,
+                "events query is Python-only (reads spaces_folder/<space>/.dm/events.jsonl from disk); the C# port keeps all data in PostgreSQL",
+                "request"),
             _ => await DispatchTableQuery(q, actor, ct),
         };
     }
@@ -446,69 +448,6 @@ public sealed class QueryService(
         return Response.Ok(Array.Empty<Record>(), new() { ["total"] = total, ["returned"] = returned });
     }
 
-    // ====================================================================
-    // EVENTS (JSONL file reader)
-    // ====================================================================
-    // Python's events_query() reads {spaces_folder}/{space}/.dm/events.jsonl
-    // line-by-line and filters by date range + search. It does NOT use SQL.
-
-    private async Task<Response> QueryEventsAsync(Query q, string? actor, CancellationToken ct)
-    {
-        if (actor is null)
-            return Response.Fail(InternalErrorCode.NOT_AUTHENTICATED,
-                "events queries require authentication", "auth");
-
-        var spacesRoot = settings.Value.SpacesRoot;
-        var eventsFile = Path.Combine(spacesRoot, q.SpaceName, ".dm", "events.jsonl");
-
-        if (!File.Exists(eventsFile))
-            return Response.Ok(Array.Empty<Record>(), new() { ["total"] = 0, ["returned"] = 0 });
-
-        var records = new List<Record>();
-        await foreach (var line in File.ReadLinesAsync(eventsFile, ct))
-        {
-            if (string.IsNullOrWhiteSpace(line)) continue;
-            try
-            {
-                var doc = JsonDocument.Parse(line);
-                var root = doc.RootElement;
-
-                // Date range filtering
-                if (q.FromDate is not null && root.TryGetProperty("timestamp", out var ts))
-                {
-                    if (DateTime.TryParse(ts.GetString(), out var dt) && dt < q.FromDate.Value)
-                        continue;
-                }
-                if (q.ToDate is not null && root.TryGetProperty("timestamp", out var te))
-                {
-                    if (DateTime.TryParse(te.GetString(), out var dt) && dt > q.ToDate.Value)
-                        continue;
-                }
-
-                // Search substring filter
-                if (!string.IsNullOrEmpty(q.Search) && !line.Contains(q.Search, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                var attrs = new Dictionary<string, object>(StringComparer.Ordinal);
-                foreach (var prop in root.EnumerateObject())
-                    attrs[prop.Name] = prop.Value.Clone();
-
-                records.Add(new Record
-                {
-                    ResourceType = ResourceType.History,
-                    Shortname = root.TryGetProperty("shortname", out var sn) ? sn.GetString() ?? "event" : "event",
-                    Subpath = q.Subpath ?? "/",
-                    Attributes = attrs,
-                });
-            }
-            catch { /* skip malformed lines */ }
-        }
-
-        // Apply offset/limit after filtering
-        var total = records.Count;
-        var page = records.Skip(Math.Max(0, q.Offset)).Take(Math.Max(1, q.Limit)).ToList();
-        return Response.Ok(page, new() { ["total"] = total, ["returned"] = page.Count });
-    }
 }
 
 // ========================================================================

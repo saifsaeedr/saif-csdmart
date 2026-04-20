@@ -212,8 +212,8 @@ public sealed class EntryService(
             !await perms.CanCreateAsync(actor, to, EntryToAttributesDict(srcEntry), ct))
             return Result<Entry>.Fail(InternalErrorCode.NOT_ALLOWED, "no move access", "auth");
         // Python fires a single "move" event keyed on the destination subpath and
-        // passes the source shortname as an attribute. Mirror that so a hook like
-        // ldap_manager can see both the old and new names.
+        // passes the source shortname as an attribute. Mirror that so hook
+        // plugins can see both the old and new names on the same event.
         var moveEvent = new Event
         {
             SpaceName = to.SpaceName,

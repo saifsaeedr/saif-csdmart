@@ -629,7 +629,7 @@ public static class RequestHandler
     // helpers
     // ============================================================================
 
-    private static Entry MaterializeEntry(Record rec, string spaceName, string actor)
+    internal static Entry MaterializeEntry(Record rec, string spaceName, string actor)
     {
         var attrs = rec.Attributes ?? new();
         // dmart stores schema_shortname inside the Payload object, not as an Entry column.

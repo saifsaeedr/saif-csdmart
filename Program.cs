@@ -209,14 +209,17 @@ switch (subcommand)
         var hasher = new PasswordHasher();
         var hashed = hasher.Hash(password);
         await using var conn = await dbInst.OpenAsync();
-        await using var cmd = new Npgsql.NpgsqlCommand("UPDATE users SET password = $1, is_active = true WHERE shortname = $2", conn);
+        await using var cmd = new Npgsql.NpgsqlCommand(
+            "UPDATE users SET password = $1, is_active = true, attempt_count = 0 WHERE shortname = $2", conn);
         cmd.Parameters.Add(new() { Value = hashed });
         cmd.Parameters.Add(new() { Value = username });
         var rows = await cmd.ExecuteNonQueryAsync();
         if (rows > 0)
         {
-            Console.WriteLine($"Password updated for {username}");
-            // Update ~/.dmart/cli.ini so dmart-cli picks up the new password
+            Console.WriteLine($"Password updated for {username} (account unlocked: is_active=true, attempt_count=0)");
+            // Only update ~/.dmart/cli.ini when its existing shortname matches
+            // the user whose password we just reset — avoids clobbering a
+            // CLI operator's own credentials when resetting someone else.
             UpdateCliIni(username, password, s);
         }
         else
@@ -785,7 +788,6 @@ builder.Services.AddSingleton<IHookPlugin, AuditPlugin>();
 builder.Services.AddSingleton<IHookPlugin, AdminNotificationSenderPlugin>();
 builder.Services.AddSingleton<IHookPlugin, SystemNotificationSenderPlugin>();
 builder.Services.AddSingleton<IHookPlugin, LocalNotificationPlugin>();
-builder.Services.AddSingleton<IHookPlugin, LdapManagerPlugin>();
 builder.Services.AddSingleton<IHookPlugin, SemanticIndexerPlugin>();
 builder.Services.AddSingleton<IHookPlugin, McpSseBridgePlugin>();
 builder.Services.AddSingleton<Dmart.Api.Mcp.McpSessionStore>();
@@ -1094,37 +1096,45 @@ public partial class Program
         return applied;
     }
 
-    // Updates ~/.dmart/cli.ini with the new password (and url/shortname)
-    // so dmart-cli picks up the credentials after set_password.
+    // Updates ~/.dmart/cli.ini with the new password, but ONLY if the file
+    // already exists and its `shortname=` matches the user being reset.
+    // Rationale: an admin resetting another user's password shouldn't
+    // overwrite their own dmart-cli credentials. A missing file or missing
+    // `shortname` is treated as "no match" — we leave it alone.
     static void UpdateCliIni(string shortname, string password, DmartSettings s)
     {
         var dmartHome = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dmart");
-        Directory.CreateDirectory(dmartHome);
         var cliIniPath = Path.Combine(dmartHome, "cli.ini");
 
-        // Read existing values or start fresh
-        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        if (File.Exists(cliIniPath))
+        if (!File.Exists(cliIniPath))
         {
-            foreach (var line in File.ReadAllLines(cliIniPath))
-            {
-                var t = line.Trim();
-                if (t.Length == 0 || t.StartsWith('#')) continue;
-                var eq = t.IndexOf('=');
-                if (eq <= 0) continue;
-                values[t[..eq].Trim()] = t[(eq + 1)..].Trim().Trim('"').Trim('\'');
-            }
+            Console.WriteLine($"Skipped {cliIniPath} (file does not exist)");
+            return;
         }
 
-        // Update credentials
-        values["shortname"] = shortname;
+        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var line in File.ReadAllLines(cliIniPath))
+        {
+            var t = line.Trim();
+            if (t.Length == 0 || t.StartsWith('#')) continue;
+            var eq = t.IndexOf('=');
+            if (eq <= 0) continue;
+            values[t[..eq].Trim()] = t[(eq + 1)..].Trim().Trim('"').Trim('\'');
+        }
+
+        if (!values.TryGetValue("shortname", out var existing)
+            || !string.Equals(existing, shortname, StringComparison.Ordinal))
+        {
+            Console.WriteLine(
+                $"Skipped {cliIniPath} (shortname='{existing ?? ""}' does not match '{shortname}')");
+            return;
+        }
+
         values["password"] = password;
-        // Ensure url is set (use the server's own address)
         if (!values.ContainsKey("url"))
             values["url"] = $"http://{s.ListeningHost}:{s.ListeningPort}";
 
-        // Write back
         var lines = new List<string> { "# dmart-cli configuration (updated by dmart set_password)" };
         foreach (var (k, v) in values)
             lines.Add($"{k}={v}");

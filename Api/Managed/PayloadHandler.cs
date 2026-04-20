@@ -78,7 +78,6 @@ public static class PayloadHandler
         ContentType.Apk        => "application/vnd.android.package-archive",
         ContentType.Sqlite     => "application/vnd.sqlite3",
         ContentType.Parquet    => "application/octet-stream",
-        ContentType.Duckdb     => "application/octet-stream",
         _                      => "application/octet-stream",
     };
 }

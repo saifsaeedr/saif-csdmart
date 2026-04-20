@@ -29,6 +29,5 @@ public enum ContentType
     [EnumMember(Value = "parquet")]     Parquet,
     [EnumMember(Value = "jsonl")]       Jsonl,
     [EnumMember(Value = "apk")]         Apk,
-    [EnumMember(Value = "duckdb")]      Duckdb,
     [EnumMember(Value = "sqlite")]      Sqlite,
 }

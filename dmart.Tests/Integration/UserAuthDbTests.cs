@@ -89,6 +89,36 @@ public class UserAuthDbTests : IClassFixture<DmartFactory>
     }
 
     [Fact]
+    public async Task Profile_Does_Not_Return_Empty_String_For_Null_Optional_Fields()
+    {
+        if (!DmartFactory.HasPg) return;
+
+        var client = _factory.CreateClient();
+        var token = await LoginAdminAndGetTokenAsync(client);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var resp = await client.GetAsync("/user/profile");
+        resp.StatusCode.ShouldBe(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
+        body!.Records.ShouldNotBeNull();
+        var attrs = body.Records![0].Attributes;
+        attrs.ShouldNotBeNull();
+
+        // Python parity: optional user fields must be absent when the backing
+        // value is null — never present as "" or null. Regression: ProfileHandler
+        // previously coerced nulls to empty strings.
+        foreach (var key in new[] { "email", "msisdn", "displayname", "description", "payload" })
+        {
+            if (attrs!.TryGetValue(key, out var val))
+            {
+                val.ShouldNotBeNull($"attribute '{key}' present but null");
+                if (val is string s)
+                    s.ShouldNotBe("", $"attribute '{key}' present but empty string");
+            }
+        }
+    }
+
+    [Fact]
     public async Task Check_Existing_Returns_Conflict_For_Admin()
     {
         if (!DmartFactory.HasPg) return;

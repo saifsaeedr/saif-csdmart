@@ -84,12 +84,10 @@ public static class CxbMiddleware
         {
             if (ctx.Request.Path.StartsWithSegments($"{cxbUrl}/config.json"))
             {
-                var s = ctx.RequestServices.GetRequiredService<IOptions<DmartSettings>>().Value;
                 var paths = new[]
                 {
                     Environment.GetEnvironmentVariable("DMART_CXB_CONFIG"),
                     "config.json",
-                    Path.Combine(s.SpacesRoot, "config.json"),
                     Path.Combine(
                         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                         ".dmart", "config.json"),

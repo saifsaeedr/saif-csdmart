@@ -9,7 +9,6 @@ namespace Dmart.Config;
 //   2. Environment variables (Dmart__Xxx)
 public sealed class DmartSettings
 {
-    public string SpacesRoot { get; set; } = "./spaces";
     public string JwtSecret { get; set; } = "change-me-change-me-change-me-32b";
     public string JwtIssuer { get; set; } = "dmart";
     public string JwtAudience { get; set; } = "dmart";

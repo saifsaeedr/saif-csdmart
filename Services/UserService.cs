@@ -237,9 +237,20 @@ public sealed class UserService(
             return Result<(string, string, User)>.Fail(
                 InternalErrorCode.USERNAME_NOT_EXIST, "Invalid username or password", "auth");
 
+        // Pre-check: attempt_count >= max means a prior run of
+        // HandleFailedLoginAttemptAsync already locked the account (or an
+        // admin/test set the counter directly). Reject even a correct password
+        // before we look at is_active, so the caller sees USER_ACCOUNT_LOCKED
+        // rather than USER_ISNT_VERIFIED for an auto-locked user.
+        var maxAttempts = settings.Value.MaxFailedLoginAttempts;
+        if (maxAttempts > 0 && user.AttemptCount is int count && count >= maxAttempts)
+            return Result<(string, string, User)>.Fail(
+                InternalErrorCode.USER_ACCOUNT_LOCKED,
+                "Account has been locked due to too many failed login attempts.", "auth");
+
         if (!user.IsActive)
             return Result<(string, string, User)>.Fail(
-                InternalErrorCode.USER_ACCOUNT_LOCKED, "Account has been locked.", "auth");
+                InternalErrorCode.USER_ISNT_VERIFIED, "This user is not verified", "auth");
 
         if (string.IsNullOrEmpty(user.Password) || req.Password is null
             || !hasher.Verify(req.Password, user.Password))
@@ -297,7 +308,7 @@ public sealed class UserService(
                 InternalErrorCode.USERNAME_NOT_EXIST, "Invalid username or password", "auth");
         if (!user.IsActive)
             return Result<(string, string, User)>.Fail(
-                InternalErrorCode.USER_ACCOUNT_LOCKED, "Account has been locked.", "auth");
+                InternalErrorCode.USER_ISNT_VERIFIED, "This user is not verified", "auth");
 
         // Validate OTP code.
         // Python parity: key is derived from the REQUEST identifier, not the

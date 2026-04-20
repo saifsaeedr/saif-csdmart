@@ -195,14 +195,14 @@ public static class ResourceWithPayloadHandler
                 "invalid request body", "request");
         }
 
-        var entry = new Entry
+        // Mirrors Python's api/managed/utils.py::create_or_update_resource_with_payload_handler
+        // which calls Meta.from_record(record) — that unpacks every attribute on the
+        // record (workflow_shortname, state, tags, description, reporter, ...) into
+        // the meta object. Reusing MaterializeEntry here preserves those fields; we
+        // then override Uuid, Payload and IsActive with the multipart-derived values.
+        var entry = RequestHandler.MaterializeEntry(record, spaceName, actor) with
         {
             Uuid = string.IsNullOrEmpty(record.Uuid) ? Guid.NewGuid().ToString() : record.Uuid,
-            Shortname = record.Shortname,
-            SpaceName = spaceName,
-            Subpath = record.Subpath,
-            ResourceType = record.ResourceType,
-            OwnerShortname = actor,
             IsActive = true,
             Payload = new Payload
             {
@@ -308,7 +308,6 @@ public static class ResourceWithPayloadHandler
                 "jsonl" or "ndjson" => ContentType.Jsonl,
                 "py"   => ContentType.Python,
                 "apk"  => ContentType.Apk,
-                "duckdb" => ContentType.Duckdb,
                 "sqlite" or "db" => ContentType.Sqlite,
                 "parquet" => ContentType.Parquet,
                 _ => ContentType.Json,

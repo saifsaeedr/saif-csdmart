@@ -35,7 +35,7 @@ public static class RequestLoggingMiddleware
         "access_token", "refresh_token", "firebase_token", "auth_token", "token",
         "invitation",
         "apple_client_secret", "google_client_secret", "facebook_client_secret",
-        "ldap_pass", "mail_password",
+        "mail_password",
     };
 
     public static IApplicationBuilder UseRequestLogging(this IApplicationBuilder app)

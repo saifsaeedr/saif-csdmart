@@ -1056,7 +1056,7 @@ fi
 # ============================================================================
 printf '%-45s' "Info/settings has valid keys:" >&2
 SETTINGS_RESP=$(curl -s -H "$AUTH_HEADER" "$API_URL/info/settings")
-if echo "$SETTINGS_RESP" | jq -e '.status == "success" and .attributes.spaces_root' > /dev/null 2>&1; then
+if echo "$SETTINGS_RESP" | jq -e '.status == "success" and (.attributes.jwt_issuer == "dmart")' > /dev/null 2>&1; then
     ok
 else
     nope "$SETTINGS_RESP"

@@ -38,6 +38,5 @@ public enum ResourceType
     [EnumMember(Value = "csv")]             Csv,
     [EnumMember(Value = "jsonl")]           Jsonl,
     [EnumMember(Value = "sqlite")]          Sqlite,
-    [EnumMember(Value = "duckdb")]          Duckdb,
     [EnumMember(Value = "parquet")]         Parquet,
 }

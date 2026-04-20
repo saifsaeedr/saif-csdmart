@@ -174,8 +174,12 @@ public sealed class PublicQueryAnonymousTests : IClassFixture<DmartFactory>
         const string worldPerm = "world";
         var priorAnon = await users.GetByShortnameAsync(anonUser);
         var priorWorld = await access.GetPermissionAsync(worldPerm);
-        // Clear anon/world so the test reflects the no-config state.
-        if (priorAnon is not null) await users.DeleteAsync(anonUser);
+        // Simulate the no-config state without deleting the user: on a dev
+        // DB there are real entries.owner_shortname FK'd to "anonymous"
+        // that would block the delete. Stripping roles/groups achieves the
+        // same effective "no grants" state the test is asserting about.
+        if (priorAnon is not null)
+            await users.UpsertAsync(priorAnon with { Roles = new(), Groups = new() });
         if (priorWorld is not null) await access.DeletePermissionAsync(worldPerm);
         await access.InvalidateAllCachesAsync();
 

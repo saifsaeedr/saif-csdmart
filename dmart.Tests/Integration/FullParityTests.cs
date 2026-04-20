@@ -267,9 +267,15 @@ public class FullParityTests : IClassFixture<DmartFactory>
         attrs.ShouldContainKey("is_email_verified");
         attrs.ShouldContainKey("is_msisdn_verified");
         attrs.ShouldContainKey("force_password_change");
-        attrs.ShouldContainKey("displayname");
-        attrs.ShouldContainKey("description");
         attrs.ShouldContainKey("permissions");
+        // displayname/description/msisdn/payload are conditional — Python's
+        // `if user.X:` guards omit them when the backing value is null.
+        // Assert the parity rule instead of unconditional presence: present ⇒ non-empty.
+        foreach (var key in new[] { "displayname", "description", "msisdn", "payload" })
+        {
+            if (attrs.TryGetValue(key, out var val) && val is string s)
+                s.ShouldNotBe("", $"attribute '{key}' present but empty string");
+        }
     }
 
     // ==================== validate_password ====================

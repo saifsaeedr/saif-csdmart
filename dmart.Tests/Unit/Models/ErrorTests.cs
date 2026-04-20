@@ -1,5 +1,7 @@
+using System.Text.Json;
 using Dmart.Api;
 using Dmart.Models.Api;
+using Dmart.Models.Json;
 using Shouldly;
 using Xunit;
 
@@ -50,6 +52,22 @@ public class ErrorTests
         resp.Error!.Code.ShouldBe(InternalErrorCode.LOCKED_ENTRY);  // == 31
         resp.Error.Code.ShouldBe(31);
         resp.Error.Type.ShouldBe("db");
+    }
+
+    [Fact]
+    public void Response_Ok_Serializes_Progress_Ticket_Shape()
+    {
+        // WorkflowService.ProgressAsync returns exactly this shape; user
+        // reported the attributes silently disappeared from the JSON.
+        var resp = Response.Ok(attributes: new()
+        {
+            ["state"] = "approved",
+            ["is_open"] = true,
+        });
+        var json = JsonSerializer.Serialize(resp, DmartJsonContext.Default.Response);
+        json.ShouldContain("\"attributes\"");
+        json.ShouldContain("\"state\":\"approved\"");
+        json.ShouldContain("\"is_open\":true");
     }
 
     [Fact]

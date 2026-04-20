@@ -341,7 +341,7 @@ A quick orienting map. The exhaustive enum lives in
 | Social / interaction | `post`, `comment`, `reply`, `reaction`, `share` |
 | Workflow | `ticket` |
 | System / auditing | `log`, `notification`, `plugin_wrapper`, `history`, `lock`, `alteration` |
-| Analytics / big-data | `parquet`, `csv`, `jsonl`, `sqlite`, `duckdb`, `data_asset` |
+| Analytics / big-data | `parquet`, `csv`, `jsonl`, `sqlite`, `data_asset` |
 | Relationships | `relationship` |
 
 ## `/managed/request` supported actions
