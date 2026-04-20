@@ -19,19 +19,17 @@ public sealed class McpEndpointTests : IClassFixture<DmartFactory>
     private readonly DmartFactory _factory;
     public McpEndpointTests(DmartFactory factory) => _factory = factory;
 
-    [Fact]
+    [FactIfPg]
     public async Task Unauthenticated_Rejected()
     {
-        if (!DmartFactory.HasPg) return;
         using var client = _factory.CreateClient();
         var resp = await client.PostAsync("/mcp", JsonRpc("initialize", id: 1));
         resp.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Initialize_Returns_ProtocolVersion_And_ServerInfo()
     {
-        if (!DmartFactory.HasPg) return;
         using var client = await LoginClient();
 
         var resp = await client.PostAsync("/mcp", JsonRpc(
@@ -51,10 +49,9 @@ public sealed class McpEndpointTests : IClassFixture<DmartFactory>
         result.GetProperty("capabilities").GetProperty("tools").ValueKind.ShouldBe(JsonValueKind.Object);
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task ToolsList_Returns_Registered_Tools()
     {
-        if (!DmartFactory.HasPg) return;
         using var client = await LoginClient();
 
         var resp = await client.PostAsync("/mcp", JsonRpc("tools/list", id: 2));
@@ -78,10 +75,9 @@ public sealed class McpEndpointTests : IClassFixture<DmartFactory>
             tool.GetProperty("inputSchema").GetProperty("type").GetString().ShouldBe("object");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task ToolsCall_Me_Returns_Caller_Identity()
     {
-        if (!DmartFactory.HasPg) return;
         using var client = await LoginClient();
 
         var resp = await client.PostAsync("/mcp", JsonRpc(
@@ -98,10 +94,9 @@ public sealed class McpEndpointTests : IClassFixture<DmartFactory>
         inner.RootElement.GetProperty("accessible").ValueKind.ShouldBe(JsonValueKind.Array);
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task ToolsCall_UnknownTool_Returns_JsonRpc_Error()
     {
-        if (!DmartFactory.HasPg) return;
         using var client = await LoginClient();
 
         var resp = await client.PostAsync("/mcp", JsonRpc(
@@ -112,10 +107,9 @@ public sealed class McpEndpointTests : IClassFixture<DmartFactory>
         root.GetProperty("error").GetProperty("code").GetInt32().ShouldBe(-32601);
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task UnknownMethod_Returns_MethodNotFound()
     {
-        if (!DmartFactory.HasPg) return;
         using var client = await LoginClient();
 
         var resp = await client.PostAsync("/mcp", JsonRpc("totally/fake", id: 5));
@@ -124,10 +118,9 @@ public sealed class McpEndpointTests : IClassFixture<DmartFactory>
         root.GetProperty("error").GetProperty("code").GetInt32().ShouldBe(-32601);
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Notification_Returns_202_NoBody()
     {
-        if (!DmartFactory.HasPg) return;
         using var client = await LoginClient();
 
         // No `id` field — spec-defined notification; server must not reply.
@@ -140,10 +133,9 @@ public sealed class McpEndpointTests : IClassFixture<DmartFactory>
 
     // ---- v0.2 write-path round trip ----
 
-    [Fact]
+    [FactIfPg]
     public async Task CreateReadUpdateDelete_RoundTrip()
     {
-        if (!DmartFactory.HasPg) return;
         using var client = await LoginClient();
 
         var suffix = Guid.NewGuid().ToString("N")[..10];
@@ -283,10 +275,9 @@ public sealed class McpEndpointTests : IClassFixture<DmartFactory>
 
     // ---- v0.3 ----
 
-    [Fact]
+    [FactIfPg]
     public async Task History_Returns_CreateEvent()
     {
-        if (!DmartFactory.HasPg) return;
         using var client = await LoginClient();
 
         var suffix = Guid.NewGuid().ToString("N")[..10];
@@ -331,7 +322,7 @@ public sealed class McpEndpointTests : IClassFixture<DmartFactory>
         }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task SemanticSearch_Returns_Clean_Response_Regardless_Of_Environment()
     {
         // Covers three scenarios with one assertion:
@@ -342,7 +333,6 @@ public sealed class McpEndpointTests : IClassFixture<DmartFactory>
         //       records (possibly empty).
         // Every scenario returns a well-formed Response envelope inside a
         // successful MCP ToolsCallResult — never a raw exception.
-        if (!DmartFactory.HasPg) return;
         using var client = await LoginClient();
 
         var resp = await client.PostAsync("/mcp", JsonRpc(
@@ -368,10 +358,9 @@ public sealed class McpEndpointTests : IClassFixture<DmartFactory>
         }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Download_UnknownEntry_ReturnsToolError()
     {
-        if (!DmartFactory.HasPg) return;
         using var client = await LoginClient();
 
         var resp = await client.PostAsync("/mcp", JsonRpc(

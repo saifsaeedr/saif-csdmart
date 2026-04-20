@@ -37,10 +37,9 @@ public class QueryResponseShapeTests : IClassFixture<DmartFactory>
 
     // ==================== envelope ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Query_Response_Attributes_Has_Both_Total_And_Returned()
     {
-        if (!DmartFactory.HasPg) return;
         var query = Resolve();
 
         var resp = await query.ExecuteAsync(new Query
@@ -59,10 +58,9 @@ public class QueryResponseShapeTests : IClassFixture<DmartFactory>
         resp.Attributes["returned"].ShouldBe(resp.Records!.Count);
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Query_Response_Total_Reflects_PreLimit_Count_Not_Page_Count()
     {
-        if (!DmartFactory.HasPg) return;
         var query = Resolve();
 
         // Ask for a limit of 1 against a subpath we know has multiple rows
@@ -86,10 +84,9 @@ public class QueryResponseShapeTests : IClassFixture<DmartFactory>
 
     // ==================== Record envelope ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Record_Omits_Null_Attachments()
     {
-        if (!DmartFactory.HasPg) return;
         var query = Resolve();
 
         var resp = await query.ExecuteAsync(new Query
@@ -108,10 +105,9 @@ public class QueryResponseShapeTests : IClassFixture<DmartFactory>
 
     // ==================== Record.attributes content ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Space_Record_Attributes_Has_Python_Parity_Key_Set()
     {
-        if (!DmartFactory.HasPg) return;
         var query = Resolve();
 
         var resp = await query.ExecuteAsync(new Query
@@ -140,10 +136,9 @@ public class QueryResponseShapeTests : IClassFixture<DmartFactory>
         keys.ShouldNotContain("query_policies");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Entry_Record_Attributes_Has_Python_Parity_Key_Set()
     {
-        if (!DmartFactory.HasPg) return;
         var query = Resolve();
 
         var resp = await query.ExecuteAsync(new Query
@@ -172,12 +167,11 @@ public class QueryResponseShapeTests : IClassFixture<DmartFactory>
 
     // ==================== retrieve_total semantics ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task RetrieveTotal_Defaults_To_True_When_Null()
     {
         // A Query with RetrieveTotal=null should behave like Python's default
         // of true — we should see a real pre-limit count in attributes.total.
-        if (!DmartFactory.HasPg) return;
         var query = Resolve();
 
         var resp = await query.ExecuteAsync(new Query
@@ -194,10 +188,9 @@ public class QueryResponseShapeTests : IClassFixture<DmartFactory>
         total.ShouldNotBe(-1, "null RetrieveTotal must be treated as default true");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task RetrieveTotal_False_Skips_Count_And_Returns_Minus_One()
     {
-        if (!DmartFactory.HasPg) return;
         var query = Resolve();
 
         var resp = await query.ExecuteAsync(new Query
@@ -216,10 +209,9 @@ public class QueryResponseShapeTests : IClassFixture<DmartFactory>
 
     // ==================== null stripping ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Entry_Attributes_Have_No_Null_Values()
     {
-        if (!DmartFactory.HasPg) return;
         var query = Resolve();
 
         var resp = await query.ExecuteAsync(new Query
@@ -239,10 +231,9 @@ public class QueryResponseShapeTests : IClassFixture<DmartFactory>
         }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Space_Attributes_Have_No_Null_Values()
     {
-        if (!DmartFactory.HasPg) return;
         var query = Resolve();
 
         var resp = await query.ExecuteAsync(new Query
@@ -264,10 +255,9 @@ public class QueryResponseShapeTests : IClassFixture<DmartFactory>
 
     // ==================== password / query_policies hidden ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task User_Entry_Endpoint_Hides_Password()
     {
-        if (!DmartFactory.HasPg) return;
         var client = _factory.CreateClient();
         var raw = await client.PostAsync("/user/login",
             new StringContent($"{{\"shortname\":\"{_factory.AdminShortname}\",\"password\":\"{_factory.AdminPassword}\"}}",

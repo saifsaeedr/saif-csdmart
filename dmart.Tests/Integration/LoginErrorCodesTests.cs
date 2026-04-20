@@ -20,10 +20,9 @@ public sealed class LoginErrorCodesTests : IClassFixture<DmartFactory>
     private readonly DmartFactory _factory;
     public LoginErrorCodesTests(DmartFactory factory) => _factory = factory;
 
-    [Fact]
+    [FactIfPg]
     public async Task UserNotFound_Returns_USERNAME_NOT_EXIST()
     {
-        if (!DmartFactory.HasPg) return;
         var (type, code, msg) = await ExpectLoginFailureAsync(
             new UserLoginRequest($"ghost_{Guid.NewGuid():N}"[..16], null, null, "pw", null));
         type.ShouldBe("auth");
@@ -31,10 +30,9 @@ public sealed class LoginErrorCodesTests : IClassFixture<DmartFactory>
         msg.ShouldBe("Invalid username or password");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task WrongPassword_Returns_PASSWORD_NOT_VALIDATED()
     {
-        if (!DmartFactory.HasPg) return;
         var (shortname, _) = await CreateUserAsync(password: "correct-pw");
         try
         {
@@ -47,11 +45,9 @@ public sealed class LoginErrorCodesTests : IClassFixture<DmartFactory>
         finally { await DeleteUserAsync(shortname); }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Mobile_NewDevice_Returns_OTP_NEEDED()
     {
-        if (!DmartFactory.HasPg) return;
-
         // Mobile user with an existing device_id triggers the OTP path on a mismatch.
         var (shortname, pw) = await CreateUserAsync(
             password: "correct-pw",
@@ -69,10 +65,9 @@ public sealed class LoginErrorCodesTests : IClassFixture<DmartFactory>
         finally { await DeleteUserAsync(shortname); }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task LockedToDevice_Returns_USER_ACCOUNT_LOCKED()
     {
-        if (!DmartFactory.HasPg) return;
         var (shortname, pw) = await CreateUserAsync(
             password: "correct-pw",
             type: UserType.Web,
@@ -90,10 +85,9 @@ public sealed class LoginErrorCodesTests : IClassFixture<DmartFactory>
         finally { await DeleteUserAsync(shortname); }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task OtpLogin_WrongCode_Returns_OTP_INVALID()
     {
-        if (!DmartFactory.HasPg) return;
         var (shortname, _) = await CreateUserAsync(password: null);
         try
         {
@@ -106,10 +100,9 @@ public sealed class LoginErrorCodesTests : IClassFixture<DmartFactory>
         finally { await DeleteUserAsync(shortname); }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task OtpLogin_MultipleIdentifiers_Returns_OTP_ISSUE()
     {
-        if (!DmartFactory.HasPg) return;
         var (type, code, msg) = await ExpectLoginFailureAsync(
             new UserLoginRequest("u", "u@x.com", null, null, null, Otp: "123456"));
         type.ShouldBe("auth");
@@ -117,10 +110,9 @@ public sealed class LoginErrorCodesTests : IClassFixture<DmartFactory>
         msg.ShouldBe("Provide either msisdn, email or shortname, not both.");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task OtpLogin_NoIdentifier_Returns_OTP_ISSUE()
     {
-        if (!DmartFactory.HasPg) return;
         var (type, code, msg) = await ExpectLoginFailureAsync(
             new UserLoginRequest(null, null, null, null, null, Otp: "123456"));
         type.ShouldBe("auth");
@@ -128,11 +120,9 @@ public sealed class LoginErrorCodesTests : IClassFixture<DmartFactory>
         msg.ShouldBe("Either msisdn, email or shortname must be provided.");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Invitation_UnknownToken_Returns_INVALID_INVITATION_jwtauth()
     {
-        if (!DmartFactory.HasPg) return;
-
         // A JWT with a valid signature but no DB row — the repo lookup fails,
         // so invitation login rejects with type=jwtauth code=INVALID_INVITATION.
         var (shortname, _) = await CreateUserAsync(password: null);

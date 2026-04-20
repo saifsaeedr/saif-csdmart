@@ -24,10 +24,9 @@ public sealed class RolePermissionRequestTests : IClassFixture<DmartFactory>
 
     // ==================== Role update/delete via /managed/request ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Role_Update_Via_Request_Persists_Attributes()
     {
-        if (!DmartFactory.HasPg) return;
         var client = await AuthedClient();
         var access = _factory.Services.GetRequiredService<AccessRepository>();
 
@@ -82,10 +81,9 @@ public sealed class RolePermissionRequestTests : IClassFixture<DmartFactory>
         }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Role_Delete_Via_Request_Removes_Row()
     {
-        if (!DmartFactory.HasPg) return;
         var client = await AuthedClient();
         var access = _factory.Services.GetRequiredService<AccessRepository>();
 
@@ -109,10 +107,9 @@ public sealed class RolePermissionRequestTests : IClassFixture<DmartFactory>
         (await access.GetRoleAsync(role)).ShouldBeNull("DELETE must remove the roles row");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Role_Delete_Unknown_Returns_OBJECT_NOT_FOUND()
     {
-        if (!DmartFactory.HasPg) return;
         var client = await AuthedClient();
 
         var deleteResp = await PostRequest(client, RequestType.Delete, "management", new Record
@@ -133,10 +130,9 @@ public sealed class RolePermissionRequestTests : IClassFixture<DmartFactory>
 
     // ==================== Permission update/delete via /managed/request ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Permission_Update_Via_Request_Persists_Attributes()
     {
-        if (!DmartFactory.HasPg) return;
         var client = await AuthedClient();
         var access = _factory.Services.GetRequiredService<AccessRepository>();
 
@@ -179,10 +175,9 @@ public sealed class RolePermissionRequestTests : IClassFixture<DmartFactory>
         }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Permission_Delete_Via_Request_Removes_Row()
     {
-        if (!DmartFactory.HasPg) return;
         var client = await AuthedClient();
         var access = _factory.Services.GetRequiredService<AccessRepository>();
 
@@ -208,10 +203,9 @@ public sealed class RolePermissionRequestTests : IClassFixture<DmartFactory>
 
     // ==================== Aggregate failure shape ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Multi_Record_Delete_Returns_Aggregate_Successfull_And_Failed()
     {
-        if (!DmartFactory.HasPg) return;
         var client = await AuthedClient();
         var access = _factory.Services.GetRequiredService<AccessRepository>();
 
@@ -270,11 +264,10 @@ public sealed class RolePermissionRequestTests : IClassFixture<DmartFactory>
         }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task All_Records_Succeed_Returns_Ok_Without_Error()
     {
         // Regression guard: aggregate shape must NOT kick in when every record succeeds.
-        if (!DmartFactory.HasPg) return;
         var client = await AuthedClient();
         var access = _factory.Services.GetRequiredService<AccessRepository>();
 

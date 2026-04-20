@@ -113,10 +113,9 @@ public class PermissionServiceIntegrationTests : IClassFixture<DmartFactory>
 
     // ==================== test cases ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Hierarchical_Walk_Permission_On_Parent_Subpath_Grants_Access_To_Child()
     {
-        if (!DmartFactory.HasPg) return;
         var (perms, users, access) = Resolve();
 
         var permName = $"itest_perm_walk_{Guid.NewGuid():N}".Substring(0, 24);
@@ -158,10 +157,9 @@ public class PermissionServiceIntegrationTests : IClassFixture<DmartFactory>
         }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task All_Subpaths_Magic_Word_Grants_Access_Across_Space()
     {
-        if (!DmartFactory.HasPg) return;
         var (perms, users, access) = Resolve();
 
         var permName = $"itest_perm_mw_{Guid.NewGuid():N}".Substring(0, 24);
@@ -196,10 +194,9 @@ public class PermissionServiceIntegrationTests : IClassFixture<DmartFactory>
         }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task All_Spaces_Magic_Word_Grants_Access_Across_Spaces()
     {
-        if (!DmartFactory.HasPg) return;
         var (perms, users, access) = Resolve();
 
         var permName = $"itest_perm_as_{Guid.NewGuid():N}".Substring(0, 24);
@@ -232,10 +229,9 @@ public class PermissionServiceIntegrationTests : IClassFixture<DmartFactory>
         }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Per_Entry_Acl_Grant_Overrides_Missing_Role_Permission()
     {
-        if (!DmartFactory.HasPg) return;
         var (perms, users, access) = Resolve();
 
         var roleName = $"itest_role_acl_{Guid.NewGuid():N}".Substring(0, 24);
@@ -279,10 +275,9 @@ public class PermissionServiceIntegrationTests : IClassFixture<DmartFactory>
         }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Own_Condition_Allows_Owner_Update_Denies_Stranger()
     {
-        if (!DmartFactory.HasPg) return;
         var (perms, users, access) = Resolve();
 
         var permName = $"itest_perm_own_{Guid.NewGuid():N}".Substring(0, 24);
@@ -324,10 +319,9 @@ public class PermissionServiceIntegrationTests : IClassFixture<DmartFactory>
         }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Restricted_Field_Blocks_Update_Touching_That_Field()
     {
-        if (!DmartFactory.HasPg) return;
         var (perms, users, access) = Resolve();
 
         var permName = $"itest_perm_rf_{Guid.NewGuid():N}".Substring(0, 24);
@@ -385,10 +379,9 @@ public class PermissionServiceIntegrationTests : IClassFixture<DmartFactory>
     // (b) at least one role on that user, and (c) a "world" permission (or the
     // role's own permissions covering the target). No shortcut grants anonymous
     // any implicit access — a bare null actor resolves to zero permissions.
-    [Fact]
+    [FactIfPg]
     public async Task Anonymous_With_World_Permission_Can_View_But_Cannot_Write()
     {
-        if (!DmartFactory.HasPg) return;
         var (perms, users, access) = Resolve();
 
         var anonRole = $"itest_anon_role_{Guid.NewGuid():N}".Substring(0, 24);
@@ -438,10 +431,9 @@ public class PermissionServiceIntegrationTests : IClassFixture<DmartFactory>
     // comparing against the walk key, (b) CanQueryAsync gated the "query"
     // action fallback on `actor is not null`, so anonymous only tried "view"
     // — which fails the condition check when no resource is loaded yet.
-    [Fact]
+    [FactIfPg]
     public async Task Anonymous_Query_With_MultiLeadingSlash_Subpaths_And_IsActive_Condition_Succeeds()
     {
-        if (!DmartFactory.HasPg) return;
         var (perms, users, access) = Resolve();
 
         const string anonUser = "anonymous";   // Python-reserved shortname
@@ -503,13 +495,12 @@ public class PermissionServiceIntegrationTests : IClassFixture<DmartFactory>
         }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Anonymous_Without_Roles_Has_No_Access_Even_If_World_Exists()
     {
         // Python parity: world is only consulted INSIDE the role loop. An
         // anonymous user with zero roles never hits world, so a world-granting
         // deployment that forgets to link a role to anonymous grants nothing.
-        if (!DmartFactory.HasPg) return;
         var (perms, users, access) = Resolve();
         const string worldPerm = "world";
         const string anonUser = "anonymous";
@@ -541,12 +532,11 @@ public class PermissionServiceIntegrationTests : IClassFixture<DmartFactory>
         }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Anonymous_Without_World_Or_Anonymous_User_Has_No_Access()
     {
         // Vanilla deployment with no anonymous-user row AND no world permission:
         // bare null actor resolves to zero permissions. No read, no write.
-        if (!DmartFactory.HasPg) return;
         var (perms, users, access) = Resolve();
 
         // Guarantee a clean slate — strip anonymous's roles and remove the
@@ -579,12 +569,11 @@ public class PermissionServiceIntegrationTests : IClassFixture<DmartFactory>
 
     // ==================== folder walk: shortname appended to subpath ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Folder_Walk_Permission_On_Subpath_Grants_Access_To_Folder_Entry_At_Root()
     {
         // Python appends the folder shortname to the subpath walk. So a permission
         // on subpath "users" grants access to the folder entry {subpath="/", shortname="users"}.
-        if (!DmartFactory.HasPg) return;
         var (perms, users, access) = Resolve();
 
         var permName = $"itest_perm_fw_{Guid.NewGuid():N}".Substring(0, 24);
@@ -629,14 +618,13 @@ public class PermissionServiceIntegrationTests : IClassFixture<DmartFactory>
 
     // ==================== effective_space for space resources ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Space_Resource_Uses_Shortname_As_Effective_Space()
     {
         // Python: effective_space = entry_shortname when resource_type == space.
         // A permission keyed to space "test" should grant query access when checking
         // a Space resource whose shortname is "test" (even though the locator's
         // space_name is "management" — the management space is where spaces live).
-        if (!DmartFactory.HasPg) return;
         var (perms, users, access) = Resolve();
 
         var permName = $"itest_perm_es_{Guid.NewGuid():N}".Substring(0, 24);
@@ -678,10 +666,9 @@ public class PermissionServiceIntegrationTests : IClassFixture<DmartFactory>
 
     // ==================== HasAnyAccessToSpaceAsync ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task HasAnyAccess_Returns_True_For_Space_With_Any_Permission()
     {
-        if (!DmartFactory.HasPg) return;
         var (perms, users, access) = Resolve();
 
         var permName = $"itest_perm_ha_{Guid.NewGuid():N}".Substring(0, 24);

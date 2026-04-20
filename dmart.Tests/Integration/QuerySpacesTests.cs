@@ -34,10 +34,9 @@ public class QuerySpacesTests : IClassFixture<DmartFactory>
 
     // ==================== happy path ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task QuerySpaces_ReturnsSpaceRowsNotEntries()
     {
-        if (!DmartFactory.HasPg) return;
         var (query, spaces) = Resolve();
 
         var q = new Query
@@ -64,10 +63,9 @@ public class QuerySpacesTests : IClassFixture<DmartFactory>
         resp.Records!.Select(r => r.Shortname).ShouldContain("management");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task QuerySpaces_AttributesIncludeSpaceSpecificFields()
     {
-        if (!DmartFactory.HasPg) return;
         var (query, _) = Resolve();
 
         var q = new Query
@@ -94,10 +92,9 @@ public class QuerySpacesTests : IClassFixture<DmartFactory>
         management.Attributes.ShouldNotContainKey("query_policies");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task QuerySpaces_TotalAttributeReflectsVisibleCount()
     {
-        if (!DmartFactory.HasPg) return;
         var (query, _) = Resolve();
 
         var q = new Query
@@ -116,10 +113,9 @@ public class QuerySpacesTests : IClassFixture<DmartFactory>
 
     // ==================== validation ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task QuerySpaces_NonManagementSpace_Rejected()
     {
-        if (!DmartFactory.HasPg) return;
         var (query, _) = Resolve();
 
         var q = new Query
@@ -135,10 +131,9 @@ public class QuerySpacesTests : IClassFixture<DmartFactory>
         resp.Error!.Message.ShouldContain("management");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task QuerySpaces_NonRootSubpath_Rejected()
     {
-        if (!DmartFactory.HasPg) return;
         var (query, _) = Resolve();
 
         var q = new Query
@@ -155,10 +150,9 @@ public class QuerySpacesTests : IClassFixture<DmartFactory>
 
     // ==================== paging ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task QuerySpaces_RespectsLimitAndOffset()
     {
-        if (!DmartFactory.HasPg) return;
         var (query, _) = Resolve();
 
         // Ask for a limit of 2 — even if the live DB has more than 2 visible
@@ -177,12 +171,11 @@ public class QuerySpacesTests : IClassFixture<DmartFactory>
         resp.Records!.Count.ShouldBeLessThanOrEqualTo(2);
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task QuerySpaces_SuperAdmin_Sees_All_Spaces()
     {
         // The __all_spaces__:__all_subpaths__ permission should grant visibility
         // to every space, not just those owned by the user.
-        if (!DmartFactory.HasPg) return;
         var (query, _) = Resolve();
 
         var resp = await query.ExecuteAsync(new Query
@@ -202,12 +195,11 @@ public class QuerySpacesTests : IClassFixture<DmartFactory>
         resp.Records!.ShouldContain(r => r.Shortname == "management");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task QuerySpaces_LimitedUser_Sees_Only_Permitted_Spaces()
     {
         // A user with permission in "test" and "management" but not all spaces
         // should see only those two in the spaces listing.
-        if (!DmartFactory.HasPg) return;
         var sp = _factory.Services;
         var usersRepo = sp.GetRequiredService<UserRepository>();
         var accessRepo = sp.GetRequiredService<AccessRepository>();

@@ -24,10 +24,9 @@ public sealed class ErrorCodeParityTests : IClassFixture<DmartFactory>
 
     // ---------- USER_ISNT_VERIFIED ----------
 
-    [Fact]
+    [FactIfPg]
     public async Task Login_InactiveUser_Returns_USER_ISNT_VERIFIED()
     {
-        if (!DmartFactory.HasPg) return;
         var (shortname, pw) = await CreateInactiveUserAsync("correct-pw");
         try
         {
@@ -46,10 +45,9 @@ public sealed class ErrorCodeParityTests : IClassFixture<DmartFactory>
 
     // ---------- INVALID_PASSWORD_RULES ----------
 
-    [Fact]
+    [FactIfPg]
     public async Task UpdateProfile_WeakPassword_Returns_INVALID_PASSWORD_RULES()
     {
-        if (!DmartFactory.HasPg) return;
         var (shortname, pw) = await CreateActiveUserAsync("ValidPassword1");
         try
         {
@@ -82,10 +80,9 @@ public sealed class ErrorCodeParityTests : IClassFixture<DmartFactory>
         finally { await DeleteUserAsync(shortname); }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task UpdateProfile_StrongPassword_Succeeds()
     {
-        if (!DmartFactory.HasPg) return;
         var (shortname, pw) = await CreateActiveUserAsync("OldPassword1");
         try
         {
@@ -116,10 +113,9 @@ public sealed class ErrorCodeParityTests : IClassFixture<DmartFactory>
 
     // ---------- INVALID_ROUTE ----------
 
-    [Fact]
+    [FactIfPg]
     public async Task UnknownRoute_Returns_INVALID_ROUTE_230()
     {
-        if (!DmartFactory.HasPg) return;
         var client = _factory.CreateClient();
         var resp = await client.GetAsync("/this/is/not/a/real/endpoint");
         ((int)resp.StatusCode).ShouldBe(422);
@@ -131,10 +127,9 @@ public sealed class ErrorCodeParityTests : IClassFixture<DmartFactory>
 
     // ---------- CANNT_DELETE ----------
 
-    [Fact]
+    [FactIfPg]
     public async Task DeleteManagementSpace_Returns_CANNT_DELETE()
     {
-        if (!DmartFactory.HasPg) return;
         var client = _factory.CreateClient();
         var login = new UserLoginRequest(_factory.AdminShortname, null, null, _factory.AdminPassword, null);
         var loginResp = await client.PostAsJsonAsync("/user/login", login, DmartJsonContext.Default.UserLoginRequest);

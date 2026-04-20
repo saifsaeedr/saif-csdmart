@@ -63,10 +63,9 @@ public class SecurityAndRobustnessTests : IClassFixture<DmartFactory>
 
     // ==================== Query limit clamped ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Query_Limit_Clamped_To_MaxQueryLimit()
     {
-        if (!DmartFactory.HasPg) return;
         var svc = _factory.Services.GetRequiredService<QueryService>();
         // Request limit=999999 — should be clamped to MaxQueryLimit (default 10000).
         var resp = await svc.ExecuteAsync(new Query
@@ -84,10 +83,9 @@ public class SecurityAndRobustnessTests : IClassFixture<DmartFactory>
 
     // ==================== Exception messages masked ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Query_Error_Does_Not_Leak_Exception_Details()
     {
-        if (!DmartFactory.HasPg) return;
         var (client, _) = await LoginAsync();
         // Send malformed JSON to /managed/query — error should be generic.
         var resp = await client.PostAsync("/managed/query",
@@ -101,10 +99,9 @@ public class SecurityAndRobustnessTests : IClassFixture<DmartFactory>
 
     // ==================== WebSocket info endpoint ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task WsInfo_Returns_Connected_Clients()
     {
-        if (!DmartFactory.HasPg) return;
         var (client, _) = await LoginAsync();
         var resp = await client.GetAsync("/ws-info");
         resp.StatusCode.ShouldBe(HttpStatusCode.OK);
@@ -125,10 +122,9 @@ public class SecurityAndRobustnessTests : IClassFixture<DmartFactory>
 
     // ==================== WebSocket broadcast endpoint ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Broadcast_Endpoint_Returns_Success()
     {
-        if (!DmartFactory.HasPg) return;
         var (client, _) = await LoginAsync();
         var body = new StringContent(
             "{\"type\":\"test\",\"message\":{\"hello\":\"world\"},\"channels\":[\"test:/:__ALL__:__ALL__:__ALL__\"]}",
@@ -152,10 +148,9 @@ public class SecurityAndRobustnessTests : IClassFixture<DmartFactory>
 
     // ==================== Send-message endpoint ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task SendMessage_Endpoint_Returns_Success()
     {
-        if (!DmartFactory.HasPg) return;
         var (client, _) = await LoginAsync();
         var body = new StringContent(
             "{\"type\":\"test\",\"message\":{\"data\":\"hello\"}}",
@@ -179,12 +174,11 @@ public class SecurityAndRobustnessTests : IClassFixture<DmartFactory>
         resp.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task SendMessage_Escapes_MsgType_With_Quotes()
     {
         // An attacker-supplied msgType containing quotes must not break the JSON
         // structure of the broadcast payload (JSON injection).
-        if (!DmartFactory.HasPg) return;
         var (client, _) = await LoginAsync();
         var body = new StringContent(
             "{\"type\":\"evil\\\",\\\"injected\\\":\\\"x\",\"message\":{}}",

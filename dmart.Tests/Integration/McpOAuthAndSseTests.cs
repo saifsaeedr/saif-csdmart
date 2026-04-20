@@ -25,10 +25,9 @@ public sealed class McpOAuthAndSseTests : IClassFixture<DmartFactory>
 
     // ---- Discovery ----
 
-    [Fact]
+    [FactIfPg]
     public async Task ProtectedResourceMetadata_Advertises_Authorization_Server()
     {
-        if (!DmartFactory.HasPg) return;
         using var client = _factory.CreateClient();
 
         var resp = await client.GetAsync("/.well-known/oauth-protected-resource");
@@ -43,10 +42,9 @@ public sealed class McpOAuthAndSseTests : IClassFixture<DmartFactory>
         root.GetProperty("resource").GetString().ShouldEndWith("/mcp");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Authorize_Form_Posts_Back_To_Current_Url()
     {
-        if (!DmartFactory.HasPg) return;
         using var client = _factory.CreateClient();
 
         const string redirectUri = "http://localhost/form-action-test/callback";
@@ -69,10 +67,9 @@ public sealed class McpOAuthAndSseTests : IClassFixture<DmartFactory>
         page.ShouldNotContain("action=\"/oauth/authorize\"");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Unauthenticated_Mcp_401_Carries_WWWAuthenticate_With_ResourceMetadata()
     {
-        if (!DmartFactory.HasPg) return;
         using var client = _factory.CreateClient();
 
         // No Authorization header → JwtBearer challenges. The response MUST
@@ -91,10 +88,9 @@ public sealed class McpOAuthAndSseTests : IClassFixture<DmartFactory>
         header.ShouldContain("/.well-known/oauth-protected-resource");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task AuthorizationServerMetadata_Declares_Pkce_Only_Public_Clients()
     {
-        if (!DmartFactory.HasPg) return;
         using var client = _factory.CreateClient();
 
         var resp = await client.GetAsync("/.well-known/oauth-authorization-server");
@@ -119,10 +115,9 @@ public sealed class McpOAuthAndSseTests : IClassFixture<DmartFactory>
 
     // ---- Dynamic client registration + authorize + token ----
 
-    [Fact]
+    [FactIfPg]
     public async Task FullOauthCodeFlow_With_Pkce_Issues_Valid_JwtAccessToken()
     {
-        if (!DmartFactory.HasPg) return;
         using var client = _factory.CreateClient();
         // Disable auto-redirects so the /oauth/authorize POST's 302 is visible.
         using var noRedirect = _factory.CreateClient(
@@ -193,10 +188,9 @@ public sealed class McpOAuthAndSseTests : IClassFixture<DmartFactory>
         ping.StatusCode.ShouldBe(HttpStatusCode.OK);
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Token_With_Wrong_Verifier_Is_Rejected()
     {
-        if (!DmartFactory.HasPg) return;
         using var client = _factory.CreateClient();
         var noRedirect = _factory.CreateClient(
             new Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactoryClientOptions
@@ -242,20 +236,18 @@ public sealed class McpOAuthAndSseTests : IClassFixture<DmartFactory>
         body.GetProperty("error").GetString().ShouldBe("invalid_grant");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Authorize_With_Unknown_Client_Is_Rejected()
     {
-        if (!DmartFactory.HasPg) return;
         using var client = _factory.CreateClient();
         var resp = await client.GetAsync(
             "/oauth/authorize?response_type=code&client_id=mcp_nope&redirect_uri=http://localhost/cb&code_challenge=abc");
         resp.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task RefreshToken_Issues_New_Access()
     {
-        if (!DmartFactory.HasPg) return;
         // Login the old-fashioned way to grab a refresh_token, then exchange.
         using var client = _factory.CreateClient();
         var login = new UserLoginRequest(
@@ -279,20 +271,17 @@ public sealed class McpOAuthAndSseTests : IClassFixture<DmartFactory>
 
     // ---- SSE + elicitation ----
 
-    [Fact]
+    [FactIfPg]
     public async Task SseGet_WithoutInitialize_Returns_BadRequest()
     {
-        if (!DmartFactory.HasPg) return;
         using var client = await LoginClient();
         var resp = await client.GetAsync("/mcp");
         resp.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Elicitation_Declined_Delete_Cancels_Without_Throwing()
     {
-        if (!DmartFactory.HasPg) return;
-
         // This is a focused unit-level test on McpElicitation — we push an
         // "action=decline" result into the pending TCS directly and verify the
         // DeleteAsync path routes through BuildDeclinedResponse rather than
@@ -333,10 +322,9 @@ public sealed class McpOAuthAndSseTests : IClassFixture<DmartFactory>
         outcome.ShouldBe(McpElicitation.Outcome.Declined);
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Elicitation_Accepted_Returns_Accepted_Outcome()
     {
-        if (!DmartFactory.HasPg) return;
         var store = _factory.Services.GetRequiredService<McpSessionStore>();
         var session = store.Create("xunit-accept", "0", "2025-03-26");
         session.UserShortname = "dmart";

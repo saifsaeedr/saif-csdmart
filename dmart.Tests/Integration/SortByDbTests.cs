@@ -20,10 +20,9 @@ public sealed class SortByDbTests : IClassFixture<DmartFactory>
     private readonly DmartFactory _factory;
     public SortByDbTests(DmartFactory factory) => _factory = factory;
 
-    [Fact]
+    [FactIfPg]
     public async Task JsonPath_Sort_Numeric_Orders_Values_Numerically()
     {
-        if (!DmartFactory.HasPg) return;
         _factory.CreateClient();
         var entryRepo = _factory.Services.GetRequiredService<EntryRepository>();
         var query = _factory.Services.GetRequiredService<QueryService>();
@@ -86,10 +85,9 @@ public sealed class SortByDbTests : IClassFixture<DmartFactory>
         }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task CommaList_Sort_Path_Then_Column_Applies_Tiebreaker()
     {
-        if (!DmartFactory.HasPg) return;
         _factory.CreateClient();
         var entryRepo = _factory.Services.GetRequiredService<EntryRepository>();
         var query = _factory.Services.GetRequiredService<QueryService>();

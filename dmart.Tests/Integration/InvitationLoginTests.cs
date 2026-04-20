@@ -23,18 +23,15 @@ public sealed class InvitationLoginTests : IClassFixture<DmartFactory>, IAsyncLi
 
     public async Task InitializeAsync()
     {
-        if (!DmartFactory.HasPg) return;
         // no-op — each test provisions its own user
         await Task.CompletedTask;
     }
 
     public async Task DisposeAsync() => await Task.CompletedTask;
 
-    [Fact]
+    [FactIfPg]
     public async Task ValidInvitation_SucceedsAndSetsForcePasswordChange()
     {
-        if (!DmartFactory.HasPg) return;
-
         var (shortname, _) = await CreateUserAsync(email: true);
         var token = await MintAsync(shortname, InvitationChannel.Email);
 
@@ -63,11 +60,9 @@ public sealed class InvitationLoginTests : IClassFixture<DmartFactory>, IAsyncLi
         }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task ReusedInvitation_Fails()
     {
-        if (!DmartFactory.HasPg) return;
-
         var (shortname, _) = await CreateUserAsync(email: true);
         var token = await MintAsync(shortname, InvitationChannel.Email);
 
@@ -88,11 +83,9 @@ public sealed class InvitationLoginTests : IClassFixture<DmartFactory>, IAsyncLi
         }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task UnknownTokenNotInDb_Fails()
     {
-        if (!DmartFactory.HasPg) return;
-
         // Mint a JWT but DON'T persist the row — invitation login requires
         // the DB row, so this should fail with INVALID_INVITATION.
         var (shortname, _) = await CreateUserAsync(email: true);
@@ -113,11 +106,9 @@ public sealed class InvitationLoginTests : IClassFixture<DmartFactory>, IAsyncLi
         }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task TamperedToken_Fails()
     {
-        if (!DmartFactory.HasPg) return;
-
         var (shortname, _) = await CreateUserAsync(email: true);
         var token = await MintAsync(shortname, InvitationChannel.Email);
         var parts = token.Split('.');
@@ -137,11 +128,9 @@ public sealed class InvitationLoginTests : IClassFixture<DmartFactory>, IAsyncLi
         }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task IdentityMismatch_Fails()
     {
-        if (!DmartFactory.HasPg) return;
-
         var (shortname, _) = await CreateUserAsync(email: true);
         var token = await MintAsync(shortname, InvitationChannel.Email);
 
@@ -164,11 +153,9 @@ public sealed class InvitationLoginTests : IClassFixture<DmartFactory>, IAsyncLi
         }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task SetPasswordClearsForcePasswordChange()
     {
-        if (!DmartFactory.HasPg) return;
-
         var (shortname, _) = await CreateUserAsync(email: true, password: "OldPass1234!");
         try
         {

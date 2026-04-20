@@ -66,10 +66,9 @@ public class InfoTests : IClassFixture<DmartFactory>
         }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Settings_With_Auth_Returns_Listening_Port()
     {
-        if (!DmartFactory.HasPg) return;
         var client = _factory.CreateClient();
         var login = new Dmart.Models.Api.UserLoginRequest(
             _factory.AdminShortname, null, null, _factory.AdminPassword, null);

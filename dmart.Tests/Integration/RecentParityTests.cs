@@ -60,10 +60,9 @@ public class RecentParityTests : IClassFixture<DmartFactory>
 
     // ==================== __root__ magic word ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Root_Magic_Word_Resolves_To_Root_Subpath()
     {
-        if (!DmartFactory.HasPg) return;
         var (client, _) = await LoginAsync();
         await EnsureTestSpaceAsync(client);
         try
@@ -79,10 +78,9 @@ public class RecentParityTests : IClassFixture<DmartFactory>
 
     // ==================== resource_type fallback ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Entry_Lookup_Falls_Back_When_ResourceType_Mismatches()
     {
-        if (!DmartFactory.HasPg) return;
         var (client, _) = await LoginAsync();
         await EnsureTestSpaceAsync(client);
         try
@@ -98,10 +96,9 @@ public class RecentParityTests : IClassFixture<DmartFactory>
 
     // ==================== entry routing by resource_type ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Entry_Space_Routes_To_Spaces_Table()
     {
-        if (!DmartFactory.HasPg) return;
         var (client, _) = await LoginAsync();
         var resp = await client.GetAsync("/managed/entry/space/management/__root__/management");
         resp.StatusCode.ShouldBe(HttpStatusCode.OK);
@@ -109,10 +106,9 @@ public class RecentParityTests : IClassFixture<DmartFactory>
         json.ShouldContain("\"space\"");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Entry_User_Routes_To_Users_Table()
     {
-        if (!DmartFactory.HasPg) return;
         var (client, _) = await LoginAsync();
         var resp = await client.GetAsync($"/managed/entry/user/management/__root__/{_factory.AdminShortname}");
         resp.StatusCode.ShouldBe(HttpStatusCode.OK);
@@ -122,10 +118,9 @@ public class RecentParityTests : IClassFixture<DmartFactory>
 
     // ==================== exact_subpath ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task ExactSubpath_Root_Returns_Only_Root_Entries()
     {
-        if (!DmartFactory.HasPg) return;
         var (client, _) = await LoginAsync();
         await EnsureTestSpaceAsync(client);
         try
@@ -150,10 +145,9 @@ public class RecentParityTests : IClassFixture<DmartFactory>
 
     // ==================== search includes shortname ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Search_Finds_By_Shortname()
     {
-        if (!DmartFactory.HasPg) return;
         var (client, _) = await LoginAsync();
         await EnsureTestSpaceAsync(client);
         try
@@ -172,10 +166,9 @@ public class RecentParityTests : IClassFixture<DmartFactory>
 
     // ==================== profile returns records[] ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Profile_Returns_Records_With_Permissions()
     {
-        if (!DmartFactory.HasPg) return;
         var (client, _) = await LoginAsync();
         var resp = await client.GetAsync("/user/profile");
         var body = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
@@ -192,10 +185,9 @@ public class RecentParityTests : IClassFixture<DmartFactory>
 
     // ==================== auto shortname ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Auto_Shortname_Generates_UUID_Prefix()
     {
-        if (!DmartFactory.HasPg) return;
         var (client, _) = await LoginAsync();
         await EnsureTestSpaceAsync(client);
         try
@@ -217,10 +209,9 @@ public class RecentParityTests : IClassFixture<DmartFactory>
 
     // ==================== space create triggers schema folder ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Space_Create_Triggers_Schema_Folder_Plugin()
     {
-        if (!DmartFactory.HasPg) return;
         var (client, _) = await LoginAsync();
         var spaceName = $"pltest_{Guid.NewGuid():N}"[..12];
         try

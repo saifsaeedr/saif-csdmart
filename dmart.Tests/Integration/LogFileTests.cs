@@ -72,11 +72,9 @@ public sealed class LogFileTests
         finally { Delete(path); }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Login_With_LogFile_Logs_AccessRecord_AndRedactsPassword()
     {
-        if (!DmartFactory.HasPg) return;
-
         var path = NewTempLog();
         try
         {

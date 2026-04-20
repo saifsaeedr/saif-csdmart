@@ -16,11 +16,9 @@ public class ManagedCrudDbTests : IClassFixture<DmartFactory>
     private readonly DmartFactory _factory;
     public ManagedCrudDbTests(DmartFactory factory) => _factory = factory;
 
-    [Fact]
+    [FactIfPg]
     public async Task Create_Get_Update_Delete_Roundtrip()
     {
-        if (!DmartFactory.HasPg) return;
-
         var client = _factory.CreateClient();
         var token = await GetTokenAsync(client);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
@@ -102,11 +100,9 @@ public class ManagedCrudDbTests : IClassFixture<DmartFactory>
         afterDelete.StatusCode.ShouldBe(HttpStatusCode.NotFound);
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Query_Returns_Success_With_Records_List()
     {
-        if (!DmartFactory.HasPg) return;
-
         var client = _factory.CreateClient();
         var token = await GetTokenAsync(client);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
@@ -124,11 +120,9 @@ public class ManagedCrudDbTests : IClassFixture<DmartFactory>
         body!.Status.ShouldBe(Status.Success);
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Managed_Without_Auth_Returns_401()
     {
-        if (!DmartFactory.HasPg) return;
-
         var client = _factory.CreateClient();
         var resp = await client.GetAsync("/managed/entry/content/test/itest/anything");
         resp.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);

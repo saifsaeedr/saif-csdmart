@@ -27,11 +27,9 @@ public class CurlScenarioTests : IClassFixture<DmartFactory>
     private readonly DmartFactory _factory;
     public CurlScenarioTests(DmartFactory factory) => _factory = factory;
 
-    [Fact]
+    [FactIfPg]
     public async Task Full_Curl_Sh_Scenario_End_To_End()
     {
-        if (!DmartFactory.HasPg) return;
-
         var client = _factory.CreateClient();
 
         // ---------------------------------------------------------------------

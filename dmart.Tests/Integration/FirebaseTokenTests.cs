@@ -23,11 +23,9 @@ public sealed class FirebaseTokenTests : IClassFixture<DmartFactory>
     private readonly DmartFactory _factory;
     public FirebaseTokenTests(DmartFactory factory) => _factory = factory;
 
-    [Fact]
+    [FactIfPg]
     public async Task Login_With_FirebaseToken_PersistsOnSession()
     {
-        if (!DmartFactory.HasPg) return;
-
         var (shortname, password) = await CreateUserAsync();
         try
         {
@@ -46,11 +44,9 @@ public sealed class FirebaseTokenTests : IClassFixture<DmartFactory>
         finally { await DeleteUserAsync(shortname); }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Profile_Update_FirebaseToken_WritesCurrentSessionRow()
     {
-        if (!DmartFactory.HasPg) return;
-
         var (shortname, password) = await CreateUserAsync();
         try
         {
@@ -73,11 +69,9 @@ public sealed class FirebaseTokenTests : IClassFixture<DmartFactory>
         finally { await DeleteUserAsync(shortname); }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Profile_Update_FirebaseToken_DoesNotTouchOtherSessions()
     {
-        if (!DmartFactory.HasPg) return;
-
         var (shortname, password) = await CreateUserAsync();
         try
         {
@@ -108,11 +102,9 @@ public sealed class FirebaseTokenTests : IClassFixture<DmartFactory>
         finally { await DeleteUserAsync(shortname); }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task GetSessionFirebaseTokensAsync_Returns_ActiveTokens()
     {
-        if (!DmartFactory.HasPg) return;
-
         var (shortname, password) = await CreateUserAsync();
         try
         {

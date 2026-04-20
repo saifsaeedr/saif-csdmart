@@ -16,13 +16,12 @@ public class WebSocketAuthTests : IClassFixture<DmartFactory>
     private readonly DmartFactory _factory;
     public WebSocketAuthTests(DmartFactory factory) => _factory = factory;
 
-    [Fact]
+    [FactIfPg]
     public async Task Ws_Without_Auth_Returns_401()
     {
         // No token query param and no auth_token cookie — should get 401.
         // (The handler checks auth before the WebSocket upgrade, so a plain
         // HTTP GET hits the same auth gate.)
-        if (!DmartFactory.HasPg) return;
         var client = _factory.CreateClient();
         var resp = await client.GetAsync("/ws");
         // The handler short-circuits non-upgrade requests with 400 "upgrade
@@ -32,10 +31,9 @@ public class WebSocketAuthTests : IClassFixture<DmartFactory>
         ((int)resp.StatusCode).ShouldBeInRange(400, 499);
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Ws_With_Invalid_Token_Returns_401_Or_400()
     {
-        if (!DmartFactory.HasPg) return;
         var client = _factory.CreateClient();
         // Bogus JWT — the upgrade check still fires first in TestHost, so we
         // get a 4xx rather than a 5xx. Either 400 (upgrade required) or 401
@@ -45,10 +43,9 @@ public class WebSocketAuthTests : IClassFixture<DmartFactory>
         ((int)resp.StatusCode).ShouldBeInRange(400, 499);
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Ws_With_Invalid_Cookie_Returns_4xx()
     {
-        if (!DmartFactory.HasPg) return;
         var client = _factory.CreateClient();
         var req = new HttpRequestMessage(HttpMethod.Get, "/ws");
         req.Headers.Add("Cookie", "auth_token=bogus-cookie-value");

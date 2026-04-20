@@ -42,10 +42,9 @@ public class PluginManagerIntegrationTests : IClassFixture<DmartFactory>
 
     // ==================== plugin discovery ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task PluginManager_Loads_ResourceFoldersCreation_From_ConfigJson()
     {
-        if (!DmartFactory.HasPg) return;
         var (plugins, _, _, _) = Resolve();
         // LoadAsync is called from Program.cs at startup but not from WebApplicationFactory's
         // test host. Load explicitly here so the test host picks up the shipped configs.
@@ -56,10 +55,9 @@ public class PluginManagerIntegrationTests : IClassFixture<DmartFactory>
 
     // ==================== after-hook dispatch through the service ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task CreateSpace_Triggers_ResourceFoldersCreation_To_Materialize_Schema_Folder()
     {
-        if (!DmartFactory.HasPg) return;
         var (plugins, spaces, entries, entryRepo) = Resolve();
         await plugins.LoadAsync();
 
@@ -152,10 +150,9 @@ public class PluginManagerIntegrationTests : IClassFixture<DmartFactory>
 
     // ==================== space active_plugins gating ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task AfterAction_Skips_Plugins_Not_Listed_In_Space_ActivePlugins()
     {
-        if (!DmartFactory.HasPg) return;
         var (plugins, spaces, _, entryRepo) = Resolve();
         await plugins.LoadAsync();
 

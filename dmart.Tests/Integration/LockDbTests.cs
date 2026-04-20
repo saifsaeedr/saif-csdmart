@@ -16,11 +16,9 @@ public class LockDbTests : IClassFixture<DmartFactory>
     private readonly DmartFactory _factory;
     public LockDbTests(DmartFactory factory) => _factory = factory;
 
-    [Fact]
+    [FactIfPg]
     public async Task Lock_Then_Unlock_Round_Trip()
     {
-        if (!DmartFactory.HasPg) return;
-
         var client = _factory.CreateClient();
         var token = await GetTokenAsync(client);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
@@ -46,13 +44,11 @@ public class LockDbTests : IClassFixture<DmartFactory>
         unlockResp.StatusCode.ShouldBe(HttpStatusCode.OK);
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Lock_Response_Includes_LockPeriod()
     {
         // /managed/lock must echo the configured lock_period so clients can
         // schedule a refresh before the lock auto-expires. Mirrors Python.
-        if (!DmartFactory.HasPg) return;
-
         var client = _factory.CreateClient();
         var token = await GetTokenAsync(client);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
@@ -80,14 +76,12 @@ public class LockDbTests : IClassFixture<DmartFactory>
         }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Lock_Expires_After_Very_Short_Period()
     {
         // With LockPeriod overridden to 1 second, a lock acquired by user A
         // is treated as absent 2 seconds later, so user B (or A again) can
         // take it. Exercises the inline TTL check in LockRepository.
-        if (!DmartFactory.HasPg) return;
-
         var factory = _factory.WithWebHostBuilder(b => b.ConfigureServices(svcs =>
         {
             svcs.Configure<Dmart.Config.DmartSettings>(s => s.LockPeriod = 1);

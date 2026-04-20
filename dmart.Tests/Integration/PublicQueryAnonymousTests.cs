@@ -24,11 +24,9 @@ public sealed class PublicQueryAnonymousTests : IClassFixture<DmartFactory>
     private readonly DmartFactory _factory;
     public PublicQueryAnonymousTests(DmartFactory factory) => _factory = factory;
 
-    [Fact]
+    [FactIfPg]
     public async Task PublicQuery_Anonymous_With_World_Permission_Returns_Sorted_Entries()
     {
-        if (!DmartFactory.HasPg) return;
-
         _factory.CreateClient();
         var users = _factory.Services.GetRequiredService<UserRepository>();
         var access = _factory.Services.GetRequiredService<AccessRepository>();
@@ -159,13 +157,12 @@ public sealed class PublicQueryAnonymousTests : IClassFixture<DmartFactory>
         }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task PublicQuery_Anonymous_Without_World_Returns_Zero()
     {
         // Contract: without a world permission in place, anonymous gets empty
         // results (not a 401). The route accepts the request; the permission
         // walk just yields no match → EmptyQueryResponse.
-        if (!DmartFactory.HasPg) return;
         _factory.CreateClient();
         var users = _factory.Services.GetRequiredService<UserRepository>();
         var access = _factory.Services.GetRequiredService<AccessRepository>();
@@ -219,13 +216,12 @@ public sealed class PublicQueryAnonymousTests : IClassFixture<DmartFactory>
 
     // ---- over-access ----
 
-    [Fact]
+    [FactIfPg]
     public async Task World_AllSpaces_Magic_Word_Grants_Any_Space()
     {
         // Permission keyed under "__all_spaces__": any space name on the wire
         // must resolve via that bucket. Uses a freshly-created space unrelated
         // to the permission's configured scope — proves the magic word works.
-        if (!DmartFactory.HasPg) return;
         await using var h = await WorldScopeHarness.CreateAsync(_factory,
             subpaths: new() { [PermissionService.AllSpacesMw] = new() { PermissionService.AllSubpathsMw } },
             actions: new() { "view", "query" },
@@ -242,13 +238,12 @@ public sealed class PublicQueryAnonymousTests : IClassFixture<DmartFactory>
         r.Records!.Count.ShouldBe(1, "__all_spaces__ must permit any space");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task World_AllSubpaths_Magic_Word_Grants_Any_Subpath_In_Space()
     {
         // Permission has the space scoped but subpath list is __all_subpaths__:
         // any subpath inside that space must pass. Seed at a subpath NOT
         // enumerated literally.
-        if (!DmartFactory.HasPg) return;
         await using var h = await WorldScopeHarness.CreateAsync(_factory,
             subpathsForSpace: new() { PermissionService.AllSubpathsMw },
             actions: new() { "view", "query" },
@@ -265,13 +260,12 @@ public sealed class PublicQueryAnonymousTests : IClassFixture<DmartFactory>
 
     // ---- under-access ----
 
-    [Fact]
+    [FactIfPg]
     public async Task World_Scoped_To_Different_Space_Denies_Other_Space()
     {
         // Permission lists space A; probe space B (the seed space) — must
         // return zero. The caller's anonymous user has ONLY this permission,
         // so B is outside its scope.
-        if (!DmartFactory.HasPg) return;
         var otherSpace = $"other_space_{Guid.NewGuid():N}"[..16];
         await using var h = await WorldScopeHarness.CreateAsync(_factory,
             subpaths: new() { [otherSpace] = new() { PermissionService.AllSubpathsMw } },
@@ -287,11 +281,10 @@ public sealed class PublicQueryAnonymousTests : IClassFixture<DmartFactory>
         r!.Records!.Count.ShouldBe(0, "permission scoped to a different space must NOT grant this one");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task World_Scoped_To_Different_Subpath_Denies_Other_Subpath()
     {
         // Permission lists only /foo for the seed space; probe /bar — zero.
-        if (!DmartFactory.HasPg) return;
         await using var h = await WorldScopeHarness.CreateAsync(_factory,
             subpathsForSpace: new() { "/foo" }, // literal; walk builds "bar" for /bar probe
             actions: new() { "view", "query" },
@@ -307,11 +300,10 @@ public sealed class PublicQueryAnonymousTests : IClassFixture<DmartFactory>
         r!.Records!.Count.ShouldBe(0, "subpath outside the permission's list must NOT match");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task World_Inactive_Permission_Grants_Nothing()
     {
         // is_active=false on the permission row → walk must skip it.
-        if (!DmartFactory.HasPg) return;
         await using var h = await WorldScopeHarness.CreateAsync(_factory,
             subpathsForSpace: new() { PermissionService.AllSubpathsMw },
             actions: new() { "view", "query" },
@@ -327,12 +319,11 @@ public sealed class PublicQueryAnonymousTests : IClassFixture<DmartFactory>
         r!.Records!.Count.ShouldBe(0, "inactive permission must be ignored");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task World_ResourceType_Mismatch_Denies()
     {
         // Permission grants "folder" only; we seed content → zero even though
         // the space+subpath match.
-        if (!DmartFactory.HasPg) return;
         await using var h = await WorldScopeHarness.CreateAsync(_factory,
             subpathsForSpace: new() { PermissionService.AllSubpathsMw },
             actions: new() { "view", "query" },
@@ -347,14 +338,13 @@ public sealed class PublicQueryAnonymousTests : IClassFixture<DmartFactory>
         r!.Records!.Count.ShouldBe(0, "resource_type mismatch must deny");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task World_View_Only_With_IsActive_Condition_Denies_Without_Query_Action()
     {
         // actions=["view"] (no "query") + conditions=["is_active"]:
         //   - "view" fails the condition check at the probe level (no resource loaded → is_active not in achieved set).
         //   - "query" fallback isn't listed → Python-parity bypass doesn't apply.
         //   Net: anonymous sees nothing.
-        if (!DmartFactory.HasPg) return;
         await using var h = await WorldScopeHarness.CreateAsync(_factory,
             subpathsForSpace: new() { PermissionService.AllSubpathsMw },
             actions: new() { "view" },

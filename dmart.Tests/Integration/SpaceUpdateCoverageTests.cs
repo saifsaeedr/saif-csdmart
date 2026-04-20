@@ -24,11 +24,9 @@ public sealed class SpaceUpdateCoverageTests : IClassFixture<DmartFactory>
     private readonly DmartFactory _factory;
     public SpaceUpdateCoverageTests(DmartFactory factory) => _factory = factory;
 
-    [Fact]
+    [FactIfPg]
     public async Task Space_Update_Round_Trips_Every_Patched_Field()
     {
-        if (!DmartFactory.HasPg) return;
-
         var client = _factory.CreateClient();
         var login = new UserLoginRequest(_factory.AdminShortname, null, null, _factory.AdminPassword, null);
         var loginResp = await client.PostAsJsonAsync("/user/login", login, DmartJsonContext.Default.UserLoginRequest);
@@ -138,14 +136,12 @@ public sealed class SpaceUpdateCoverageTests : IClassFixture<DmartFactory>
         }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Space_Update_Absent_Fields_Preserve_Existing_Values()
     {
         // Sibling contract: a partial patch that omits a field must NOT clear
         // the stored value. Guards against a regression where a `?? existing`
         // fallback gets replaced with a bare extract that turns absent → null.
-        if (!DmartFactory.HasPg) return;
-
         var client = _factory.CreateClient();
         var login = new UserLoginRequest(_factory.AdminShortname, null, null, _factory.AdminPassword, null);
         var loginResp = await client.PostAsJsonAsync("/user/login", login, DmartJsonContext.Default.UserLoginRequest);

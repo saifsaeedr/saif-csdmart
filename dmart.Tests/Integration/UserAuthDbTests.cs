@@ -17,11 +17,9 @@ public class UserAuthDbTests : IClassFixture<DmartFactory>
     private readonly DmartFactory _factory;
     public UserAuthDbTests(DmartFactory factory) => _factory = factory;
 
-    [Fact]
+    [FactIfPg]
     public async Task Bootstrap_Admin_Can_Login()
     {
-        if (!DmartFactory.HasPg) return;  // skipped — no DB
-
         var client = _factory.CreateClient();
         var login = new UserLoginRequest(_factory.AdminShortname, null, null, _factory.AdminPassword, null);
         var resp = await client.PostAsJsonAsync("/user/login", login, DmartJsonContext.Default.UserLoginRequest);
@@ -36,11 +34,9 @@ public class UserAuthDbTests : IClassFixture<DmartFactory>
         body.Records![0].Attributes!.ContainsKey("access_token").ShouldBeTrue();
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Wrong_Password_Returns_401()
     {
-        if (!DmartFactory.HasPg) return;
-
         var client = _factory.CreateClient();
         var login = new UserLoginRequest(_factory.AdminShortname, null, null, "definitely-wrong", null);
         var resp = await client.PostAsJsonAsync("/user/login", login, DmartJsonContext.Default.UserLoginRequest);
@@ -52,11 +48,9 @@ public class UserAuthDbTests : IClassFixture<DmartFactory>
         await users.ResetAttemptsAsync(_factory.AdminShortname);
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Authenticated_Me_Returns_Identity()
     {
-        if (!DmartFactory.HasPg) return;
-
         var client = _factory.CreateClient();
         var token = await LoginAdminAndGetTokenAsync(client);
         token.ShouldNotBeNull();
@@ -70,11 +64,9 @@ public class UserAuthDbTests : IClassFixture<DmartFactory>
         }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Profile_Returns_Admin_Details_When_Authenticated()
     {
-        if (!DmartFactory.HasPg) return;
-
         var client = _factory.CreateClient();
         var token = await LoginAdminAndGetTokenAsync(client);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
@@ -88,11 +80,9 @@ public class UserAuthDbTests : IClassFixture<DmartFactory>
         body.Records![0].Shortname.ShouldBe(_factory.AdminShortname);
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Profile_Does_Not_Return_Empty_String_For_Null_Optional_Fields()
     {
-        if (!DmartFactory.HasPg) return;
-
         var client = _factory.CreateClient();
         var token = await LoginAdminAndGetTokenAsync(client);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
@@ -118,11 +108,9 @@ public class UserAuthDbTests : IClassFixture<DmartFactory>
         }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Check_Existing_Returns_Conflict_For_Admin()
     {
-        if (!DmartFactory.HasPg) return;
-
         var client = _factory.CreateClient();
         var resp = await client.GetAsync($"/user/check-existing?shortname={_factory.AdminShortname}");
         resp.StatusCode.ShouldBe(HttpStatusCode.OK);
@@ -132,11 +120,9 @@ public class UserAuthDbTests : IClassFixture<DmartFactory>
         ((JsonElement)body.Attributes!["field"]!).GetString().ShouldBe("shortname");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Successful_Login_Resets_AttemptCount_To_Zero()
     {
-        if (!DmartFactory.HasPg) return;
-
         var users = _factory.Services.GetRequiredService<Dmart.DataAdapters.Sql.UserRepository>();
         var db = _factory.Services.GetRequiredService<Dmart.DataAdapters.Sql.Db>();
 

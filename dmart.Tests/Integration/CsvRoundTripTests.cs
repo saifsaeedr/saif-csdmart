@@ -29,11 +29,9 @@ public class CsvRoundTripTests : IClassFixture<DmartFactory>
     private readonly DmartFactory _factory;
     public CsvRoundTripTests(DmartFactory factory) => _factory = factory;
 
-    [Fact]
+    [FactIfPg]
     public async Task Csv_Import_Then_Export_Exercises_Flatten_And_Parse_Branches()
     {
-        if (!DmartFactory.HasPg) return;
-
         var client = _factory.CreateClient();
 
         // ---- login ------------------------------------------------------

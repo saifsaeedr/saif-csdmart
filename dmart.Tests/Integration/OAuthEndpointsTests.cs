@@ -25,13 +25,12 @@ public sealed class OAuthEndpointsTests : IClassFixture<DmartFactory>
     private readonly DmartFactory _factory;
     public OAuthEndpointsTests(DmartFactory factory) => _factory = factory;
 
-    [Theory]
+    [TheoryIfPg]
     [InlineData("google")]
     [InlineData("facebook")]
     [InlineData("apple")]
     public async Task MobileLogin_Unconfigured_ReturnsNotConfigured(string provider)
     {
-        if (!DmartFactory.HasPg) return;
         using var client = _factory.CreateClient();
 
         var resp = await client.PostAsJsonAsync(
@@ -43,13 +42,12 @@ public sealed class OAuthEndpointsTests : IClassFixture<DmartFactory>
         body.ShouldContain("not configured");
     }
 
-    [Theory]
+    [TheoryIfPg]
     [InlineData("google")]
     [InlineData("facebook")]
     [InlineData("apple")]
     public async Task Callback_MissingCode_ReturnsCleanError(string provider)
     {
-        if (!DmartFactory.HasPg) return;
         using var client = _factory.CreateClient();
 
         // `?code=` omitted entirely. With providers unconfigured in this
@@ -65,10 +63,9 @@ public sealed class OAuthEndpointsTests : IClassFixture<DmartFactory>
 
     // OAuthUserResolver — unit-level, but requires DB → put it here with the
     // other DB-backed integration tests so it uses the shared factory.
-    [Fact]
+    [FactIfPg]
     public async Task Resolver_CreatesNewUser_WithProviderShortname()
     {
-        if (!DmartFactory.HasPg) return;
         var resolver = _factory.Services.GetRequiredService<OAuthUserResolver>();
         var users = _factory.Services.GetRequiredService<UserRepository>();
 
@@ -99,10 +96,9 @@ public sealed class OAuthEndpointsTests : IClassFixture<DmartFactory>
         }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Resolver_EmailMatch_PromotesExisting()
     {
-        if (!DmartFactory.HasPg) return;
         var resolver = _factory.Services.GetRequiredService<OAuthUserResolver>();
         var users = _factory.Services.GetRequiredService<UserRepository>();
 

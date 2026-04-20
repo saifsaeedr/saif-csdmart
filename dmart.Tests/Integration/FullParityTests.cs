@@ -37,10 +37,9 @@ public class FullParityTests : IClassFixture<DmartFactory>
 
     // ==================== Login response shape ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Login_Returns_Records_Not_Attributes()
     {
-        if (!DmartFactory.HasPg) return;
         var client = _factory.CreateClient();
         var login = new UserLoginRequest(_factory.AdminShortname, null, null, _factory.AdminPassword, null);
         var resp = await client.PostAsJsonAsync("/user/login", login, DmartJsonContext.Default.UserLoginRequest);
@@ -60,10 +59,9 @@ public class FullParityTests : IClassFixture<DmartFactory>
 
     // ==================== Session management ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Login_Creates_Session_Row_In_DB()
     {
-        if (!DmartFactory.HasPg) return;
         var (client, _) = await LoginAsync();
         var db = _factory.Services.GetRequiredService<Db>();
         await using var conn = await db.OpenAsync();
@@ -74,10 +72,9 @@ public class FullParityTests : IClassFixture<DmartFactory>
         count.ShouldBeGreaterThan(0);
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Logout_Clears_Session()
     {
-        if (!DmartFactory.HasPg) return;
         var (client, _) = await LoginAsync();
         // Logout
         await client.PostAsync("/user/logout", null);
@@ -86,10 +83,9 @@ public class FullParityTests : IClassFixture<DmartFactory>
 
     // ==================== Account lockout ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Account_Lockout_After_Max_Failed_Attempts()
     {
-        if (!DmartFactory.HasPg) return;
         var users = _factory.Services.GetRequiredService<UserRepository>();
         var hasher = _factory.Services.GetRequiredService<Dmart.Auth.PasswordHasher>();
         var db = _factory.Services.GetRequiredService<Db>();
@@ -151,10 +147,9 @@ public class FullParityTests : IClassFixture<DmartFactory>
 
     // ==================== Query table routing ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Query_Management_Users_Returns_User_ResourceType()
     {
-        if (!DmartFactory.HasPg) return;
         var svc = _factory.Services.GetRequiredService<QueryService>();
         var resp = await svc.ExecuteAsync(new Query
         {
@@ -166,10 +161,9 @@ public class FullParityTests : IClassFixture<DmartFactory>
         foreach (var r in resp.Records) r.ResourceType.ShouldBe(ResourceType.User);
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Query_Management_Roles_Returns_Role_ResourceType()
     {
-        if (!DmartFactory.HasPg) return;
         var svc = _factory.Services.GetRequiredService<QueryService>();
         var resp = await svc.ExecuteAsync(new Query
         {
@@ -180,10 +174,9 @@ public class FullParityTests : IClassFixture<DmartFactory>
         foreach (var r in resp.Records!) r.ResourceType.ShouldBe(ResourceType.Role);
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Query_Management_Permissions_Returns_Permission_ResourceType()
     {
-        if (!DmartFactory.HasPg) return;
         var svc = _factory.Services.GetRequiredService<QueryService>();
         var resp = await svc.ExecuteAsync(new Query
         {
@@ -194,10 +187,9 @@ public class FullParityTests : IClassFixture<DmartFactory>
         foreach (var r in resp.Records!) r.ResourceType.ShouldBe(ResourceType.Permission);
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Query_History_Returns_History_ResourceType()
     {
-        if (!DmartFactory.HasPg) return;
         var svc = _factory.Services.GetRequiredService<QueryService>();
         var resp = await svc.ExecuteAsync(new Query
         {
@@ -208,10 +200,9 @@ public class FullParityTests : IClassFixture<DmartFactory>
             foreach (var r in resp.Records) r.ResourceType.ShouldBe(ResourceType.History);
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Query_History_Blocks_Anonymous()
     {
-        if (!DmartFactory.HasPg) return;
         var svc = _factory.Services.GetRequiredService<QueryService>();
         var resp = await svc.ExecuteAsync(new Query
         {
@@ -221,10 +212,9 @@ public class FullParityTests : IClassFixture<DmartFactory>
         resp.Error!.Message.ShouldContain("authentication");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Query_Tags_Returns_Aggregated_Tags()
     {
-        if (!DmartFactory.HasPg) return;
         var svc = _factory.Services.GetRequiredService<QueryService>();
         var resp = await svc.ExecuteAsync(new Query
         {
@@ -240,10 +230,9 @@ public class FullParityTests : IClassFixture<DmartFactory>
         }
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Query_Counters_Returns_Empty_Records_With_Total()
     {
-        if (!DmartFactory.HasPg) return;
         var svc = _factory.Services.GetRequiredService<QueryService>();
         var resp = await svc.ExecuteAsync(new Query
         {
@@ -257,10 +246,9 @@ public class FullParityTests : IClassFixture<DmartFactory>
 
     // ==================== Query response envelope ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Query_Response_Has_Total_And_Returned()
     {
-        if (!DmartFactory.HasPg) return;
         var svc = _factory.Services.GetRequiredService<QueryService>();
         var resp = await svc.ExecuteAsync(new Query
         {
@@ -277,10 +265,9 @@ public class FullParityTests : IClassFixture<DmartFactory>
 
     // ==================== Profile completeness ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Profile_GET_Returns_All_Python_Parity_Fields()
     {
-        if (!DmartFactory.HasPg) return;
         var (client, _) = await LoginAsync();
         var resp = await client.GetAsync("/user/profile");
         var body = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
@@ -309,10 +296,9 @@ public class FullParityTests : IClassFixture<DmartFactory>
 
     // ==================== validate_password ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task ValidatePassword_Requires_Auth()
     {
-        if (!DmartFactory.HasPg) return;
         var client = _factory.CreateClient();
         // No auth header
         var resp = await client.PostAsync("/user/validate_password",
@@ -321,10 +307,9 @@ public class FullParityTests : IClassFixture<DmartFactory>
         body!.Status.ShouldBe(Status.Failed);
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task ValidatePassword_Correct_Returns_True()
     {
-        if (!DmartFactory.HasPg) return;
         var (client, _) = await LoginAsync();
         var resp = await client.PostAsync("/user/validate_password",
             new StringContent($"{{\"password\":\"{_factory.AdminPassword}\"}}", Encoding.UTF8, "application/json"));
@@ -333,10 +318,9 @@ public class FullParityTests : IClassFixture<DmartFactory>
         ((JsonElement)body.Attributes!["valid"]!).GetBoolean().ShouldBeTrue();
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task ValidatePassword_Wrong_Returns_False()
     {
-        if (!DmartFactory.HasPg) return;
         var (client, _) = await LoginAsync();
         var resp = await client.PostAsync("/user/validate_password",
             new StringContent("{\"password\":\"wrong-password\"}", Encoding.UTF8, "application/json"));
@@ -347,10 +331,9 @@ public class FullParityTests : IClassFixture<DmartFactory>
 
     // ==================== check-existing short-circuit response ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task CheckExisting_ShortCircuits_On_First_Conflict()
     {
-        if (!DmartFactory.HasPg) return;
         var client = _factory.CreateClient();
         // Shortname exists → returns {"unique": false, "field": "shortname"}
         // without evaluating the email/msisdn params (Python parity).
@@ -362,10 +345,9 @@ public class FullParityTests : IClassFixture<DmartFactory>
         ((JsonElement)body.Attributes!["field"]!).GetString().ShouldBe("shortname");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task CheckExisting_Returns_Unique_When_All_Free()
     {
-        if (!DmartFactory.HasPg) return;
         var client = _factory.CreateClient();
         var resp = await client.GetAsync("/user/check-existing?shortname=nobody_xyz_123&email=nobody_xyz_123@example.com");
         var body = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
@@ -376,10 +358,9 @@ public class FullParityTests : IClassFixture<DmartFactory>
 
     // ==================== Correlation ID header ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Response_Has_CorrelationId_Header()
     {
-        if (!DmartFactory.HasPg) return;
         var client = _factory.CreateClient();
         var resp = await client.GetAsync("/");
         resp.Headers.Contains("X-Correlation-ID").ShouldBeTrue();
@@ -387,10 +368,9 @@ public class FullParityTests : IClassFixture<DmartFactory>
 
     // ==================== User record password stripped ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Query_Users_Does_Not_Leak_Password()
     {
-        if (!DmartFactory.HasPg) return;
         var svc = _factory.Services.GetRequiredService<QueryService>();
         var resp = await svc.ExecuteAsync(new Query
         {
@@ -405,11 +385,10 @@ public class FullParityTests : IClassFixture<DmartFactory>
 
     // ==================== is_registrable enforcement ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Create_User_Rejected_Without_Email_Or_Msisdn()
     {
         // Python parity: record.attributes must carry email or msisdn.
-        if (!DmartFactory.HasPg) return;
         var client = _factory.CreateClient();
         var shortname = "regtest_" + Guid.NewGuid().ToString("N")[..6];
         var body = "{\"resource_type\":\"user\",\"shortname\":\"" + shortname + "\",\"subpath\":\"/\",\"attributes\":{\"password\":\"Testtest1234\"}}";
@@ -422,12 +401,11 @@ public class FullParityTests : IClassFixture<DmartFactory>
 
     // ==================== is_otp_for_create_required enforcement ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Create_User_With_Email_And_No_Otp_Is_Rejected_When_Required()
     {
         // Default config has IsOtpForCreateRequired=true. Supplying email
         // without email_otp must produce a structured bad_request.
-        if (!DmartFactory.HasPg) return;
         var client = _factory.CreateClient();
         var shortname = "otpreq_" + Guid.NewGuid().ToString("N")[..6];
         var body = "{\"resource_type\":\"user\",\"shortname\":\"" + shortname + "\",\"subpath\":\"/\",\"attributes\":{\"email\":\"a@b.c\",\"password\":\"Testtest1234\"}}";
@@ -438,12 +416,11 @@ public class FullParityTests : IClassFixture<DmartFactory>
         result.Error!.Message.ShouldContain("Email OTP");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Create_User_With_Valid_Email_Otp_Succeeds()
     {
         // Pre-store an OTP against the email, then /user/create peeks it
         // (Python parity — verify_user doesn't consume).
-        if (!DmartFactory.HasPg) return;
         var otpRepo = _factory.Services.GetRequiredService<OtpRepository>();
         var shortname = "otpok_" + Guid.NewGuid().ToString("N")[..6];
         var email = shortname + "@example.test";
@@ -466,12 +443,11 @@ public class FullParityTests : IClassFixture<DmartFactory>
 
     // ==================== session_inactivity_ttl enforcement ====================
 
-    [Fact]
+    [FactIfPg]
     public async Task Session_Expires_After_Inactivity_Ttl()
     {
         // With SessionInactivityTtl set to 1 second, a login-issued token is
         // accepted, then rejected after the session row ages past 1 second.
-        if (!DmartFactory.HasPg) return;
         var factory = _factory.WithWebHostBuilder(b => b.ConfigureServices(svcs =>
         {
             svcs.Configure<Dmart.Config.DmartSettings>(s => s.SessionInactivityTtl = 1);
@@ -499,12 +475,11 @@ public class FullParityTests : IClassFixture<DmartFactory>
         expired.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Create_User_With_Email_Succeeds_When_Otp_Check_Disabled()
     {
         // With IsOtpForCreateRequired=false, registration must proceed
         // without any OTP present.
-        if (!DmartFactory.HasPg) return;
         var factory = _factory.WithWebHostBuilder(b => b.ConfigureServices(svcs =>
         {
             svcs.Configure<Dmart.Config.DmartSettings>(s => s.IsOtpForCreateRequired = false);

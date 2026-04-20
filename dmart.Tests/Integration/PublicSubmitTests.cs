@@ -21,10 +21,9 @@ public class PublicSubmitTests : IClassFixture<DmartFactory>
     private readonly DmartFactory _factory;
     public PublicSubmitTests(DmartFactory factory) => _factory = factory;
 
-    [Fact]
+    [FactIfPg]
     public async Task Submit_Rejects_Unknown_ResourceType()
     {
-        if (!DmartFactory.HasPg) return;
         var client = _factory.CreateClient();
         var body = new StringContent("{\"foo\":\"bar\"}", Encoding.UTF8, "application/json");
         var resp = await client.PostAsync("/public/submit/test/not_a_real_type/schema1/sub1", body);
@@ -34,13 +33,12 @@ public class PublicSubmitTests : IClassFixture<DmartFactory>
         json.ShouldContain("unknown resource type");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Submit_Enforces_AllowedSubmitModels_Whitelist()
     {
         // Override the allowlist at the factory level so only "test.explicit_ok"
         // can be submitted. Any other space.schema pair must be rejected with
         // "not_allowed".
-        if (!DmartFactory.HasPg) return;
         var factory = _factory.WithWebHostBuilder(b => b.ConfigureServices(svcs =>
         {
             svcs.Configure<DmartSettings>(s => s.AllowedSubmitModels = "test.explicit_ok");
@@ -57,14 +55,13 @@ public class PublicSubmitTests : IClassFixture<DmartFactory>
         respText.ShouldContain("not allowed");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Submit_AllowedSubmitModels_Empty_Means_Allow_Any()
     {
         // With no allowlist set (the default), every space.schema pair is
         // accepted as long as resource_type parses. The request itself may
         // still fail downstream (e.g. schema validation), but not on the
         // allowlist gate.
-        if (!DmartFactory.HasPg) return;
         var client = _factory.CreateClient();
         var body = new StringContent("{\"foo\":\"bar\"}", Encoding.UTF8, "application/json");
         var resp = await client.PostAsync("/public/submit/test/anything/sub1", body);
@@ -74,13 +71,12 @@ public class PublicSubmitTests : IClassFixture<DmartFactory>
         respText.ShouldNotContain("submit not allowed");
     }
 
-    [Fact]
+    [FactIfPg]
     public async Task Submit_Generates_Shortname_When_Missing()
     {
         // If the client doesn't provide a shortname in the body, the server
         // derives one from a fresh GUID so concurrent anonymous submissions
         // don't collide.
-        if (!DmartFactory.HasPg) return;
         var client = _factory.CreateClient();
         // Body has no "shortname" field.
         var body = new StringContent("{\"data\":42}", Encoding.UTF8, "application/json");
