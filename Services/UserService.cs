@@ -248,9 +248,7 @@ public sealed class UserService(
                 InternalErrorCode.USER_ACCOUNT_LOCKED,
                 "Account has been locked due to too many failed login attempts.", "auth");
 
-        if (!user.IsActive)
-            return Result<(string, string, User)>.Fail(
-                InternalErrorCode.USER_ISNT_VERIFIED, "This user is not verified", "auth");
+        if (RejectIfNotActive(user) is { } inactiveReject) return inactiveReject;
 
         if (string.IsNullOrEmpty(user.Password) || req.Password is null
             || !hasher.Verify(req.Password, user.Password))
@@ -306,9 +304,7 @@ public sealed class UserService(
         if (user is null)
             return Result<(string, string, User)>.Fail(
                 InternalErrorCode.USERNAME_NOT_EXIST, "Invalid username or password", "auth");
-        if (!user.IsActive)
-            return Result<(string, string, User)>.Fail(
-                InternalErrorCode.USER_ISNT_VERIFIED, "This user is not verified", "auth");
+        if (RejectIfNotActive(user) is { } inactiveReject) return inactiveReject;
 
         // Validate OTP code.
         // Python parity: key is derived from the REQUEST identifier, not the
@@ -372,9 +368,7 @@ public sealed class UserService(
         if (user is null)
             return Result<(string, string, User)>.Fail(
                 InternalErrorCode.INVALID_INVITATION, "Expired or invalid invitation", "jwtauth");
-        if (!user.IsActive)
-            return Result<(string, string, User)>.Fail(
-                InternalErrorCode.USER_ISNT_VERIFIED, "This user is not verified", "auth");
+        if (RejectIfNotActive(user) is { } inactiveReject) return inactiveReject;
 
         // Optional body-level cross-check: if the client passed shortname/email/msisdn
         // alongside the JWT, at least one must line up with the resolved user.
@@ -412,6 +406,18 @@ public sealed class UserService(
 
         return await ProcessLoginAsync(updated, req, requestHeaders, ct);
     }
+
+    // Shared inactive-user gate for LoginAsync / LoginWithOtpAsync /
+    // LoginWithInvitationAsync. Returns a pre-built rejection Result when
+    // the account is deactivated (user was never verified, or was manually
+    // disabled), null when the user can proceed. Centralizing the message
+    // prevents drift between the three login paths — clients branch on
+    // the exact string via tsdmart.
+    private static Result<(string Access, string Refresh, User User)>? RejectIfNotActive(User user)
+        => user.IsActive
+            ? null
+            : Result<(string, string, User)>.Fail(
+                InternalErrorCode.USER_ISNT_VERIFIED, "This user is not verified", "auth");
 
     private async Task<bool> HandleFailedLoginAttemptAsync(User user, CancellationToken ct)
     {
