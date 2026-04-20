@@ -20,6 +20,11 @@ namespace Dmart.Tests.Integration;
 //   * every API call produces a "Served request" record
 //   * 4xx/5xx get level=WARNING/ERROR, 2xx gets level=INFO
 //   * secrets in request bodies and headers are redacted as ******
+//
+// Joins SharedAdminState because the wrong-password login below
+// increments the admin's attempt_count; serializing with other
+// admin-mutators prevents cross-class races.
+[Collection(SharedAdminStateCollection.Name)]
 public sealed class LogFileTests
 {
     [Fact]

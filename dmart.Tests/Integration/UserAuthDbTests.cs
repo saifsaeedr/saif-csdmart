@@ -12,6 +12,10 @@ namespace Dmart.Tests.Integration;
 
 // DB-backed integration tests. Skip cleanly when DMART_TEST_PG_CONN is unset so the
 // suite can still run on a developer machine without PostgreSQL.
+//
+// Joins SharedAdminState so the wrong-password + attempt_count-mutating tests below
+// don't race with other classes that also touch the admin row.
+[Collection(SharedAdminStateCollection.Name)]
 public class UserAuthDbTests : IClassFixture<DmartFactory>
 {
     private readonly DmartFactory _factory;
