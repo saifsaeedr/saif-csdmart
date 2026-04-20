@@ -57,9 +57,42 @@ public static class ProfileHandler
             var actor = http.User.Identity?.Name;
             if (actor is null)
                 return Response.Fail(InternalErrorCode.NOT_AUTHENTICATED, "login required", "auth");
-            var patch = await JsonSerializer.DeserializeAsync(req.Body, DmartJsonContext.Default.DictionaryStringObject, ct);
+
+            // Python parity: set_user_profile(profile: core.Record, ...) — the
+            // POST body is a Record envelope where every field the handler
+            // cares about (password, old_password, email, displayname, ...)
+            // lives inside record.attributes. Parse the body once as a raw
+            // JSON document, then promote record.attributes to `patch` when
+            // the envelope shape is present; otherwise treat the whole doc
+            // as the patch (keeps legacy flat-body callers working).
+            Dictionary<string, object>? patch;
+            try
+            {
+                using var doc = await JsonDocument.ParseAsync(req.Body, cancellationToken: ct);
+                var root = doc.RootElement;
+                if (root.ValueKind != JsonValueKind.Object)
+                    return Response.Fail(InternalErrorCode.INVALID_DATA, "body must be a JSON object", "request");
+
+                if (root.TryGetProperty("attributes", out var attrsEl)
+                    && attrsEl.ValueKind == JsonValueKind.Object)
+                {
+                    patch = JsonSerializer.Deserialize(
+                        attrsEl.GetRawText(), DmartJsonContext.Default.DictionaryStringObject);
+                }
+                else
+                {
+                    patch = JsonSerializer.Deserialize(
+                        root.GetRawText(), DmartJsonContext.Default.DictionaryStringObject);
+                }
+            }
+            catch (JsonException ex)
+            {
+                return Response.Fail(InternalErrorCode.INVALID_DATA, ex.Message, "request");
+            }
+
             if (patch is null)
                 return Response.Fail(InternalErrorCode.INVALID_DATA, "missing body", "request");
+
             // Python threads `auth_token` into set_user_profile so a
             // firebase_token update lands on the caller's session row only.
             // Pull from Authorization bearer first, fall back to cookie.

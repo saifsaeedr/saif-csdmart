@@ -529,12 +529,19 @@ public sealed class UserService(
                     InternalErrorCode.INVALID_PASSWORD_RULES, "Invalid username or password", "jwtauth");
             if (!user.ForcePasswordChange)
             {
+                // Python parity (api/user/router.py:665-682, set_user_profile):
+                //   * missing old_password   → 403 PASSWORD_RESET_ERROR, type=auth,
+                //     message "Wrong password have been provided!"
+                //   * old_password mismatch  → 401 UNMATCHED_DATA, type=request,
+                //     message "mismatch with the information provided"
                 if (!patch.TryGetValue("old_password", out var oldPwObj) || oldPwObj is null)
                     return Result<User>.Fail(
-                        InternalErrorCode.MISSING_DATA, "old_password required to change password", "request");
+                        InternalErrorCode.PASSWORD_RESET_ERROR,
+                        "Wrong password have been provided!", "auth");
                 if (string.IsNullOrEmpty(user.Password) || !hasher.Verify(oldPwObj.ToString()!, user.Password))
                     return Result<User>.Fail(
-                        InternalErrorCode.PASSWORD_NOT_VALIDATED, "old password is incorrect", "auth");
+                        InternalErrorCode.UNMATCHED_DATA,
+                        "mismatch with the information provided", "request");
             }
             newPasswordHash = string.IsNullOrEmpty(newPw) ? null : hasher.Hash(newPw!);
         }
