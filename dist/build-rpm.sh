@@ -84,14 +84,13 @@ if [[ "$TARGET" == "el9" || "$TARGET" == "rhel9" ]]; then
         VERSION="${BASE_VER}${MINOR:+.$MINOR}"
     fi
     echo "Building dmart-${VERSION} RPM for RHEL 9 via ${ENGINE}..."
-    # Build UI frontends locally (static files, no platform dependency). Fail
-    # the whole RPM build if the UI build fails — otherwise the RPM ships with
-    # stale assets. build-ui.sh covers both cxb/ and catalog/.
-    _need_ui_build=false
-    { [ -f cxb/package.json ]     && [ ! -f cxb/dist/client/index.html ]; } && _need_ui_build=true
-    { [ -f catalog/package.json ] && [ ! -f catalog/dist/client/index.html ]; }    && _need_ui_build=true
-    if [ "$_need_ui_build" = "true" ]; then
-        echo "Building UI frontends locally..."
+    # Build UI frontends on the host (the el9 container has no Node.js — it
+    # only ships dotnet-sdk + rpm-build + clang). build-ui.sh is idempotent:
+    # yarn install is a no-op on a warm cache and vite build is fast, so
+    # running unconditionally is cheaper than the class of "one dist stale"
+    # bugs from a narrower check.
+    if [ -f cxb/package.json ] || [ -f catalog/package.json ]; then
+        echo "Building UI frontends locally (pre-container)..."
         ./build-ui.sh || { echo "UI build failed" >&2; exit 1; }
     fi
     mkdir -p dist/out

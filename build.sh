@@ -10,15 +10,24 @@ INFORMATIONAL_VERSION="${TAG:-${COMMIT:-0.1.0}} branch=${BRANCH} date=${VERSION_
 echo "Version: $INFORMATIONAL_VERSION"
 
 # Build UI frontends (cxb + catalog, both embedded into the dmart binary).
-# Skip the build when *both* dist outputs already exist; build-ui.sh itself
-# skips a missing source dir gracefully.
+# Pre-built dists → skip. Missing dists with a JS toolchain on PATH → build.
+# Missing dists with no toolchain → fail with an actionable message (this is
+# the el9/alpine RPM container path: host must pre-build via build-ui.sh).
 if [ -f cxb/dist/client/index.html ] && [ -f catalog/dist/client/index.html ]; then
     echo "UI frontends already built, skipping"
-elif [ -f cxb/package.json ] || [ -f catalog/package.json ]; then
-    echo "=== Building UI frontends ==="
-    ./build-ui.sh || { echo "UI build failed"; exit 1; }
+elif command -v yarn > /dev/null 2>&1 || command -v npm > /dev/null 2>&1; then
+    if [ -f cxb/package.json ] || [ -f catalog/package.json ]; then
+        echo "=== Building UI frontends ==="
+        ./build-ui.sh || { echo "UI build failed"; exit 1; }
+    else
+        echo "Skipping UI build (no cxb or catalog source found)"
+    fi
 else
-    echo "Skipping UI build (no cxb or catalog source found)"
+    echo "Error: UI dist missing and no yarn/npm on PATH." >&2
+    echo "       Run ./build-ui.sh on the host (which has a JS toolchain)" >&2
+    echo "       before invoking this build — dmart's RPM builder containers" >&2
+    echo "       don't ship Node.js." >&2
+    exit 1
 fi
 
 RID="linux-x64"
