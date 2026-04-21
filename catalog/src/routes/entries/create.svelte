@@ -105,7 +105,7 @@
   let loadingSubpaths = $state(false);
 
   const canCreateEntry = $derived(
-    shortname.trim().length > 0 && !shortnameError
+          shortname.trim().length > 0 && !shortnameError
   );
   let workflow_shortname = "";
   let schema_shortname = "";
@@ -116,8 +116,8 @@
   let entity: any;
 
   const isRTL = derivedStore(
-    locale,
-    ($locale: any) => $locale === "ar" || $locale === "ku",
+          locale,
+          ($locale: any) => $locale === "ar" || $locale === "ku",
   );
 
   let rolesValue: any;
@@ -148,7 +148,7 @@
       const response = await getSpaceSchema("management", DmartScope.managed);
       if (response?.status === "success" && response?.records) {
         const pollSchemaRecord = response.records.find(
-          (record: any) => record.shortname === "poll",
+                (record: any) => record.shortname === "poll",
         );
 
         if (pollSchemaRecord) {
@@ -213,11 +213,11 @@
     const schemaShortname = event.target.value;
     schema_shortname = schemaShortname; // Assign to module-level variable
     const schemaRecord = availableSchemas.find(
-      (s: any) => s.shortname === schemaShortname,
+            (s: any) => s.shortname === schemaShortname,
     );
     selectedSchema = schemaRecord;
     jsonFormData = {};
-    
+
     // Check if schema has a template attachment
     // For structured entries, specifically check for markdown template attachments
     if (schemaRecord && schemaRecord.raw) {
@@ -282,21 +282,21 @@
     loadingSubpaths = true;
     try {
       const response = await getSpaceFolders(
-        spaceName,
-        parentPath || "/",
-        DmartScope.managed,
+              spaceName,
+              parentPath || "/",
+              DmartScope.managed,
       );
 
       const folders = response.records.filter(
-        (item: any) => item.resource_type === "folder",
+              (item: any) => item.resource_type === "folder",
       );
       const hasNonFolderContent = response.records.some(
-        (item: any) => item.resource_type !== "folder",
+              (item: any) => item.resource_type !== "folder",
       );
       if (parentPath === "") {
         itemResourceType =
-          response?.records[0]?.attributes?.payload?.body
-            .content_resource_types[0];
+                response?.records[0]?.attributes?.payload?.body
+                        .content_resource_types[0];
       }
 
       const levelData = {
@@ -306,20 +306,20 @@
           value: folder.shortname,
           name: folder.attributes?.displayname?.en || folder.shortname,
           fullPath: parentPath
-            ? `${parentPath}/${folder.shortname}`
-            : folder.shortname,
+                  ? `${parentPath}/${folder.shortname}`
+                  : folder.shortname,
         })),
         resource_type: itemResourceType,
         workflow_shortname:
-          response.records[0]?.attributes?.payload?.body
-            ?.workflow_shortnames[0] || "",
+                response.records[0]?.attributes?.payload?.body
+                        ?.workflow_shortnames[0] || "",
         schema_shortname:
-          response.records[0]?.attributes?.payload?.schema_shortname ||
-          response.records[0]?.attributes?.payload?.body
-            ?.content_schema_shortnames[0] ||
-          "",
+                response.records[0]?.attributes?.payload?.schema_shortname ||
+                response.records[0]?.attributes?.payload?.body
+                        ?.content_schema_shortnames[0] ||
+                "",
         canCreateEntry:
-          level > 0 || hasNonFolderContent || folders.length === 0,
+                level > 0 || hasNonFolderContent || folders.length === 0,
         selectedFolder: "",
       };
 
@@ -351,7 +351,7 @@
 
     if (folderValue) {
       const selectedFolder = levelData.folders.find(
-        (f: any) => f.value === folderValue,
+              (f: any) => f.value === folderValue,
       );
       if (selectedFolder) {
         const newPath = selectedFolder.fullPath;
@@ -400,9 +400,9 @@
 
   function getPreviewUrl(file: any) {
     if (
-      file.type.startsWith("image/") ||
-      file.type.startsWith("video/") ||
-      file.type === "application/pdf"
+            file.type.startsWith("image/") ||
+            file.type.startsWith("video/") ||
+            file.type === "application/pdf"
     ) {
       return URL.createObjectURL(file);
     }
@@ -421,22 +421,22 @@
         // typewriter-editor's empty doc often looks like `<p><br></p>`,
         // `<p></p>`, or nested whitespace-only paragraphs. Treat those as empty.
         const trivialWrapper =
-          /^(<p>(\s|&nbsp;|<br\s*\/?>)*<\/p>\s*)+$/i;
+                /^(<p>(\s|&nbsp;|<br\s*\/?>)*<\/p>\s*)+$/i;
         if (trivialWrapper.test(trimmedRaw)) return true;
         // Media embeds and block elements with no inline text still count as
         // real content — an image-only post is valid.
         if (
-          /<(img|video|audio|iframe|table|figure|svg|source|embed|object|picture|canvas)\b/i.test(
-            trimmedRaw,
-          )
+                /<(img|video|audio|iframe|table|figure|svg|source|embed|object|picture|canvas)\b/i.test(
+                        trimmedRaw,
+                )
         ) {
           return false;
         }
         const textContent = trimmedRaw
-          .replace(/<[^>]*>/g, "")
-          .replace(/&nbsp;/g, " ")
-          .replace(/\s+/g, " ")
-          .trim();
+                .replace(/<[^>]*>/g, "")
+                .replace(/&nbsp;/g, " ")
+                .replace(/\s+/g, " ")
+                .trim();
         return textContent === "";
       } else {
         return content.trim() === "";
@@ -483,7 +483,7 @@
     }
 
     const requiredFields = schema.required.filter(
-      (field: any) => field && field.trim() !== "",
+            (field: any) => field && field.trim() !== "",
     );
 
     if (requiredFields.length === 0) {
@@ -526,26 +526,26 @@
       }
 
       const validationResult = validateRequiredFields(
-        pollFormData,
-        pollSchema.schema,
+              pollFormData,
+              pollSchema.schema,
       );
 
       if (!validationResult.isValid) {
         const fieldNames = validationResult.missingFields
-          .map((field: any) => pollSchema.schema.properties[field]?.title || field)
-          .join(", ");
+                .map((field: any) => pollSchema.schema.properties[field]?.title || field)
+                .join(", ");
 
         errorToastMessage(
-          $_("create_entry.error.required_fields_missing", {
-            values: { fields: fieldNames },
-          }),
+                $_("create_entry.error.required_fields_missing", {
+                  values: { fields: fieldNames },
+                }),
         );
         return;
       }
 
       if (isJsonFormDataEmpty(pollFormData)) {
         const hasRequiredFields = pollSchema?.schema?.required?.some(
-          (field: any) => field && field.trim() !== "",
+                (field: any) => field && field.trim() !== "",
         );
         if (hasRequiredFields) {
           errorToastMessage($_("create_entry.error.content_required"));
@@ -578,16 +578,16 @@
       };
 
       const response = await createEntity(
-        "poll",
-        "polls",
-        ResourceType.content,
-        attributes,
-        entity.shortname || "auto",
+              "poll",
+              "polls",
+              ResourceType.content,
+              attributes,
+              entity.shortname || "auto",
       );
 
       const msg = isPublish
-        ? $_("create_entry.success.published")
-        : $_("create_entry.success.saved");
+              ? $_("create_entry.success.published")
+              : $_("create_entry.success.saved");
 
       if (response) {
         successToastMessage(msg);
@@ -596,9 +596,9 @@
         }, 500);
       } else {
         errorToastMessage(
-          isPublish
-            ? $_("create_entry.error.publish_failed")
-            : $_("create_entry.error.save_failed"),
+                isPublish
+                        ? $_("create_entry.error.publish_failed")
+                        : $_("create_entry.error.save_failed"),
         );
         isLoading = false;
       }
@@ -618,22 +618,22 @@
     if (entryType === "structured") {
       if (selectedSchema && selectedSchema.schema) {
         validationResult = validateRequiredFields(
-          jsonFormData,
-          selectedSchema.schema,
+                jsonFormData,
+                selectedSchema.schema,
         );
 
         if (!validationResult.isValid) {
           const fieldNames = validationResult.missingFields
-            .map(
-              (field: any) =>
-                selectedSchema.schema.properties[field]?.title || field,
-            )
-            .join(", ");
+                  .map(
+                          (field: any) =>
+                                  selectedSchema.schema.properties[field]?.title || field,
+                  )
+                  .join(", ");
 
           errorToastMessage(
-            $_("create_entry.error.required_fields_missing", {
-              values: { fields: fieldNames },
-            }),
+                  $_("create_entry.error.required_fields_missing", {
+                    values: { fields: fieldNames },
+                  }),
           );
           return;
         }
@@ -654,9 +654,9 @@
 
         if (missingFields.length > 0) {
           errorToastMessage(
-            $_("create_entry.error.required_fields_missing", {
-              values: { fields: missingFields.map((f) => f.label).join(", ") },
-            }),
+                  $_("create_entry.error.required_fields_missing", {
+                    values: { fields: missingFields.map((f) => f.label).join(", ") },
+                  }),
           );
           return;
         }
@@ -667,9 +667,9 @@
       // an extra whole-object "is empty" heuristic produced false-negatives on
       // valid submissions.
       bodyContent =
-        jsonFormData && Object.keys(jsonFormData).length > 0
-          ? jsonFormData
-          : {};
+              jsonFormData && Object.keys(jsonFormData).length > 0
+                      ? jsonFormData
+                      : {};
 
       // If schema has a template attachment, wrap body content with template data
       if (schemaBasedTemplate && schemaBasedTemplate.schema && !isEmpty) {
@@ -706,8 +706,8 @@
     // page is accessed via /entries/create (no [subpath] route segment).
     // Falls back to currentPath which was set via loadPrefilledData().
     const resolvedSubpath = (($params.subpath ?? currentPath) || "/").replace(
-      /^\//,
-      "",
+            /^\//,
+            "",
     );
 
     entity = {
@@ -734,31 +734,31 @@
       attributes.payload.schema_shortname = schema_shortname;
 
     const response = await createEntity(
-      selectedSpace,
-      resolvedSubpath,
-      resource_type || ResourceType.content,
-      attributes,
-      entity.shortname || "auto",
+            selectedSpace,
+            resolvedSubpath,
+            resource_type || ResourceType.content,
+            attributes,
+            entity.shortname || "auto",
     );
 
     const msg = isPublish
-      ? $_("create_entry.success.published")
-      : $_("create_entry.success.saved");
+            ? $_("create_entry.success.published")
+            : $_("create_entry.success.saved");
 
     if (response) {
       successToastMessage(msg);
       for (const attachment of attachments) {
         const r = await attachAttachmentsToEntity(
-          response,
-          selectedSpace,
-          resolvedSubpath,
-          attachment,
+                response,
+                selectedSpace,
+                resolvedSubpath,
+                attachment,
         );
         if (r === false) {
           errorToastMessage(
-            $_("create_entry.error.attachment_failed", {
-              values: { name: attachment.name },
-            }),
+                  $_("create_entry.error.attachment_failed", {
+                    values: { name: attachment.name },
+                  }),
           );
         }
       }
@@ -767,9 +767,9 @@
       }, 500);
     } else {
       errorToastMessage(
-        isPublish
-          ? $_("create_entry.error.publish_failed")
-          : $_("create_entry.error.save_failed"),
+              isPublish
+                      ? $_("create_entry.error.publish_failed")
+                      : $_("create_entry.error.save_failed"),
       );
       isLoading = false;
     }
@@ -795,16 +795,16 @@
     // Replace placeholders with values or empty string
     Object.keys(templateFormData).forEach((key) => {
       const placeholderPattern = new RegExp(
-        `\\{\\{${key}(?::[^}]+)?\\}\\}`,
-        "g",
+              `\\{\\{${key}(?::[^}]+)?\\}\\}`,
+              "g",
       );
       let value = templateFormData[key];
-      
+
       // Handle list/array type - join non-empty items
       if (Array.isArray(value)) {
         value = value.filter((item: any) => item && item.trim()).join(", ");
       }
-      
+
       content = content.replace(placeholderPattern, value || "");
     });
 
@@ -884,15 +884,15 @@
           case "string":
           default:
             inputType =
-              fieldType.toLowerCase() === "textarea" ? "textarea" : "text";
+                    fieldType.toLowerCase() === "textarea" ? "textarea" : "text";
             break;
         }
 
         fields.push({
           name: fieldName,
           label: fieldName
-            .replace(/_/g, " ")
-            .replace(/\b\w/g, (l) => l.toUpperCase()),
+                  .replace(/_/g, " ")
+                  .replace(/\b\w/g, (l) => l.toUpperCase()),
           type: inputType,
           originalType: fieldType,
           placeholder,
@@ -912,15 +912,15 @@
       selectedSpace = prefilledSpace;
       // Normalise: strip leading slash if present (e.g. "/schema" → "schema")
       const normalizedSubpath = prefilledSubpath
-        ? prefilledSubpath.replace(/^\//, "")
-        : "";
+              ? prefilledSubpath.replace(/^\//, "")
+              : "";
       currentPath = normalizedSubpath;
 
       try {
         await loadSubpathLevel(
-          prefilledSpace,
-          normalizedSubpath ? `/${normalizedSubpath}` : "/",
-          0,
+                prefilledSpace,
+                normalizedSubpath ? `/${normalizedSubpath}` : "/",
+                0,
         );
         // updateCanCreateEntry sets metadata (resource_type, schema, workflow)
         // but also overwrites selectedSubpath — restore the correct value after
@@ -942,9 +942,10 @@
   <div class="content-wrapper">
     <div class="header">
       <button
-        aria-label={$_("create_entry.navigation.back_to_entries")}
-        class="back-button"
-        onclick={() => {
+              aria-label={$_("entry_detail.navigation.back_to_folder") ||
+          "Back to folder"}
+              class="back-button"
+              onclick={() => {
           if (selectedSpace) {
             const resolvedSubpath = (
               ($params.subpath ?? currentPath) ||
@@ -968,7 +969,7 @@
         }}
       >
         <ArrowLeftOutline class="icon back-icon" />
-        <span>{$_("create_entry.navigation.back_to_entries")}</span>
+        <span>{$_("entry_detail.back_to_folder") || "Back to folder"}</span>
       </button>
     </div>
 
@@ -985,35 +986,35 @@
         </div>
         <div class="action-buttons">
           <button
-            aria-label={$_("create_entry.buttons.save_draft")}
-            class="draft-button"
-            onclick={(event) => {
+                  aria-label={$_("create_entry.buttons.save_draft")}
+                  class="draft-button"
+                  onclick={(event) => {
               event.preventDefault();
               handlePublish(false);
             }}
-            disabled={isLoading || !canCreateEntry}
+                  disabled={isLoading || !canCreateEntry}
           >
             <FloppyDiskSolid class="icon button-icon" />
             <span
-              >{isLoading
-                ? $_("create_entry.buttons.saving")
-                : $_("create_entry.buttons.save_draft")}</span
+            >{isLoading
+                    ? $_("create_entry.buttons.saving")
+                    : $_("create_entry.buttons.save_draft")}</span
             >
           </button>
           <button
-            aria-label={$_("create_entry.buttons.publish_now")}
-            class="publish-button"
-            onclick={(event) => {
+                  aria-label={$_("create_entry.buttons.publish_now")}
+                  class="publish-button"
+                  onclick={(event) => {
               event.preventDefault();
               handlePublish(true);
             }}
-            disabled={isLoading || !canCreateEntry}
+                  disabled={isLoading || !canCreateEntry}
           >
             <PaperPlaneSolid class="icon button-icon" />
             <span
-              >{isLoading
-                ? $_("create_entry.buttons.publishing")
-                : $_("create_entry.buttons.publish_now")}</span
+            >{isLoading
+                    ? $_("create_entry.buttons.publishing")
+                    : $_("create_entry.buttons.publish_now")}</span
             >
           </button>
         </div>
@@ -1029,10 +1030,10 @@
         <div class="entry-type-selector">
           <label class="entry-type-option">
             <input
-              type="radio"
-              bind:group={entryType}
-              value="content"
-              onchange={handleEntryTypeChange}
+                    type="radio"
+                    bind:group={entryType}
+                    value="content"
+                    onchange={handleEntryTypeChange}
             />
             <span class="entry-type-label">
               <strong>{$_("create_entry.entry_type.content_title")}</strong>
@@ -1041,10 +1042,10 @@
           </label>
           <label class="entry-type-option">
             <input
-              type="radio"
-              bind:group={entryType}
-              value="poll"
-              onchange={handleEntryTypeChange}
+                    type="radio"
+                    bind:group={entryType}
+                    value="poll"
+                    onchange={handleEntryTypeChange}
             />
             <span class="entry-type-label">
               <strong>{$_("create_entry.entry_type.poll_title")}</strong>
@@ -1053,10 +1054,10 @@
           </label>
           <label class="entry-type-option">
             <input
-              type="radio"
-              bind:group={entryType}
-              value="structured"
-              onchange={handleEntryTypeChange}
+                    type="radio"
+                    bind:group={entryType}
+                    value="structured"
+                    onchange={handleEntryTypeChange}
             />
             <span class="entry-type-label">
               <strong>Structured Entry</strong>
@@ -1075,30 +1076,30 @@
       <div class="section-content">
         {#if isEditing}
           <input
-            type="text"
-            bind:value={title}
-            onblur={handleInputBlur}
-            class="title-input"
-            placeholder={$_("create_entry.title.placeholder")}
-            id="title-input"
-            aria-label={$_("create_entry.title.placeholder")}
+                  type="text"
+                  bind:value={title}
+                  onblur={handleInputBlur}
+                  class="title-input"
+                  placeholder={$_("create_entry.title.placeholder")}
+                  id="title-input"
+                  aria-label={$_("create_entry.title.placeholder")}
           />
         {:else}
           <div
-            class="title-display"
-            tabindex="0"
-            onkeydown={(e) => {
+                  class="title-display"
+                  tabindex="0"
+                  onkeydown={(e) => {
               if (e.key === "Enter") handleLabelClick();
             }}
-            role="button"
-            aria-label={$_("create_entry.title.edit_aria")}
-            onclick={handleLabelClick}
+                  role="button"
+                  aria-label={$_("create_entry.title.edit_aria")}
+                  onclick={handleLabelClick}
           >
             {#if title}
               {title}
             {:else}
               <span class="title-placeholder"
-                >{$_("create_entry.title.click_to_add")}</span
+              >{$_("create_entry.title.click_to_add")}</span
               >
             {/if}
           </div>
@@ -1114,21 +1115,21 @@
       <div class="section-content">
         <div class="shortname-input-group" class:input-error={shortnameError}>
           <input
-            type="text"
-            bind:value={shortname}
-            class="shortname-input shortname-input-field"
-            class:input-error={shortnameError}
-            pattern={shortnamePattern}
-            placeholder={$_("create_entry.shortname.placeholder")}
-            id="shortname-input"
-            aria-label={$_("create_entry.shortname.placeholder")}
-            oninput={handleShortnameInput}
+                  type="text"
+                  bind:value={shortname}
+                  class="shortname-input shortname-input-field"
+                  class:input-error={shortnameError}
+                  pattern={shortnamePattern}
+                  placeholder={$_("create_entry.shortname.placeholder")}
+                  id="shortname-input"
+                  aria-label={$_("create_entry.shortname.placeholder")}
+                  oninput={handleShortnameInput}
           />
           <button
-            type="button"
-            class="shortname-auto-btn"
-            onclick={() => (shortname = "auto")}
-            title="Use auto-generated shortname"
+                  type="button"
+                  class="shortname-auto-btn"
+                  onclick={() => (shortname = "auto")}
+                  title="Use auto-generated shortname"
           >
             Auto
           </button>
@@ -1156,20 +1157,20 @@
       <div class="section-content">
         <div class="tag-input-container">
           <input
-            type="text"
-            id="tag-input"
-            bind:value={newTag}
-            placeholder={$_("create_entry.tags.placeholder")}
-            class="tag-input"
-            onkeydown={(e) => {
+                  type="text"
+                  id="tag-input"
+                  bind:value={newTag}
+                  placeholder={$_("create_entry.tags.placeholder")}
+                  class="tag-input"
+                  onkeydown={(e) => {
               if (e.key === "Enter") addTag();
             }}
           />
           <button
-            aria-label={$_("create_entry.tags.add_button")}
-            class="add-tag-button"
-            onclick={addTag}
-            disabled={!newTag.trim()}
+                  aria-label={$_("create_entry.tags.add_button")}
+                  class="add-tag-button"
+                  onclick={addTag}
+                  disabled={!newTag.trim()}
           >
             <PlusOutline class="icon button-icon" />
             <span>{$_("create_entry.tags.add_button")}</span>
@@ -1183,9 +1184,9 @@
                 <TagOutline class="tag-icon" />
                 <span class="tag-text">{tag}</span>
                 <button
-                  class="tag-remove"
-                  onclick={() => removeTag(index)}
-                  aria-label={$_("create_entry.tags.remove_aria")}
+                        class="tag-remove"
+                        onclick={() => removeTag(index)}
+                        aria-label={$_("create_entry.tags.remove_aria")}
                 >
                   <CloseCircleOutline class="icon" />
                 </button>
@@ -1212,17 +1213,17 @@
             </div>
             <div class="editor-toggle">
               <button
-                class="editor-toggle-btn"
-                class:active={selectedEditorType === "html"}
-                onclick={() => (selectedEditorType = "html")}
+                      class="editor-toggle-btn"
+                      class:active={selectedEditorType === "html"}
+                      onclick={() => (selectedEditorType = "html")}
               >
                 <span class="editor-icon">🎨</span>
                 <span>{$_("create_entry.content.html_editor")}</span>
               </button>
               <button
-                class="editor-toggle-btn"
-                class:active={selectedEditorType === "markdown"}
-                onclick={() => (selectedEditorType = "markdown")}
+                      class="editor-toggle-btn"
+                      class:active={selectedEditorType === "markdown"}
+                      onclick={() => (selectedEditorType = "markdown")}
               >
                 <span class="editor-icon">📝</span>
                 <span>{$_("create_entry.content.markdown_editor")}</span>
@@ -1234,19 +1235,19 @@
           <div class="editor-container">
             {#if selectedEditorType === "html"}
               <HtmlEditor
-                bind:this={htmlEditorRef}
-                bind:content={htmlEditor}
-                uid="main-editor"
-                {attachments}
-                {resource_type}
-                subpath={$params.subpath}
-                space_name={selectedSpace}
-                parent_shortname={shortname}
+                      bind:this={htmlEditorRef}
+                      bind:content={htmlEditor}
+                      uid="main-editor"
+                      {attachments}
+                      {resource_type}
+                      subpath={$params.subpath}
+                      space_name={selectedSpace}
+                      parent_shortname={shortname}
               />
             {:else}
               <MarkdownEditor
-                bind:content={markdownContent}
-                bind:this={markdownEditorRef}
+                      bind:content={markdownContent}
+                      bind:this={markdownEditorRef}
               />
             {/if}
           </div>
@@ -1267,15 +1268,15 @@
           {:else if availableSchemas.length > 0}
             <div class="schema-selector">
               <label for="schema-select" class="selector-label"
-                >{$_("create_entry.schema.select_label")}</label
+              >{$_("create_entry.schema.select_label")}</label
               >
               <select
-                id="schema-select"
-                onchange={handleSchemaChange}
-                class="destination-select"
+                      id="schema-select"
+                      onchange={handleSchemaChange}
+                      class="destination-select"
               >
                 <option value=""
-                  >{$_("create_entry.schema.choose_option")}</option
+                >{$_("create_entry.schema.choose_option")}</option
                 >
                 {#each availableSchemas as schema}
                   <option value={schema.shortname}>{schema.title}</option>
@@ -1309,8 +1310,8 @@
           </div>
           <div class="section-content">
             <DynamicSchemaBasedForms
-              bind:content={jsonFormData}
-              schema={selectedSchema.schema}
+                    bind:content={jsonFormData}
+                    schema={selectedSchema.schema}
             />
           </div>
         </div>
@@ -1329,7 +1330,7 @@
                 {$_("create_entry.template.schema_template_description") || "This schema includes a template. Fill in the template data below."}
               </p>
             </div>
-            
+
             <!-- Template Data Form Card -->
             <div class="template-data-card">
               <div class="template-data-card-header">
@@ -1357,27 +1358,27 @@
                           {#each templateFormData[field.name] as item, index (index)}
                             <div class="list-input-row">
                               <input
-                                type="text"
-                                bind:value={templateFormData[field.name][index]}
-                                class="field-input list-input"
-                                placeholder={`Item ${index + 1}`}
+                                      type="text"
+                                      bind:value={templateFormData[field.name][index]}
+                                      class="field-input list-input"
+                                      placeholder={`Item ${index + 1}`}
                               />
                               <button
-                                type="button"
-                                class="list-btn list-btn-remove"
-                                onclick={() => {
+                                      type="button"
+                                      class="list-btn list-btn-remove"
+                                      onclick={() => {
                                   templateFormData[field.name] = templateFormData[field.name].filter((_: any, i: any) => i !== index);
                                 }}
-                                title="Remove item"
+                                      title="Remove item"
                               >
                                 ✕
                               </button>
                             </div>
                           {/each}
                           <button
-                            type="button"
-                            class="list-btn list-btn-add"
-                            onclick={() => {
+                                  type="button"
+                                  class="list-btn list-btn-add"
+                                  onclick={() => {
                               templateFormData[field.name] = [...templateFormData[field.name], ''];
                             }}
                           >
@@ -1386,42 +1387,42 @@
                         </div>
                       {:else if field.type === "textarea"}
                         <textarea
-                          id="schema-template-{field.name}"
-                          bind:value={templateFormData[field.name]}
-                          class="field-input field-textarea"
-                          placeholder={field.placeholder}
-                          required={field.required}
-                          rows={field.originalType === "object" || field.originalType === "list_object"
+                                id="schema-template-{field.name}"
+                                bind:value={templateFormData[field.name]}
+                                class="field-input field-textarea"
+                                placeholder={field.placeholder}
+                                required={field.required}
+                                rows={field.originalType === "object" || field.originalType === "list_object"
                             ? 5
                             : 3}
                         ></textarea>
                         {#if field.originalType === "object"}
                           <small class="field-hint"
-                            >Enter valid JSON object</small
+                          >Enter valid JSON object</small
                           >
                         {:else if field.originalType === "list_object"}
                           <small class="field-hint"
-                            >Enter valid JSON array of objects</small
+                          >Enter valid JSON array of objects</small
                           >
                         {/if}
                       {:else if field.type === "checkbox"}
                         <div class="checkbox-wrapper">
                           <input
-                            id="schema-template-{field.name}"
-                            type="checkbox"
-                            bind:checked={templateFormData[field.name]}
-                            class="field-checkbox"
+                                  id="schema-template-{field.name}"
+                                  type="checkbox"
+                                  bind:checked={templateFormData[field.name]}
+                                  class="field-checkbox"
                           />
                           <span class="checkbox-label">Yes</span>
                         </div>
                       {:else}
                         <input
-                          id="schema-template-{field.name}"
-                          type={field.type}
-                          bind:value={templateFormData[field.name]}
-                          class="field-input field-text"
-                          placeholder={field.placeholder}
-                          required={field.required}
+                                id="schema-template-{field.name}"
+                                type={field.type}
+                                bind:value={templateFormData[field.name]}
+                                class="field-input field-text"
+                                placeholder={field.placeholder}
+                                required={field.required}
                         />
                       {/if}
                     </div>
@@ -1457,15 +1458,15 @@
           {:else if availableSchemas.length > 0}
             <div class="schema-selector">
               <label for="schema-select" class="selector-label"
-                >{$_("create_entry.schema.select_label")}</label
+              >{$_("create_entry.schema.select_label")}</label
               >
               <select
-                id="schema-select"
-                onchange={handleSchemaChange}
-                class="destination-select"
+                      id="schema-select"
+                      onchange={handleSchemaChange}
+                      class="destination-select"
               >
                 <option value=""
-                  >{$_("create_entry.schema.choose_option")}</option
+                >{$_("create_entry.schema.choose_option")}</option
                 >
                 {#each availableSchemas as schema}
                   <option value={schema.shortname}>{schema.title}</option>
@@ -1503,8 +1504,8 @@
                 </div>
                 <div class="section-content">
                   <DynamicSchemaBasedForms
-                    bind:content={jsonFormData}
-                    schema={selectedSchema.schema}
+                          bind:content={jsonFormData}
+                          schema={selectedSchema.schema}
                   />
                 </div>
               </div>
@@ -1520,7 +1521,7 @@
                       Fill in the template data below. This will be merged with the form data to create the final structured entry.
                     </p>
                   </div>
-                  
+
                   <div class="template-data-card">
                     <div class="template-data-card-header">
                       <h3 class="template-data-title">
@@ -1546,27 +1547,27 @@
                                 {#each templateFormData[field.name] as item, index (index)}
                                   <div class="list-input-row">
                                     <input
-                                      type="text"
-                                      bind:value={templateFormData[field.name][index]}
-                                      class="field-input list-input"
-                                      placeholder={`Item ${index + 1}`}
+                                            type="text"
+                                            bind:value={templateFormData[field.name][index]}
+                                            class="field-input list-input"
+                                            placeholder={`Item ${index + 1}`}
                                     />
                                     <button
-                                      type="button"
-                                      class="list-btn list-btn-remove"
-                                      onclick={() => {
+                                            type="button"
+                                            class="list-btn list-btn-remove"
+                                            onclick={() => {
                                         templateFormData[field.name] = templateFormData[field.name].filter((_: any, i: any) => i !== index);
                                       }}
-                                      title="Remove item"
+                                            title="Remove item"
                                     >
                                       ✕
                                     </button>
                                   </div>
                                 {/each}
                                 <button
-                                  type="button"
-                                  class="list-btn list-btn-add"
-                                  onclick={() => {
+                                        type="button"
+                                        class="list-btn list-btn-add"
+                                        onclick={() => {
                                     templateFormData[field.name] = [...templateFormData[field.name], ''];
                                   }}
                                 >
@@ -1575,12 +1576,12 @@
                               </div>
                             {:else if field.type === "textarea"}
                               <textarea
-                                id="structured-template-{field.name}"
-                                bind:value={templateFormData[field.name]}
-                                class="field-input field-textarea"
-                                placeholder={field.placeholder}
-                                required={field.required}
-                                rows={field.originalType === "object" || field.originalType === "list_object" ? 5 : 3}
+                                      id="structured-template-{field.name}"
+                                      bind:value={templateFormData[field.name]}
+                                      class="field-input field-textarea"
+                                      placeholder={field.placeholder}
+                                      required={field.required}
+                                      rows={field.originalType === "object" || field.originalType === "list_object" ? 5 : 3}
                               ></textarea>
                               {#if field.originalType === "object"}
                                 <small class="field-hint">Enter valid JSON object</small>
@@ -1590,21 +1591,21 @@
                             {:else if field.type === "checkbox"}
                               <div class="checkbox-wrapper">
                                 <input
-                                  id="structured-template-{field.name}"
-                                  type="checkbox"
-                                  bind:checked={templateFormData[field.name]}
-                                  class="field-checkbox"
+                                        id="structured-template-{field.name}"
+                                        type="checkbox"
+                                        bind:checked={templateFormData[field.name]}
+                                        class="field-checkbox"
                                 />
                                 <span class="checkbox-label">Yes</span>
                               </div>
                             {:else}
                               <input
-                                id="structured-template-{field.name}"
-                                type={field.type}
-                                bind:value={templateFormData[field.name]}
-                                class="field-input field-text"
-                                placeholder={field.placeholder}
-                                required={field.required}
+                                      id="structured-template-{field.name}"
+                                      type={field.type}
+                                      bind:value={templateFormData[field.name]}
+                                      class="field-input field-text"
+                                      placeholder={field.placeholder}
+                                      required={field.required}
                               />
                             {/if}
                           </div>
@@ -1639,8 +1640,8 @@
             </div>
             <div class="section-content">
               <DynamicSchemaBasedForms
-                bind:content={jsonFormData}
-                schema={selectedSchema.schema}
+                      bind:content={jsonFormData}
+                      schema={selectedSchema.schema}
               />
             </div>
           </div>
@@ -1660,8 +1661,8 @@
             </div>
           {:else if pollSchema && pollSchema.schema}
             <DynamicSchemaBasedForms
-              bind:content={pollFormData}
-              schema={pollSchema.schema}
+                    bind:content={pollFormData}
+                    schema={pollSchema.schema}
             />
           {:else}
             <div class="empty-state">
@@ -1685,16 +1686,16 @@
             })}
           </h2>
           <input
-            type="file"
-            id="fileInput"
-            multiple
-            onchange={handleFileChange}
-            style="display: none;"
+                  type="file"
+                  id="fileInput"
+                  multiple
+                  onchange={handleFileChange}
+                  style="display: none;"
           />
           <button
-            aria-label={$_("create_entry.attachments.add_files")}
-            class="add-files-button"
-            onclick={() => document.getElementById("fileInput")?.click()}
+                  aria-label={$_("create_entry.attachments.add_files")}
+                  class="add-files-button"
+                  onclick={() => document.getElementById("fileInput")?.click()}
           >
             <UploadOutline class="icon button-icon" />
             <span>{$_("create_entry.attachments.add_files")}</span>
@@ -1709,20 +1710,20 @@
                     {#if getPreviewUrl(attachment)}
                       {#if attachment.type.startsWith("image/")}
                         <img
-                          src={getPreviewUrl(attachment) || "/placeholder.svg"}
-                          alt={attachment.name || "no-image"}
-                          class="attachment-image"
+                                src={getPreviewUrl(attachment) || "/placeholder.svg"}
+                                alt={attachment.name || "no-image"}
+                                class="attachment-image"
                         />
                       {:else if attachment.type.startsWith("video/")}
                         <video
-                          src={getPreviewUrl(attachment)}
-                          class="attachment-video"
+                                src={getPreviewUrl(attachment)}
+                                class="attachment-video"
                         >
                           <track
-                            kind="captions"
-                            src=""
-                            srclang="en"
-                            label="English"
+                                  kind="captions"
+                                  src=""
+                                  srclang="en"
+                                  label="English"
                           />
                         </video>
                         <div class="video-overlay">
@@ -1746,11 +1747,11 @@
                     </p>
                   </div>
                   <button
-                    aria-label={$_("create_entry.attachments.remove_file", {
+                          aria-label={$_("create_entry.attachments.remove_file", {
                       values: { name: attachment.name },
                     })}
-                    class="remove-attachment"
-                    onclick={() => removeAttachment(index)}
+                          class="remove-attachment"
+                          onclick={() => removeAttachment(index)}
                   >
                     <TrashBinSolid class="icon" />
                   </button>
@@ -1819,11 +1820,11 @@
     --white: #ffffff;
     --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
     --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1),
-      0 2px 4px -1px rgba(0, 0, 0, 0.06);
+    0 2px 4px -1px rgba(0, 0, 0, 0.06);
     --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1),
-      0 4px 6px -2px rgba(0, 0, 0, 0.05);
+    0 4px 6px -2px rgba(0, 0, 0, 0.05);
     --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1),
-      0 10px 10px -5px rgba(0, 0, 0, 0.04);
+    0 10px 10px -5px rgba(0, 0, 0, 0.04);
     --radius-sm: 0.375rem;
     --radius-md: 0.5rem;
     --radius-lg: 0.75rem;
@@ -1837,19 +1838,19 @@
   .page-container {
     min-height: 100vh;
     background: linear-gradient(
-      135deg,
-      var(--gray-50) 0%,
-      var(--gray-100) 100%
+            135deg,
+            var(--gray-50) 0%,
+            var(--gray-100) 100%
     );
     font-family:
-      "uthmantn",
-      -apple-system,
-      BlinkMacSystemFont,
-      "Segoe UI",
-      Roboto,
-      "Helvetica Neue",
-      Arial,
-      sans-serif;
+            "uthmantn",
+            -apple-system,
+            BlinkMacSystemFont,
+            "Segoe UI",
+            Roboto,
+            "Helvetica Neue",
+            Arial,
+            sans-serif;
     color: var(--gray-800);
     line-height: 1.6;
   }
@@ -2038,8 +2039,8 @@
     border-radius: var(--radius-lg);
     overflow: hidden;
     transition:
-      border-color 0.2s ease,
-      box-shadow 0.2s ease;
+            border-color 0.2s ease,
+            box-shadow 0.2s ease;
   }
 
   .shortname-input-group:focus-within {
@@ -2073,8 +2074,8 @@
     letter-spacing: 0.03em;
     cursor: pointer;
     transition:
-      background 0.15s ease,
-      color 0.15s ease;
+            background 0.15s ease,
+            color 0.15s ease;
     white-space: nowrap;
   }
 
@@ -2809,14 +2810,14 @@
     border-radius: 0.5rem;
     padding: 1rem;
     font-family:
-      "uthmantn",
-      -apple-system,
-      BlinkMacSystemFont,
-      "Segoe UI",
-      Roboto,
-      "Helvetica Neue",
-      Arial,
-      sans-serif;
+            "uthmantn",
+            -apple-system,
+            BlinkMacSystemFont,
+            "Segoe UI",
+            Roboto,
+            "Helvetica Neue",
+            Arial,
+            sans-serif;
     line-height: 1.6;
     color: #374151;
   }

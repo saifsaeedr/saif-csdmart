@@ -6,7 +6,7 @@ import {
     ResourceType,
 } from "@edraj/tsdmart";
 import { log } from "@/lib/logger";
-import { MANAGEMENT_SPACE } from "@/lib/constants";
+import { APPLICATIONS_SPACE, MANAGEMENT_SPACE } from "@/lib/constants";
 
 /**
  * Resources the app depends on at runtime. They are bootstrapped on demand;
@@ -31,6 +31,22 @@ const CRITICAL_RESOURCES: ActionRequest[] = [
                         body: {},
                         content_type: "json",
                     },
+                },
+            },
+        ],
+    },
+    {
+        space_name: APPLICATIONS_SPACE,
+        request_type: RequestType.create,
+        records: [
+            {
+                resource_type: ResourceType.folder,
+                subpath: "/",
+                shortname: "polls",
+                attributes: {
+                    is_active: true,
+                    displayname: { en: "Polls", ar: "استطلاعات الرأي", ku: "ڕاپرسییەکان" },
+                    description: {},
                 },
             },
         ],

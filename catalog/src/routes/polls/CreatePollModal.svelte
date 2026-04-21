@@ -4,6 +4,7 @@
     import { derived } from "svelte/store";
     import { createEntity } from "@/lib/dmart_services";
     import { ResourceType } from "@edraj/tsdmart";
+    import { APPLICATIONS_SPACE } from "@/lib/constants";
     import {
         errorToastMessage,
         successToastMessage,
@@ -96,7 +97,7 @@
             };
 
             const response = await createEntity(
-                "poll",
+                APPLICATIONS_SPACE,
                 "/polls",
                 ResourceType.content,
                 attributes,
@@ -146,12 +147,12 @@
             class="flex items-center justify-between p-6 border-b border-gray-100"
         >
             <h2 class="text-[1.35rem] font-bold text-gray-900 tracking-tight">
-                {$_("polls.create_poll") || "Create Poll"}
+                {$_("polls.create_poll")}
             </h2>
             <button
                 class="p-2 -mr-2 rounded-full text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
                 onclick={onClose}
-                aria-label="Close"
+                aria-label={$_("polls.close")}
             >
                 <svg
                     class="w-5 h-5"
@@ -175,7 +176,7 @@
                 <label
                     for="poll-title"
                     class="block text-sm font-semibold text-gray-700 mb-2"
-                    >Title</label
+                    >{$_("polls.form.title_label")}</label
                 >
                 <input
                     id="poll-title"
@@ -190,7 +191,7 @@
                 <label
                     for="poll-description"
                     class="block text-sm font-semibold text-gray-700 mb-2"
-                    >Description</label
+                    >{$_("polls.form.description_label")}</label
                 >
                 <textarea
                     id="poll-description"
@@ -205,7 +206,7 @@
                 <label
                     for="poll-space"
                     class="block text-sm font-semibold text-gray-700 mb-2"
-                    >Space</label
+                    >{$_("polls.form.space_label")}</label
                 >
                 <input
                     id="poll-space"
@@ -219,7 +220,7 @@
             <div>
                 <!-- svelte-ignore a11y_label_has_associated_control -->
                 <label class="block text-sm font-semibold text-gray-700 mb-3"
-                    >Choice Type</label
+                    >{$_("polls.form.choice_type_label")}</label
                 >
                 <div class="flex items-center gap-4">
                     <button
@@ -229,7 +230,7 @@
                             : 'bg-white text-gray-500 border border-gray-200 hover:bg-gray-50'}"
                         onclick={() => (choiceType = "single")}
                     >
-                        Single Choice
+                        {$_("polls.form.single_choice_button")}
                     </button>
                     <button
                         class="px-5 py-2 rounded-xl text-sm font-semibold transition-all shadow-sm {choiceType ===
@@ -238,7 +239,7 @@
                             : 'bg-white text-gray-500 border border-gray-200 hover:bg-gray-50'}"
                         onclick={() => (choiceType = "multiple")}
                     >
-                        Multiple Choice
+                        {$_("polls.form.multiple_choice_button")}
                     </button>
                 </div>
             </div>
@@ -247,7 +248,7 @@
             <div>
                 <!-- svelte-ignore a11y_label_has_associated_control -->
                 <label class="block text-sm font-semibold text-gray-700 mb-3"
-                    >Options</label
+                    >{$_("polls.form.options_label")}</label
                 >
                 <div class="space-y-3">
                     {#each options as option, index}
@@ -261,7 +262,7 @@
                                 <button
                                     class="absolute right-3 p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
                                     onclick={() => removeOption(index)}
-                                    title="Remove option"
+                                    title={$_("polls.form.remove_option")}
                                 >
                                     <svg
                                         class="w-[18px] h-[18px]"
@@ -284,7 +285,7 @@
                     class="mt-4 text-[13px] font-semibold text-gray-500 hover:text-indigo-600 transition-colors"
                     onclick={addOption}
                 >
-                    Add Option
+                    {$_("polls.form.add_option")}
                 </button>
             </div>
         </div>
@@ -299,7 +300,7 @@
                     class="px-5 py-2.5 rounded-xl text-sm font-semibold text-gray-600 hover:bg-gray-200 hover:text-gray-900 transition-colors"
                     onclick={onClose}
                 >
-                    Cancel
+                    {$_("polls.cancel")}
                 </button>
                 <button
                     class="px-8 py-2.5 rounded-xl text-sm font-semibold text-white bg-indigo-500 hover:bg-indigo-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 shadow-sm shadow-indigo-200"
@@ -311,7 +312,7 @@
                             class="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"
                         ></div>
                     {/if}
-                    Create Poll
+                    {$_("polls.create_poll")}
                 </button>
             </div>
         </div>

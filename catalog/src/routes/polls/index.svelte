@@ -114,7 +114,7 @@
               poll.attributes?.displayname?.en ||
               poll.attributes?.displayname ||
               poll.shortname ||
-              "Untitled Poll",
+              $_("polls.untitled"),
             description:
               poll.attributes?.description?.en ||
               poll.attributes?.description ||
@@ -136,7 +136,7 @@
       }
     } catch (error) {
       console.error("Error loading polls:", error);
-      errorToastMessage("Failed to load polls");
+      errorToastMessage($_("polls.load_error"));
     } finally {
       loading = false;
     }
@@ -198,7 +198,7 @@
       );
 
       if (!candidateObj) {
-        errorToastMessage("Invalid candidate selection");
+        errorToastMessage($_("polls.invalid_candidate"));
         return;
       }
 
@@ -294,12 +294,12 @@
   <!-- Header -->
   <div class="polls-header flex justify-between items-center mb-10 pt-10 px-8 max-w-7xl mx-auto">
     <div class="header-text">
-      <h1 class="text-3xl font-bold text-gray-900 mb-2">{$_("polls.title") || "Community Polls"}</h1>
-      <p class="text-gray-500 text-sm">{$_("polls.description") || "Vote on topics that matter, see what the team thinks"}</p>
+      <h1 class="text-3xl font-bold text-gray-900 mb-2">{$_("polls.title")}</h1>
+      <p class="text-gray-500 text-sm">{$_("polls.description")}</p>
     </div>
     <button class="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2 rounded-full font-medium flex items-center gap-2 transition-colors shadow-sm text-sm" onclick={() => showCreateModal = true}>
       <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
-      Create Poll
+      {$_("polls.create_poll")}
     </button>
   </div>
 
@@ -324,32 +324,32 @@
     <div class="polls-controls flex flex-col sm:flex-row gap-6 mb-8 items-center">
       <div class="search-wrapper relative w-full sm:max-w-md">
         <SearchOutline class="absolute left-4 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
-        <input 
-          type="text" 
-          bind:value={searchTerm} 
-          placeholder="Search polls..." 
+        <input
+          type="text"
+          bind:value={searchTerm}
+          placeholder={$_("polls.search_placeholder")}
           class="w-full pl-10 pr-4 py-2 bg-white border border-gray-200 rounded-full text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent shadow-sm"
         />
       </div>
 
       <div class="filter-pills flex items-center bg-white border border-gray-200 rounded-full p-1 shadow-sm h-10">
-        <button 
+        <button
           class="px-6 h-full rounded-full text-sm font-medium transition-colors {filterStatus === 'all' ? 'bg-gray-900 text-white' : 'text-gray-500 hover:text-gray-900'}"
           onclick={() => filterStatus = 'all'}
         >
-          All Polls
+          {$_("polls.filter_all")}
         </button>
-        <button 
+        <button
           class="px-6 h-full rounded-full text-sm font-medium transition-colors {filterStatus === 'active' ? 'bg-gray-900 text-white' : 'text-gray-500 hover:text-gray-900'}"
           onclick={() => filterStatus = 'active'}
         >
-          Active
+          {$_("polls.filter_active")}
         </button>
-        <button 
+        <button
           class="px-6 h-full rounded-full text-sm font-medium transition-colors {filterStatus === 'ended' ? 'bg-gray-900 text-white' : 'text-gray-500 hover:text-gray-900'}"
           onclick={() => filterStatus = 'ended'}
         >
-          Ended
+          {$_("polls.filter_ended")}
         </button>
       </div>
     </div>
@@ -362,7 +362,7 @@
         </div>
       {:else if filteredPolls.length === 0}
         <div class="empty-state flex flex-col items-center justify-center py-16 text-gray-500">
-          <h3 class="text-xl font-medium text-gray-900 mb-1">{$_("polls.no_polls") || "No polls found"}</h3>
+          <h3 class="text-xl font-medium text-gray-900 mb-1">{$_("polls.no_polls")}</h3>
         </div>
       {:else}
         <div class="grid grid-cols-1 md:grid-cols-2 gap-6 pb-20">
@@ -381,7 +381,7 @@
                   </div>
                 </div>
                 <div class="px-3 py-1 rounded-full text-[11px] font-bold tracking-wide uppercase {poll.isActive ? 'bg-green-50 text-green-600' : 'bg-gray-100 text-gray-500'}">
-                  {poll.isActive ? 'Active' : 'Ended'}
+                  {poll.isActive ? $_("polls.filter_active") : $_("polls.filter_ended")}
                 </div>
               </div>
 
@@ -397,7 +397,7 @@
                    {@const sorted = [...poll.candidates].sort((a,b) => b.votes - a.votes)}
                    {@const leading = sorted[0]}
                    <div class="flex justify-between items-center text-xs mb-2.5">
-                     <span class="text-gray-500 font-medium">Leading: <span class="text-gray-700">{leading.name}</span></span>
+                     <span class="text-gray-500 font-medium">{$_("polls.leading")}: <span class="text-gray-700">{leading.name}</span></span>
                      <span class="font-bold text-indigo-600">{leading.percentage}%</span>
                    </div>
                    <div class="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden">
@@ -409,23 +409,23 @@
               <!-- Footer Stats and Actions -->
               <div class="flex items-center justify-between pt-5 border-t border-gray-100 mt-auto">
                 <div class="flex items-center gap-4 text-[11px] font-medium text-gray-400">
-                  <span class="flex items-center gap-1.5"><UserOutline class="w-3.5 h-3.5"/> {poll.totalVotes} votes</span>
-                  <span>{poll.candidates.length} options</span>
-                  <span>{poll.tags.length > 0 ? poll.tags.join(', ') : 'Team & Culture'}</span>
+                  <span class="flex items-center gap-1.5"><UserOutline class="w-3.5 h-3.5"/> {$_("polls.votes_short", { values: { count: poll.totalVotes } })}</span>
+                  <span>{$_("polls.options_count", { values: { count: poll.candidates.length } })}</span>
+                  <span>{poll.tags.length > 0 ? poll.tags.join(', ') : $_("polls.default_tag")}</span>
                 </div>
-                
+
                 <div class="flex items-center gap-3">
                   <button class="flex items-center gap-1.5 px-4 py-1.5 rounded-full bg-gray-50 hover:bg-gray-100 text-gray-600 border border-gray-200 text-xs font-semibold transition-colors" onclick={() => openResultsModal(poll)}>
-                    <EyeOutline class="w-3.5 h-3.5"/> Results
+                    <EyeOutline class="w-3.5 h-3.5"/> {$_("polls.results_title")}
                   </button>
-                  
+
                   {#if poll.hasVoted}
                     <button class="flex items-center gap-1.5 px-4 py-1.5 rounded-full bg-green-50 text-green-600 border border-green-100 text-xs font-semibold transition-colors cursor-default">
-                      <CheckCircleOutline class="w-3.5 h-3.5"/> Voted
+                      <CheckCircleOutline class="w-3.5 h-3.5"/> {$_("polls.voted")}
                     </button>
                   {:else if poll.isActive}
                     <button class="flex items-center gap-1.5 px-5 py-1.5 rounded-full bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm shadow-indigo-200 text-xs font-semibold transition-colors" onclick={() => openVoteModal(poll)}>
-                      Vote
+                      {$_("polls.vote_button")}
                     </button>
                   {/if}
                 </div>
@@ -446,7 +446,7 @@
     <div class="bg-white rounded-2xl w-full max-w-lg max-h-[90vh] flex flex-col shadow-2xl overflow-hidden" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="document">
       <div class="flex items-center justify-between p-6 border-b border-gray-100">
         <h2 class="text-xl font-bold text-gray-900 tracking-tight">{selectedPoll.title}</h2>
-        <button class="p-2 rounded-full text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors" onclick={closeModal} aria-label="Close">
+        <button class="p-2 rounded-full text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors" onclick={closeModal} aria-label={$_("polls.close")}>
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
         </button>
       </div>
@@ -463,7 +463,7 @@
                 <div class="w-full h-2 bg-gray-100 rounded-full overflow-hidden mb-1">
                   <div class="h-full bg-indigo-500 rounded-full" style="width: {candidate.percentage}%"></div>
                 </div>
-                <div class="text-[11px] text-gray-400 font-medium">{candidate.votes} votes</div>
+                <div class="text-[11px] text-gray-400 font-medium">{$_("polls.votes_short", { values: { count: candidate.votes } })}</div>
               </div>
             {/each}
           </div>
@@ -488,11 +488,11 @@
           <div class="text-center pb-6 border-b border-gray-100 mb-6">
             {#if selectedPoll.hasVoted}
                <div class="inline-flex items-center justify-center gap-2 bg-green-50 text-green-700 px-5 py-2.5 rounded-full font-semibold text-sm">
-                 <CheckCircleOutline class="w-4 h-4" /> You voted for: <span class="text-green-800">{selectedPoll.userVote}</span>
+                 <CheckCircleOutline class="w-4 h-4" /> {$_("polls.voted_for")}: <span class="text-green-800">{selectedPoll.userVote}</span>
                </div>
             {:else}
                <div class="inline-flex items-center justify-center gap-2 bg-gray-100 text-gray-600 px-5 py-2.5 rounded-full font-semibold text-sm">
-                 <ClockOutline class="w-4 h-4" /> Poll ended
+                 <ClockOutline class="w-4 h-4" /> {$_("polls.poll_ended")}
                </div>
             {/if}
           </div>
@@ -507,7 +507,7 @@
                 <div class="w-full h-2 bg-gray-100 rounded-full overflow-hidden mb-1">
                   <div class="h-full bg-indigo-500 rounded-full" style="width: {candidate.percentage}%"></div>
                 </div>
-                <div class="text-[11px] text-gray-400 font-medium">{candidate.votes} votes</div>
+                <div class="text-[11px] text-gray-400 font-medium">{$_("polls.votes_short", { values: { count: candidate.votes } })}</div>
               </div>
             {/each}
           </div>
@@ -516,14 +516,14 @@
 
       <div class="flex justify-end gap-3 p-6 border-t border-gray-100 bg-gray-50/80">
         <button class="px-6 py-2.5 rounded-full text-sm font-semibold text-gray-600 hover:bg-gray-200 transition-colors" onclick={closeModal}>
-          Cancel
+          {$_("polls.cancel")}
         </button>
         {#if !showResults && selectedPoll.isActive && !selectedPoll.hasVoted}
           <button class="px-8 py-2.5 rounded-full text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 shadow-sm shadow-indigo-200" onclick={submitVote} disabled={!selectedCandidate || votingInProgress}>
             {#if votingInProgress}
                <div class="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
             {/if}
-            Vote
+            {$_("polls.vote_button")}
           </button>
         {/if}
       </div>
