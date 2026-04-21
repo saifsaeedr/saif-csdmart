@@ -16,7 +16,9 @@ public abstract class EnumMemberConverterBase<TEnum> : JsonConverter<TEnum> wher
 
     private static (TEnum, string)[] BuildMap()
     {
-        var values = Enum.GetValues<TEnum>();
+        // netstandard2.1 predates Enum.GetValues<TEnum>(); the non-generic
+        // overload returns a weakly-typed Array. Cast to TEnum[] uniformly.
+        var values = (TEnum[])Enum.GetValues(typeof(TEnum));
         var result = new (TEnum, string)[values.Length];
         for (var i = 0; i < values.Length; i++)
         {

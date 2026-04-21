@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>netstandard2.1;net8.0;net10.0</TargetFrameworks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Dmart.Models</RootNamespace>
+    <AssemblyName>Dmart.Models</AssemblyName>
+    <LangVersion>latest</LangVersion>
+
+    <!-- NuGet metadata (Phase 4 adds authors/license/etc.) -->
+    <IsPackable>true</IsPackable>
+    <PackageId>Dmart.Models</PackageId>
+    <Description>Wire-format data types (Record, Query, Response, enums) for the dmart structured CMS. Shared between the dmart server and client SDKs.</Description>
+  </PropertyGroup>
+
+  <!-- netstandard2.1 doesn't ship System.Text.Json in the BCL; pull it in. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.1'">
+    <PackageReference Include="System.Text.Json" Version="9.0.11" />
+  </ItemGroup>
+
+</Project>

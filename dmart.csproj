@@ -42,6 +42,21 @@
     <Compile Remove="custom_plugins_sdk/**" />
     <Content Remove="custom_plugins_sdk/**" />
     <None Remove="custom_plugins_sdk/**" />
+    <!-- Dmart.Models lives in its own sibling project (split out for NuGet
+         sharing with dmart.Client and any third-party SDKs). The Web SDK's
+         default Compile glob would otherwise pull its .cs files into this
+         assembly AND the Dmart.Models assembly, producing duplicate-type
+         CS0433 errors at publish time. -->
+    <Compile Remove="Dmart.Models/**" />
+    <Content Remove="Dmart.Models/**" />
+    <None Remove="Dmart.Models/**" />
+    <Compile Remove="dmart.Client/**" />
+    <Content Remove="dmart.Client/**" />
+    <None Remove="dmart.Client/**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="Dmart.Models/Dmart.Models.csproj" />
   </ItemGroup>
 
   <ItemGroup>
