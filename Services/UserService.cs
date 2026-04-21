@@ -51,10 +51,6 @@ public sealed class UserService(
             return Result<(User, string, string)>.Fail(
                 InternalErrorCode.SESSION, "Register API is disabled", ErrorTypes.Create);
 
-        if (string.IsNullOrWhiteSpace(rec.Shortname))
-            return Result<(User, string, string)>.Fail(
-                InternalErrorCode.INVALID_IDENTIFIER, "shortname required", ErrorTypes.Request);
-
         var attrs = rec.Attributes ?? new();
         var email = ConvertToString(attrs.GetValueOrDefault("email"))?.ToLowerInvariant();
         var msisdn = ConvertToString(attrs.GetValueOrDefault("msisdn"));
@@ -77,9 +73,26 @@ public sealed class UserService(
             return Result<(User, string, string)>.Fail(
                 InternalErrorCode.SESSION, validationMessage, ErrorTypes.Create);
 
-        if (await users.ExistsAsync(rec.Shortname, email, msisdn, ct))
+        // Split the duplicate check so the surfaced error code matches Python:
+        //   - email/msisdn conflict → DATA_SHOULD_BE_UNIQUE (415), type=request,
+        //     message "Entry properties should be unique: @<field>:<value>"
+        //     (Python adapter.py:validate_uniqueness, line 3276-3284)
+        //   - shortname conflict → SHORTNAME_ALREADY_EXIST (400), type=create,
+        //     message "already exists"
+        //     (Python adapter.py:create, line 2195-2202)
+        // Ordering matches Python: validate_uniqueness runs before db.create.
+        if (!string.IsNullOrEmpty(email) && await users.GetByEmailAsync(email, ct) is not null)
             return Result<(User, string, string)>.Fail(
-                InternalErrorCode.SHORTNAME_ALREADY_EXIST, "user already exists", ErrorTypes.Db);
+                InternalErrorCode.DATA_SHOULD_BE_UNIQUE,
+                $"Entry properties should be unique: @email:{email} ", ErrorTypes.Request);
+        if (!string.IsNullOrEmpty(msisdn) && await users.GetByMsisdnAsync(msisdn, ct) is not null)
+            return Result<(User, string, string)>.Fail(
+                InternalErrorCode.DATA_SHOULD_BE_UNIQUE,
+                $"Entry properties should be unique: @msisdn:{msisdn} ", ErrorTypes.Request);
+        if (!string.IsNullOrWhiteSpace(rec.Shortname)
+            && await users.GetByShortnameAsync(rec.Shortname, ct) is not null)
+            return Result<(User, string, string)>.Fail(
+                InternalErrorCode.SHORTNAME_ALREADY_EXIST, "already exists", ErrorTypes.Create);
 
         // OTP verification (Python uses verify_user = peek; OTP is NOT consumed
         // so a subsequent /otp-confirm can still use it). Skipped entirely when
