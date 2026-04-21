@@ -1,0 +1,16 @@
+{
+  "title": "DMART Unified Data Platform",
+  "footer": "dmart.cc unified data platform",
+  "short_name": "dmart",
+  "display_name": "dmart",
+  "description": "dmart unified data platform",
+  "default_language": "ar",
+  "languages": {
+    "ar": "العربية",
+    "en": "English",
+    "ku": "کوردی"
+  },
+  "backend": "http://localhost:8282",
+  "backend_timeout": 30000,
+  "delay_total_count": false
+}
