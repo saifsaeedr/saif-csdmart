@@ -98,6 +98,16 @@ public static class NativePluginLoader
             using var infoDoc = JsonDocument.Parse(infoJson);
             var root = infoDoc.RootElement;
 
+            // If the plugin exported `init`, hand it the callbacks struct so
+            // its hooks can call back into dmart (load/save entries, send
+            // email, ws broadcast). Optional export — plugins that don't need
+            // callbacks simply skip it.
+            if (handle.Init is not null)
+            {
+                try { handle.Init(NativePluginCallbacks.GetCallbacksPtr()); }
+                catch (Exception ex) { Console.WriteLine($"NATIVE_PLUGIN_INIT_FAILED: {dirName}: {ex.Message}"); }
+            }
+
             var shortname = root.TryGetProperty("shortname", out var sn)
                 ? sn.GetString() ?? dirName : dirName;
             var typeStr = root.TryGetProperty("type", out var tp)

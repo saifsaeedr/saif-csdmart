@@ -162,8 +162,65 @@ Every `.so` must export these C functions:
 | `hook` | `(char* event_json) → char*` | Hook plugins |
 | `handle_request` | `(char* request_json) → char*` | API plugins |
 | `free_string` | `(char* ptr) → void` | Yes |
+| `init` | `(const DmartCallbacks* cbs) → void` | Optional |
 
 All strings are null-terminated UTF-8. The plugin allocates return strings; dmart calls `free_string()` to release them.
+
+### Calling back into dmart (`init` + `DmartCallbacks`)
+
+If the plugin exports `init`, dmart calls it once at load time (right after `get_info`) with a pointer to a stable `DmartCallbacks` struct. Store the struct in a static and use it from `hook()` to read/write entries, send email, or push WebSocket messages — no HTTP, no JWT, in-process.
+
+```c
+typedef struct {
+    // Reads — return malloc'd JSON string (must dmart_free); returns NULL on
+    // OOM. Empty body is an object like {"entry":null} or {"user":null}.
+    char* (*load_entry)(const char* space, const char* subpath,
+                        const char* shortname, const char* resource_type);
+    char* (*load_user)(const char* shortname);
+
+    // Writes — bypass plugin hooks (matches Python db.save semantics).
+    // 0 = ok, non-zero = error.
+    int (*save_entry)(const char* entry_json);
+    int (*update_user)(const char* user_json);
+
+    // Side channels. 0 = ok.
+    int (*send_email)(const char* to, const char* subject, const char* html_body);
+    int (*ws_broadcast)(const char* channel, const char* message_json);
+
+    // Parallel to the plugin's own free_string; use to release strings the
+    // callbacks above returned.
+    void (*dmart_free)(char* ptr);
+} DmartCallbacks;
+```
+
+Layout is append-only (new fields go at the end). `resource_type` in `load_entry` accepts the wire form (`"content"`, `"folder"`, `"ticket"`, …) or NULL for a type-agnostic lookup.
+
+**C# helper** — copy `custom_plugins_sdk/shared/DmartCallbacks.cs` into your plugin project. It gives you a ready-to-use `DmartCallbacks` struct plus `DmartSdk.LoadUser(_cb, shortname)` / `DmartSdk.SaveEntry(_cb, entryJson)` / etc. wrappers that handle UTF-8 marshaling and string freeing for you.
+
+```csharp
+using Dmart.Sdk;
+
+private static DmartCallbacks _cb;
+private static bool _cbReady;
+
+[UnmanagedCallersOnly(EntryPoint = "init")]
+public static unsafe void Init(IntPtr cbsPtr)
+{
+    _cb = Marshal.PtrToStructure<DmartCallbacks>(cbsPtr);
+    _cbReady = true;
+}
+
+[UnmanagedCallersOnly(EntryPoint = "hook")]
+public static IntPtr Hook(IntPtr eventJsonPtr)
+{
+    if (_cbReady)
+    {
+        var userJson = DmartSdk.LoadUser(_cb, "dmart");
+        DmartSdk.SendEmail(_cb, "ops@example.com", "alert", "<p>hi</p>");
+    }
+    return AllocUtf8("""{"status":"ok"}""");
+}
+```
 
 ### C# Example
 

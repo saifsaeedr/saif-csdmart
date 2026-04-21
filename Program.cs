@@ -816,6 +816,11 @@ builder.Services.Configure<Microsoft.AspNetCore.Http.Features.FormOptions>(o =>
 
 var app = builder.Build();
 
+// Bridge DI into the [UnmanagedCallersOnly] static methods that back the
+// DmartCallbacks struct handed to each native plugin's init() export.
+// Stays alive for the process lifetime.
+Dmart.Plugins.Native.NativePluginCallbacks.Services = app.Services;
+
 // Register the shutdown hook for subprocess plugins so each one gets a
 // clean stdin-close (EOF) when dmart starts shutting down. Paired with the
 // SDK sample's SIGINT handling, this silences the KeyboardInterrupt trace

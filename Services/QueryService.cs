@@ -4,6 +4,7 @@ using Dmart.DataAdapters.Sql;
 using Dmart.Models.Api;
 using Dmart.Models.Core;
 using Dmart.Models.Enums;
+using Dmart.Models.Json;
 using Microsoft.Extensions.Options;
 using Npgsql;
 using NpgsqlTypes;
@@ -67,7 +68,7 @@ public sealed class QueryService(
         if (string.IsNullOrEmpty(q.SpaceName))
             return Response.Fail(InternalErrorCode.INVALID_DATA, "space_name is required", ErrorTypes.Request);
 
-        return q.Type switch
+        var response = q.Type switch
         {
             QueryType.Spaces => await QuerySpacesAsync(q, actor, ct),
             QueryType.History => await QueryHistoryAsync(q, actor, ct),
@@ -81,6 +82,31 @@ public sealed class QueryService(
                 ErrorTypes.Request),
             _ => await DispatchTableQuery(q, actor, ct),
         };
+
+        // Python parity: client-side joins run against the materialized result
+        // list. Mirror of dmart_plain/backend/data_adapters/sql/adapter.py:
+        // _apply_client_joins. Each JoinQuery fires a second ExecuteAsync with
+        // a synthesized search term "@<right_path>:<left_vals>" and matches
+        // right results to each base record; matches land under
+        // record.attributes["join"][<alias>].
+        if (q.Join is { Count: > 0 } joins
+            && response.Status == Status.Success
+            && response.Records is { Count: > 0 } records)
+        {
+            try
+            {
+                var joined = await ApplyClientJoinsAsync(records, joins, actor, ct);
+                response = response with { Records = joined };
+            }
+            catch (Exception ex)
+            {
+                // Python swallows join errors with a print; match that: return
+                // the un-joined base results rather than failing the whole query.
+                Console.Error.WriteLine($"[client_join] {ex.Message}");
+            }
+        }
+
+        return response;
     }
 
     // ====================================================================
@@ -448,6 +474,275 @@ public sealed class QueryService(
         return Response.Ok(Array.Empty<Record>(), new() { ["total"] = total, ["returned"] = returned });
     }
 
+    // ====================================================================
+    // CLIENT-SIDE JOINS
+    // Port of dmart_plain/backend/data_adapters/sql/adapter.py:
+    // _apply_client_joins. For each JoinQuery, gathers left-path values from
+    // the base records, issues a second ExecuteAsync with a synthesized
+    // search term, then matches right results back into each base record's
+    // attributes["join"][<alias>] list.
+    // ====================================================================
+
+    private async Task<List<Record>> ApplyClientJoinsAsync(
+        List<Record> baseRecords, List<JoinQuery> joins, string? actor, CancellationToken ct)
+    {
+        // Ensure every base record has a mutable Attributes dict with a "join"
+        // sub-dict. Record.Attributes is init-only but Dictionary is mutable,
+        // so we only need to rebuild the record when Attributes was null.
+        for (var i = 0; i < baseRecords.Count; i++)
+        {
+            var br = baseRecords[i];
+            if (br.Attributes is null)
+            {
+                baseRecords[i] = br with
+                {
+                    Attributes = new Dictionary<string, object> { ["join"] = new Dictionary<string, object>() }
+                };
+            }
+            else if (!br.Attributes.ContainsKey("join"))
+            {
+                br.Attributes["join"] = new Dictionary<string, object>();
+            }
+        }
+
+        foreach (var joinItem in joins)
+        {
+            if (string.IsNullOrEmpty(joinItem.JoinOn)
+                || string.IsNullOrEmpty(joinItem.Alias)
+                || joinItem.Query is null)
+                continue;
+
+            var parsedJoins = ParseJoinOn(joinItem.JoinOn);
+            if (parsedJoins.Count == 0) continue;
+
+            Query? subQuery;
+            try
+            {
+                subQuery = JsonSerializer.Deserialize(joinItem.Query.Value, DmartJsonContext.Default.Query);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[client_join] failed to deserialize sub-query for alias '{joinItem.Alias}': {ex.Message}");
+                continue;
+            }
+            if (subQuery is null) continue;
+            int? userLimit = subQuery.Limit > 0 ? subQuery.Limit : null;
+
+            // Build per-pair search terms ("@right:val1|val2|...") from the
+            // base records' left-path values.
+            var searchTerms = new List<string>();
+            var possibleMatch = true;
+            foreach (var (lPath, lArr, rPath, _) in parsedJoins)
+            {
+                var leftValues = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var br in baseRecords)
+                {
+                    foreach (var v in GetValuesFromRecord(br, lPath, lArr))
+                    {
+                        if (v is not null) leftValues.Add(FormatValue(v));
+                    }
+                }
+                if (leftValues.Count == 0) { possibleMatch = false; break; }
+                searchTerms.Add($"@{rPath}:{string.Join('|', leftValues)}");
+            }
+
+            List<Record> rightRecords = new();
+            if (possibleMatch)
+            {
+                var injectedSearch = string.Join(' ', searchTerms);
+                var combinedSearch = string.IsNullOrEmpty(subQuery.Search)
+                    ? injectedSearch
+                    : $"{subQuery.Search} {injectedSearch}";
+                // Python caps sub-query at 1000; we do the same so a single
+                // join pull can't blow up memory when the base set is wide.
+                var widened = subQuery with { Search = combinedSearch, Limit = 1000 };
+                var subResponse = await ExecuteAsync(widened, actor, ct);
+                if (subResponse.Status == Status.Success && subResponse.Records is not null)
+                    rightRecords = subResponse.Records;
+            }
+
+            // Index the right records by the FIRST parsed join pair's right
+            // path — matches Python's approach exactly.
+            var (lPath0, lArr0, rPath0, rArr0) = parsedJoins[0];
+            var rightIndex = new Dictionary<string, List<Record>>(StringComparer.Ordinal);
+            foreach (var rr in rightRecords)
+            {
+                foreach (var v in GetValuesFromRecord(rr, rPath0, rArr0))
+                {
+                    if (v is null) continue;
+                    var key = FormatValue(v);
+                    if (!rightIndex.TryGetValue(key, out var list))
+                        rightIndex[key] = list = new List<Record>();
+                    list.Add(rr);
+                }
+            }
+
+            // For each base record, collect candidates, dedup, apply
+            // additional parsed-join intersections, apply the sub-query's
+            // user-supplied limit.
+            for (var i = 0; i < baseRecords.Count; i++)
+            {
+                var br = baseRecords[i];
+                var candidates = new List<Record>();
+                foreach (var v in GetValuesFromRecord(br, lPath0, lArr0))
+                {
+                    if (v is null) continue;
+                    if (rightIndex.TryGetValue(FormatValue(v), out var list))
+                        candidates.AddRange(list);
+                }
+
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+                var unique = new List<Record>();
+                foreach (var c in candidates)
+                {
+                    var uid = $"{c.Subpath}:{c.Shortname}:{JsonbHelpers.EnumMember(c.ResourceType)}";
+                    if (seen.Add(uid)) unique.Add(c);
+                }
+
+                var matched = new List<Record>();
+                foreach (var cand in unique)
+                {
+                    var allMatch = true;
+                    for (var j = 1; j < parsedJoins.Count; j++)
+                    {
+                        var (lP, lA, rP, rA) = parsedJoins[j];
+                        var lVs = new HashSet<string>(StringComparer.Ordinal);
+                        foreach (var v in GetValuesFromRecord(br, lP, lA))
+                            if (v is not null) lVs.Add(FormatValue(v));
+                        var rVs = new HashSet<string>(StringComparer.Ordinal);
+                        foreach (var v in GetValuesFromRecord(cand, rP, rA))
+                            if (v is not null) rVs.Add(FormatValue(v));
+                        if (!lVs.Overlaps(rVs)) { allMatch = false; break; }
+                    }
+                    if (allMatch) matched.Add(cand);
+                }
+
+                if (userLimit is int ul && matched.Count > ul)
+                    matched = matched.GetRange(0, ul);
+
+                var attrs = br.Attributes!;
+                var joinDict = (Dictionary<string, object>)attrs["join"];
+                joinDict[joinItem.Alias] = matched;
+            }
+        }
+
+        return baseRecords;
+    }
+
+    // Parses a "l1:r1, l2:r2" expression into tuples. "[]" suffix on either
+    // side signals that the field is expected to be a list (array hint).
+    private static List<(string lPath, bool lArr, string rPath, bool rArr)> ParseJoinOn(string expr)
+    {
+        var result = new List<(string, bool, string, bool)>();
+        foreach (var rawPart in expr.Split(','))
+        {
+            var part = rawPart.Trim();
+            if (part.Length == 0) continue;
+            var colon = part.IndexOf(':');
+            if (colon < 0) throw new ArgumentException($"Invalid join_on expression: {expr}");
+            var left = part[..colon].Trim();
+            var right = part[(colon + 1)..].Trim();
+            var lArr = left.EndsWith("[]", StringComparison.Ordinal);
+            var rArr = right.EndsWith("[]", StringComparison.Ordinal);
+            if (lArr) left = left[..^2];
+            if (rArr) right = right[..^2];
+            result.Add((left, lArr, right, rArr));
+        }
+        return result;
+    }
+
+    // Pulls values from a Record at the given dotted path. Matches Python's
+    // get_values_from_record behavior: top-level Record fields come from the
+    // strongly-typed properties; everything else walks record.attributes.
+    private static List<object?> GetValuesFromRecord(Record rec, string path, bool arrayHint)
+    {
+        try
+        {
+            object? val = path switch
+            {
+                "shortname" => rec.Shortname,
+                "resource_type" => JsonbHelpers.EnumMember(rec.ResourceType),
+                "subpath" => rec.Subpath,
+                "uuid" => rec.Uuid,
+                "space_name" => rec.Attributes is { } a && a.TryGetValue("space_name", out var sp) ? sp : null,
+                _ => GetNestedFromAttributes(rec.Attributes, path),
+            };
+            if (val is null) return new();
+            // A list value short-circuits the array_hint — we always unpack
+            // to scalar primitives, dropping nested dicts/records.
+            if (val is System.Collections.IList list && val is not string)
+            {
+                var outList = new List<object?>();
+                foreach (var item in list)
+                {
+                    if (item is null or string or bool) outList.Add(item);
+                    else if (item.GetType().IsPrimitive || item is decimal) outList.Add(item);
+                    else if (item is JsonElement je && (je.ValueKind is JsonValueKind.String
+                        or JsonValueKind.Number or JsonValueKind.True or JsonValueKind.False))
+                        outList.Add(JsonElementToObject(je));
+                }
+                return outList;
+            }
+            return new() { val };
+        }
+        catch { return new(); }
+    }
+
+    private static object? GetNestedFromAttributes(Dictionary<string, object>? attrs, string path)
+    {
+        if (attrs is null) return null;
+        var segments = path.Split('.');
+        object? current = attrs;
+        foreach (var seg in segments)
+        {
+            if (current is null) return null;
+            current = current switch
+            {
+                // Dictionary<string, object?> and Dictionary<string, object> are the
+                // same CLR type (nullable annotations are erased), so one case
+                // covers both EntryMapper's output and Record.Attributes.
+                Dictionary<string, object> d => d.TryGetValue(seg, out var v) ? v : null,
+                Payload p => seg == "body" ? (object?)p.Body : null,
+                JsonElement je when je.ValueKind == JsonValueKind.Object =>
+                    je.TryGetProperty(seg, out var child) ? JsonElementToObject(child) : null,
+                _ => null,
+            };
+        }
+        return current;
+    }
+
+    private static object? JsonElementToObject(JsonElement e) => e.ValueKind switch
+    {
+        JsonValueKind.String => e.GetString(),
+        JsonValueKind.Number => e.TryGetInt64(out var i) ? i : (object)e.GetDouble(),
+        JsonValueKind.True => true,
+        JsonValueKind.False => false,
+        JsonValueKind.Null => null,
+        JsonValueKind.Array => ExtractJsonArray(e),
+        JsonValueKind.Object => e,  // keep as JsonElement so caller can drill further
+        _ => null,
+    };
+
+    private static List<object?> ExtractJsonArray(JsonElement e)
+    {
+        var outList = new List<object?>();
+        foreach (var item in e.EnumerateArray())
+        {
+            if (item.ValueKind is JsonValueKind.String or JsonValueKind.Number
+                or JsonValueKind.True or JsonValueKind.False)
+                outList.Add(JsonElementToObject(item));
+        }
+        return outList;
+    }
+
+    // Formats a value as its string key for the left/right value index.
+    // Matches Python's `str(val)` behavior.
+    private static string FormatValue(object v) => v switch
+    {
+        string s => s,
+        bool b => b ? "True" : "False",  // Python str(True) == "True"
+        _ => Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture) ?? "",
+    };
 }
 
 // ========================================================================

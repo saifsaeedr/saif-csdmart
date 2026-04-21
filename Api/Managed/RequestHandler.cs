@@ -46,6 +46,49 @@ public static class RequestHandler
 
                 foreach (var rec in req.Records)
                 {
+                    // Fire before-action hook for non-entry CRUD types. EntryService fires
+                    // its own before-hook for entry writes; User/Role/Permission/Space go
+                    // through dedicated repos that bypass it, so we emit the event here.
+                    // Python fires before-hooks for all resource types on this endpoint.
+                    var beforeActionType = rec.ResourceType is ResourceType.User or ResourceType.Role
+                        or ResourceType.Permission or ResourceType.Space
+                        ? req.RequestType switch
+                        {
+                            RequestType.Create => (ActionType?)ActionType.Create,
+                            RequestType.Update or RequestType.Patch => ActionType.Update,
+                            RequestType.Delete => ActionType.Delete,
+                            RequestType.Move => ActionType.Move,
+                            _ => null,
+                        }
+                        : null;
+                    if (beforeActionType is not null)
+                    {
+                        try
+                        {
+                            await plugins.BeforeActionAsync(new Models.Core.Event
+                            {
+                                SpaceName = req.SpaceName,
+                                Subpath = rec.Subpath,
+                                Shortname = rec.Shortname,
+                                ActionType = beforeActionType.Value,
+                                ResourceType = rec.ResourceType,
+                                UserShortname = actor,
+                            }, ct);
+                        }
+                        catch (Exception ex)
+                        {
+                            // Matches EntryService: before-hook failure aborts the write
+                            // and surfaces as a per-record failure in the aggregate response.
+                            failedRecords.Add(new Dictionary<string, object>
+                            {
+                                ["record"] = rec.Shortname,
+                                ["error"] = "plugin rejected " + beforeActionType.Value.ToString().ToLowerInvariant() + ": " + ex.Message,
+                                ["error_code"] = InternalErrorCode.INVALID_DATA,
+                            });
+                            continue;
+                        }
+                    }
+
                     var result = req.RequestType switch
                     {
                         RequestType.Create =>

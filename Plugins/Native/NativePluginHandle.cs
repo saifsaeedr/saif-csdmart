@@ -22,16 +22,21 @@ internal sealed class NativePluginHandle : IDisposable
     public delegate IntPtr HandleRequestFn(IntPtr requestJson);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void FreeStringFn(IntPtr ptr);
+    // Optional. Plugins that need to call back into dmart export `init` and
+    // receive the pointer to a DmartCallbacks struct (see NativePluginCallbacks).
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate void InitFn(IntPtr callbacksPtr);
 
     public GetInfoFn GetInfo { get; }
     public HookFn? Hook { get; }
     public HandleRequestFn? HandleRequest { get; }
     public FreeStringFn FreeString { get; }
+    public InitFn? Init { get; }
     public string SoPath { get; }
 
     private NativePluginHandle(IntPtr lib, string soPath,
         GetInfoFn getInfo, FreeStringFn freeString,
-        HookFn? hook, HandleRequestFn? handleRequest)
+        HookFn? hook, HandleRequestFn? handleRequest, InitFn? init)
     {
         _lib = lib;
         SoPath = soPath;
@@ -39,6 +44,7 @@ internal sealed class NativePluginHandle : IDisposable
         FreeString = freeString;
         Hook = hook;
         HandleRequest = handleRequest;
+        Init = init;
     }
 
     public static NativePluginHandle Load(string soPath)
@@ -58,7 +64,11 @@ internal sealed class NativePluginHandle : IDisposable
         if (NativeLibrary.TryGetExport(lib, "handle_request", out var hrPtr))
             handleRequest = Marshal.GetDelegateForFunctionPointer<HandleRequestFn>(hrPtr);
 
-        return new NativePluginHandle(lib, soPath, getInfo, freeString, hook, handleRequest);
+        InitFn? init = null;
+        if (NativeLibrary.TryGetExport(lib, "init", out var initPtr))
+            init = Marshal.GetDelegateForFunctionPointer<InitFn>(initPtr);
+
+        return new NativePluginHandle(lib, soPath, getInfo, freeString, hook, handleRequest, init);
     }
 
     public string CallGetInfo()
