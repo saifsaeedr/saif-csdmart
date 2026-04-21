@@ -608,10 +608,10 @@ public sealed class UserService(
                 ? ParseLanguage(l.ToString())
                 : user.Language,
             Displayname = patch.TryGetValue("displayname", out var dn) && dn is not null
-                ? new Translation(En: dn.ToString())
+                ? ParseTranslation(dn) ?? user.Displayname
                 : user.Displayname,
             Description = patch.TryGetValue("description", out var desc) && desc is not null
-                ? new Translation(En: desc.ToString())
+                ? ParseTranslation(desc) ?? user.Description
                 : user.Description,
             DeviceId = Str(patch, "device_id", user.DeviceId),
             ForcePasswordChange = resolvedForcePasswordChange,
