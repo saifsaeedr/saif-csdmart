@@ -10,6 +10,46 @@ permissions:
   packages: write
 
 jobs:
+  build-ui-tarballs:
+    name: Build UI tarballs (cxb + catalog)
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Build UI frontends (cxb + catalog)
+        run: ./build-ui.sh
+
+      - name: Set version
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=${VERSION:-0.1.0}" >> "$GITHUB_OUTPUT"
+
+      - name: Package tarballs
+        run: |
+          mkdir -p dist/out
+          V="${{ steps.version.outputs.version }}"
+          # Flat-root archives — extract into a web docroot and the SPA runs.
+          # Each bundle's own index.html / config.json / assets/ are at the top.
+          tar -czf "dist/out/cxb-${V}.tar.gz"     -C cxb/dist/client     .
+          tar -czf "dist/out/catalog-${V}.tar.gz" -C catalog/dist/client .
+          ls -lh dist/out/*.tar.gz
+
+      - name: Upload UI tarballs to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" \
+            dist/out/cxb-*.tar.gz dist/out/catalog-*.tar.gz --clobber
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ui-tarballs
+          path: dist/out/*.tar.gz
+
   build-srpm:
     name: Build Source RPM
     runs-on: self-hosted
