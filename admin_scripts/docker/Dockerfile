@@ -14,9 +14,11 @@ RUN apk add --no-cache clang build-base zlib-dev
 WORKDIR /src
 
 # Restore NuGet packages in a cacheable layer of their own — only the
-# project file is needed for restore, so unrelated source changes don't
-# invalidate the cache.
+# project files are needed for restore, so unrelated source changes don't
+# invalidate the cache. dmart.csproj ProjectReferences Dmart.Models, so
+# both csproj files must be present when the restore graph is computed.
 COPY dmart.csproj ./
+COPY Dmart.Models/Dmart.Models.csproj Dmart.Models/
 RUN dotnet restore dmart.csproj -r linux-musl-x64
 
 # Bring in the full source and publish. .dockerignore filters out
@@ -38,7 +40,11 @@ RUN apk add --no-cache \
 
 COPY --from=build --chmod=755 /out/dmart /usr/bin/dmart
 COPY --from=build /out/plugins/ /usr/lib/dmart/plugins/
-COPY cxb/dist/client/ /usr/lib/dmart/cxb/
+# Filesystem fallback copies of the embedded SPAs — musl-AOT doesn't always
+# surface ManifestEmbeddedFileProvider resources, so the middleware falls
+# back to these dirs at runtime (see CxbMiddleware / CatalogMiddleware).
+COPY cxb/dist/client/     /usr/lib/dmart/cxb/
+COPY catalog/dist/client/ /usr/lib/dmart/catalog/
 COPY --chmod=755 admin_scripts/docker/entrypoint.sh /entrypoint.sh
 
 ENV DOTNET_SYSTEM_NET_SECURITY_DISABLEGSSAPIPAL=true
