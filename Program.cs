@@ -407,8 +407,6 @@ switch (subcommand)
             else
                 File.WriteAllText(configEnvPath,
                     "# dmart server configuration\n" +
-                    "APP_NAME=\"dmart\"\n" +
-                    "APP_URL=\"http://127.0.0.1:5099\"\n" +
                     "LISTENING_HOST=\"0.0.0.0\"\n" +
                     "LISTENING_PORT=5099\n" +
                     "DATABASE_HOST=\"localhost\"\n" +
