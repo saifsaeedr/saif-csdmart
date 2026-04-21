@@ -579,8 +579,19 @@ public sealed class UserService(
             newPasswordHash = string.IsNullOrEmpty(newPw) ? null : hasher.Hash(newPw!);
         }
 
+        // Str only accepts scalar strings. When a client sends a non-string
+        // (object, array, number, bool) for a field declared as a string —
+        // e.g. {"email": {"foo":"bar"}} — preserve the existing value instead
+        // of stuffing a JSON literal into the column. Matches Python's
+        // Pydantic string-field validation outcome: bad type → don't apply.
         static string? Str(Dictionary<string, object> d, string k, string? fallback)
-            => d.TryGetValue(k, out var v) ? v?.ToString() : fallback;
+        {
+            if (!d.TryGetValue(k, out var v) || v is null) return fallback;
+            if (v is string s) return s;
+            if (v is JsonElement el)
+                return el.ValueKind == JsonValueKind.String ? el.GetString() : fallback;
+            return v.ToString() ?? fallback;
+        }
 
         // If the password was updated, clear the force-change flag — Python
         // does the same inside set_user_profile. The flag is only meaningful
@@ -600,6 +611,29 @@ public sealed class UserService(
             resolvedForcePasswordChange = user.ForcePasswordChange;
         }
 
+        // Python parity: update_user_payload (api/user/service.py) deep-merges
+        // patch.payload.body into user.payload.body, creating an empty Payload
+        // if the user had none. Schema validation is intentionally omitted here
+        // — UserService has no SchemaService dependency and Python only runs
+        // it when the payload carries a schema_shortname, which admin-minted
+        // user payloads typically don't.
+        var resolvedPayload = user.Payload;
+        if (patch.TryGetValue("payload", out var payloadRaw)
+            && payloadRaw is JsonElement pe
+            && pe.ValueKind == JsonValueKind.Object
+            && pe.TryGetProperty("body", out var patchBody)
+            && patchBody.ValueKind != JsonValueKind.Null)
+        {
+            resolvedPayload ??= new Payload
+            {
+                ContentType = ContentType.Json,
+                SchemaShortname = null,
+                Body = null,
+            };
+            var mergedBody = JsonMerge.DeepMergeAndStripNulls(resolvedPayload.Body, patchBody);
+            resolvedPayload = resolvedPayload with { Body = mergedBody };
+        }
+
         var updated = user with
         {
             Email = Str(patch, "email", user.Email),
@@ -616,6 +650,7 @@ public sealed class UserService(
             DeviceId = Str(patch, "device_id", user.DeviceId),
             ForcePasswordChange = resolvedForcePasswordChange,
             Password = newPasswordHash ?? user.Password,
+            Payload = resolvedPayload,
             UpdatedAt = DateTime.UtcNow,
         };
         await users.UpsertAsync(updated, ct);
