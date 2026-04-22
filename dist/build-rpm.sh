@@ -120,6 +120,15 @@ if [[ "$TARGET" == "el9" || "$TARGET" == "rhel9" ]]; then
                  ([ -d catalog ] && ! $ENGINE exec "$CONTAINER_NAME" test -r /src/catalog/package.json 2>/dev/null); then
                 echo "Container $CONTAINER_NAME can't read all source dirs (likely :Z label drift), recreating..."
                 $ENGINE rm -f "$CONTAINER_NAME" 2>/dev/null || true
+            # Verify the SDK is installed. A container that was created but
+            # had its SDK install step aborted (e.g. crun failed during init
+            # on the prior build attempt and left a bare almalinux shell
+            # behind) will pass the DNS + source-dir checks and still blow
+            # up at the first `dotnet` call downstream. Cheap probe: run
+            # `dotnet --version` — succeeds iff the SDK is actually there.
+            elif ! $ENGINE exec "$CONTAINER_NAME" bash -c 'command -v dotnet >/dev/null' 2>/dev/null; then
+                echo "Container $CONTAINER_NAME has no dotnet (SDK install never completed), recreating..."
+                $ENGINE rm -f "$CONTAINER_NAME" 2>/dev/null || true
             else
                 echo "Reusing existing $CONTAINER_NAME container..."
                 NEED_CREATE=false
