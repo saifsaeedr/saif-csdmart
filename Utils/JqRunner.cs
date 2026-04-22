@@ -99,16 +99,24 @@ public static class JqRunner
         using (proc)
         {
             // Pipe JSON onto stdin. jq reads, processes, emits on stdout.
+            // When jq rejects the filter (bad syntax, blocked builtin) it
+            // exits before consuming stdin — our write then hits an
+            // IOException ("Pipe is broken"). That's expected; swallow it
+            // and let the caller branch on jq's exit code instead.
             var stdinTask = Task.Run(async () =>
             {
                 try
                 {
                     await proc.StandardInput.BaseStream.WriteAsync(inputJson, ct);
                 }
-                finally
+                catch (IOException) { }
+                catch (ObjectDisposedException) { }
+                try
                 {
                     proc.StandardInput.Close();
                 }
+                catch (IOException) { }
+                catch (ObjectDisposedException) { }
             }, ct);
 
             var stdoutTask = proc.StandardOutput.ReadToEndAsync(ct);
