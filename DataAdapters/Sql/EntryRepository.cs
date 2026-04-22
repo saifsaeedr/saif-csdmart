@@ -179,8 +179,20 @@ public sealed class EntryRepository(Db db)
     public Task<List<Entry>> QueryAsync(Query q, CancellationToken ct = default)
         => QueryHelper.RunQueryAsync(db, SelectAllColumns, q, Hydrate, ct, tableName: "entries");
 
+    // Authenticated-actor overload — applies owner/ACL/query_policies
+    // filtering so rows the caller can't see are excluded. Callers with
+    // no actor context (internal plugins, import/export) should use the
+    // parameterless overload above and remain server-unrestricted.
+    public Task<List<Entry>> QueryAsync(Query q, string actor, List<string>? queryPolicies, CancellationToken ct = default)
+        => QueryHelper.RunQueryAsync(db, SelectAllColumns, q, Hydrate, ct,
+            tableName: "entries", userShortname: actor, queryPolicies: queryPolicies);
+
     public Task<int> CountQueryAsync(Query q, CancellationToken ct = default)
         => QueryHelper.RunCountAsync(db, "entries", q, ct);
+
+    public Task<int> CountQueryAsync(Query q, string actor, List<string>? queryPolicies, CancellationToken ct = default)
+        => QueryHelper.RunCountAsync(db, "entries", q, ct,
+            userShortname: actor, queryPolicies: queryPolicies);
 
     public async Task<long> CountAsync(string spaceName, string subpath, CancellationToken ct = default)
     {

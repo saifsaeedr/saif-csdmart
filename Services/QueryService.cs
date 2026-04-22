@@ -390,10 +390,25 @@ public sealed class QueryService(
         if (!await CanQueryAsync(actor, ResourceType.Content, q.SpaceName, q.Subpath ?? "/", ct))
             return EmptyQueryResponse();
 
-        var pageTask = entries.QueryAsync(q, ct);
+        // Row-level ACL: mirrors Python's get_user_query_policies + apply.
+        // Empty policies for an authenticated actor → the gate passed on
+        // some wildcard but no grant reaches this subpath. Python returns
+        // (0, []); match that so the caller can't infer row counts.
+        List<string>? policies = null;
+        if (actor is not null)
+        {
+            policies = await perms.BuildUserQueryPoliciesAsync(actor, q.SpaceName, q.Subpath ?? "/", ct);
+            if (policies.Count == 0) return EmptyQueryResponse();
+        }
+
+        var pageTask = actor is not null
+            ? entries.QueryAsync(q, actor, policies, ct)
+            : entries.QueryAsync(q, ct);
         var totalTask = q.RetrieveTotal == false
             ? Task.FromResult(-1)
-            : entries.CountQueryAsync(q, ct);
+            : (actor is not null
+                ? entries.CountQueryAsync(q, actor, policies, ct)
+                : entries.CountQueryAsync(q, ct));
         await Task.WhenAll(pageTask, totalTask);
 
         var records = (await pageTask)
@@ -534,7 +549,16 @@ public sealed class QueryService(
         {
             if (!await CanQueryAsync(actor, ResourceType.Content, q.SpaceName, q.Subpath ?? "/", ct))
                 return EmptyQueryResponse();
-            total = await entries.CountQueryAsync(q, ct);
+            if (actor is not null)
+            {
+                var policies = await perms.BuildUserQueryPoliciesAsync(actor, q.SpaceName, q.Subpath ?? "/", ct);
+                if (policies.Count == 0) return EmptyQueryResponse();
+                total = await entries.CountQueryAsync(q, actor, policies, ct);
+            }
+            else
+            {
+                total = await entries.CountQueryAsync(q, ct);
+            }
         }
 
         var returned = Math.Min(Math.Max(total - Math.Max(0, q.Offset), 0), Math.Max(1, q.Limit));

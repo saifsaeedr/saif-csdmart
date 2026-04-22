@@ -1047,13 +1047,20 @@ public static class QueryHelper
 
     public static async Task<int> RunCountAsync(
         Db db, string tableName, Query q,
-        CancellationToken ct)
+        CancellationToken ct,
+        string? userShortname = null, List<string>? queryPolicies = null)
     {
         var args = new List<NpgsqlParameter>();
         var where = BuildWhereClause(q, args);
-        var sql = $"SELECT COUNT(*) FROM {tableName} WHERE {where}";
+        var sqlBuilder = new System.Text.StringBuilder($"SELECT COUNT(*) FROM {tableName} WHERE {where} ");
+        // Parity with RunQueryAsync: apply owner/ACL/query_policies predicate
+        // so COUNT(*) is scoped to rows the actor can actually see. Skipped
+        // for attachments/histories inside AppendAclFilter (Python parity).
+        if (userShortname is not null)
+            AppendAclFilter(sqlBuilder, args, userShortname, tableName, queryPolicies);
+
         await using var conn = await db.OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand(sql, conn);
+        await using var cmd = new NpgsqlCommand(sqlBuilder.ToString(), conn);
         foreach (var p in args) cmd.Parameters.Add(p);
         return (int)(long)(await cmd.ExecuteScalarAsync(ct) ?? 0L);
     }

@@ -288,6 +288,100 @@ public sealed class PermissionService(UserRepository users, AccessRepository acc
     public Task<bool> CanDeleteAsync(string? actor, Locator l, ResourceContext? r, CancellationToken ct = default)
         => CanAsync(actor, "delete", l, r, null, ct);
 
+    // Mirrors Python's utils/query_policies_helper.py:get_user_query_policies.
+    // Builds the list of LIKE-capable patterns (owner-aware) that restrict
+    // which entries.query_policies rows an actor may read. Returns empty
+    // when the actor has no query-grant that reaches (spaceName, subpath) —
+    // callers should short-circuit to (total=0, records=[]) on empty,
+    // matching Python's `if not sql_query_policies: return (0, [])`.
+    //
+    // Pattern format (no leading slash in the subpath segment, matching the
+    // format written by generate_query_policies when rows are persisted):
+    //   <space>:<subpath>:<resource_type>:<is_active>:<owner>   — own + is_active
+    //   <space>:<subpath>:<resource_type>:true:*                — is_active only
+    //   <space>:<subpath>:<resource_type>:true:<shortname>      — own only (+ false variant)
+    //   <space>:<subpath>:<resource_type>:*                     — no conditions
+    public async Task<List<string>> BuildUserQueryPoliciesAsync(
+        string? actorShortname, string spaceName, string subpath,
+        CancellationToken ct = default)
+    {
+        actorShortname ??= AnonymousUser;
+        var (user, perms) = await ResolvePermissionsAsync(actorShortname, ct);
+        if (actorShortname != AnonymousUser && (user is null || !user.IsActive))
+            return new();
+
+        // Python: user_groups = user.groups + [user_shortname]. When
+        // conditions = {own, is_active}, emit one pattern per group.
+        var userGroups = new List<string>();
+        if (user is not null) userGroups.AddRange(user.Groups);
+        userGroups.Add(actorShortname);
+
+        // Entries' query_policies have no leading slash in the subpath
+        // segment (generate_query_policies does full_subpath.strip('/')).
+        // Normalize the same way on both sides so the LIKE match lines up
+        // regardless of whether permissions.subpaths were stored with or
+        // without the leading slash.
+        var querySubpath = subpath.TrimStart('/');
+
+        var policies = new List<string>();
+        foreach (var p in perms)
+        {
+            if (!p.IsActive) continue;
+            if (!p.Actions.Contains("query", StringComparer.Ordinal)) continue;
+
+            foreach (var (permSpace, permSubpathList) in p.Subpaths)
+            {
+                var list = permSubpathList.Count > 0 ? permSubpathList : new List<string> { "/" };
+                foreach (var rawSub in list)
+                {
+                    // Normalize permission subpath too — the storage layer
+                    // isn't consistent about the leading slash across
+                    // deployments.
+                    var permSubpath = rawSub.TrimStart('/');
+
+                    var include =
+                        permSpace == AllSpacesMw
+                        || (permSpace == spaceName && (
+                            permSubpath == AllSubpathsMw
+                            || permSubpath == querySubpath
+                            || (permSubpath.Length > 0
+                                && querySubpath.StartsWith(permSubpath + "/", StringComparison.Ordinal))));
+                    if (!include) continue;
+
+                    var effectiveSpace = permSpace == AllSpacesMw ? spaceName : permSpace;
+                    var effectiveSubpath = permSubpath == AllSubpathsMw ? querySubpath : permSubpath;
+
+                    foreach (var rt in p.ResourceTypes)
+                    {
+                        var permKey = $"{effectiveSpace}:{effectiveSubpath}:{rt}";
+                        var hasIsActive = p.Conditions.Contains("is_active", StringComparer.Ordinal);
+                        var hasOwn = p.Conditions.Contains("own", StringComparer.Ordinal);
+
+                        if (hasIsActive && hasOwn)
+                        {
+                            foreach (var g in userGroups)
+                                policies.Add($"{permKey}:true:{g}");
+                        }
+                        else if (hasIsActive)
+                        {
+                            policies.Add($"{permKey}:true:*");
+                        }
+                        else if (hasOwn)
+                        {
+                            policies.Add($"{permKey}:true:{actorShortname}");
+                            policies.Add($"{permKey}:false:{actorShortname}");
+                        }
+                        else
+                        {
+                            policies.Add($"{permKey}:*");
+                        }
+                    }
+                }
+            }
+        }
+        return policies;
+    }
+
     public Task ReloadAsync(CancellationToken ct = default) => access.InvalidateAllCachesAsync(ct);
 
     // ============================================================================
