@@ -80,6 +80,18 @@ public sealed class EntryRepository(Db db)
 
     public async Task UpsertAsync(Entry e, CancellationToken ct = default)
     {
+        // Row-level ACL depends on entries.query_policies carrying the
+        // owner/is_active/subpath fingerprints Python's generate_query_policies
+        // would have written on the row. Without this, AppendAclFilter finds
+        // no matching patterns and the entry becomes invisible to every
+        // authenticated caller except the owner — even with correct
+        // permissions. Always regenerate on upsert: the algorithm is
+        // deterministic from (space, subpath, rt, is_active, owner,
+        // owner_group), so a no-op change is still a no-op in the DB. When
+        // those DO change (ownership transfer, toggle is_active) the new
+        // policies reflect reality.
+        e = e with { QueryPolicies = Utils.QueryPolicies.Generate(e) };
+
         await using var conn = await db.OpenAsync(ct);
         await using var cmd = new NpgsqlCommand("""
             INSERT INTO entries (uuid, shortname, space_name, subpath, is_active, slug,
