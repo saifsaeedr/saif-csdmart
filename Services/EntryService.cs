@@ -160,8 +160,118 @@ public sealed class EntryService(
         if (merged.ResourceType == ResourceType.Schema) schemas.ClearCache();
         await history.AppendAsync(locator.SpaceName, locator.Subpath, locator.Shortname, actor, null,
             new() { ["action"] = "update", ["patch"] = patch }, ct);
-        await plugins.AfterActionAsync(BuildEvent(merged, ActionType.Update, actor), ct);
+
+        // Python parity: after_action for updates carries attributes.history_diff,
+        // a flat map of {field_path: {old, new}} produced from the same
+        // flatten-and-diff walk Python does. Plugins like order_notifications
+        // and action_log gate on watched keys (state, payload.body.payment_status)
+        // — without history_diff they never fire on update events.
+        var afterEvent = BuildEvent(merged, ActionType.Update, actor);
+        var historyDiff = ComputeHistoryDiff(existing, merged);
+        if (historyDiff.Count > 0) afterEvent.Attributes["history_diff"] = historyDiff;
+        await plugins.AfterActionAsync(afterEvent, ct);
         return Result<Entry>.Ok(merged);
+    }
+
+    // Mirror of dmart's adapter.py::store_entry_diff: flatten both Entries,
+    // produce a {key: {"old": …, "new": …}} dict for every field whose value
+    // changed. Empty dict when nothing relevant differs. Used by the
+    // AfterAction event so plugins can introspect exactly what changed.
+    private static Dictionary<string, object> ComputeHistoryDiff(Entry oldE, Entry newE)
+    {
+        var oldFlat = FlattenEntry(oldE);
+        var newFlat = FlattenEntry(newE);
+        var keys = new HashSet<string>(oldFlat.Keys, StringComparer.Ordinal);
+        keys.UnionWith(newFlat.Keys);
+
+        var diff = new Dictionary<string, object>(StringComparer.Ordinal);
+        foreach (var k in keys)
+        {
+            oldFlat.TryGetValue(k, out var o);
+            newFlat.TryGetValue(k, out var n);
+            if (ValuesEqual(o, n)) continue;
+            diff[k] = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["old"] = o,
+                ["new"] = n,
+            };
+        }
+        return diff;
+    }
+
+    private static Dictionary<string, object?> FlattenEntry(Entry e)
+    {
+        var d = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["is_active"] = e.IsActive,
+            ["owner_shortname"] = e.OwnerShortname,
+            ["owner_group_shortname"] = e.OwnerGroupShortname,
+            ["slug"] = e.Slug,
+            ["tags"] = e.Tags ?? new(),
+            ["state"] = e.State,
+            ["is_open"] = e.IsOpen,
+            ["workflow_shortname"] = e.WorkflowShortname,
+            ["resolution_reason"] = e.ResolutionReason,
+        };
+        if (e.Displayname is not null)
+        {
+            d["displayname.en"] = e.Displayname.En;
+            d["displayname.ar"] = e.Displayname.Ar;
+            d["displayname.ku"] = e.Displayname.Ku;
+        }
+        if (e.Description is not null)
+        {
+            d["description.en"] = e.Description.En;
+            d["description.ar"] = e.Description.Ar;
+            d["description.ku"] = e.Description.Ku;
+        }
+        if (e.Payload?.Body is JsonElement body)
+            FlattenJson(body, "payload.body", d);
+        return d;
+    }
+
+    private static void FlattenJson(JsonElement el, string prefix, Dictionary<string, object?> outDict)
+    {
+        switch (el.ValueKind)
+        {
+            case JsonValueKind.Object:
+                foreach (var prop in el.EnumerateObject())
+                    FlattenJson(prop.Value, $"{prefix}.{prop.Name}", outDict);
+                break;
+            case JsonValueKind.Array:
+                // Python flatten_dict keeps arrays as-is; we store the raw JSON
+                // so a caller can compare deeply-nested arrays via string equality.
+                outDict[prefix] = el.GetRawText();
+                break;
+            case JsonValueKind.String:
+                outDict[prefix] = el.GetString();
+                break;
+            case JsonValueKind.Number:
+                outDict[prefix] = el.TryGetInt64(out var i) ? (object)i : el.GetDouble();
+                break;
+            case JsonValueKind.True:  outDict[prefix] = true; break;
+            case JsonValueKind.False: outDict[prefix] = false; break;
+            case JsonValueKind.Null:  outDict[prefix] = null; break;
+        }
+    }
+
+    private static bool ValuesEqual(object? a, object? b)
+    {
+        if (a is null && b is null) return true;
+        if (a is null || b is null) return false;
+        if (a is System.Collections.IEnumerable ae && a is not string
+            && b is System.Collections.IEnumerable be && b is not string)
+        {
+            var al = new List<object?>();
+            foreach (var x in ae) al.Add(x);
+            var bl = new List<object?>();
+            foreach (var x in be) bl.Add(x);
+            if (al.Count != bl.Count) return false;
+            for (var i = 0; i < al.Count; i++)
+                if (!Equals(al[i], bl[i])) return false;
+            return true;
+        }
+        return Equals(a, b);
     }
 
     public async Task<Result<bool>> DeleteAsync(Locator locator, string? actor, CancellationToken ct = default)
