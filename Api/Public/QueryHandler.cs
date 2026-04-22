@@ -25,7 +25,13 @@ public static class QueryHandler
             }
             if (q is null)
                 return Response.Fail(InternalErrorCode.INVALID_DATA, "empty body", ErrorTypes.Request);
-            return await svc.ExecuteAsync(q, actor: null, ct);
+            // Python parity: /public/query resolves permissions under the
+            // "anonymous" user row (+ optional "world" permission), so
+            // anonymous queries see rows an admin configured as publicly
+            // visible. We pass the identity explicitly so QueryService
+            // builds row-level query_policies for anonymous — null would
+            // skip the ACL filter entirely (internal-unrestricted path).
+            return await svc.ExecuteAsync(q, actor: "anonymous", ct);
         });
 
         // Python: GET /public/query-via-url — query via URL parameters (for embedding).

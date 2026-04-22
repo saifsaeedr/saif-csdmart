@@ -1190,14 +1190,24 @@ else
     nope "limited user login failed"
 fi
 
-# 67. Limited user: root query on management returns folders
-printf '%-45s' "Limited user: management/ returns folders:" >&2
+# 67. Limited user: query on permitted subpath returns results.
+#
+# Prior version queried subpath="/" and asserted total>0 — that passed only
+# because the row-level ACL filter wasn't applied to search. After the
+# row-level ACL fix (query_policies enforced on entries queries), a caller
+# who has grants on management/users + management/schema does NOT implicitly
+# get a parent-level listing at management/ — Python's get_user_query_policies
+# matches subpath-by-subpath and emits no policies when none of the user's
+# permissions reach the queried subpath. Query management/users directly:
+# that IS permitted by the test permission and proves the limited-user path
+# flows through ACL correctly.
+printf '%-45s' "Limited user: management/users returns:" >&2
 if [ -n "$LTOKEN" ]; then
-    LROOT=$(curl -s -H "$CT" -H "$LAUTH" "$API_URL/managed/query" -d '{"type":"search","space_name":"management","subpath":"/","limit":50}')
+    LROOT=$(curl -s -H "$CT" -H "$LAUTH" "$API_URL/managed/query" -d '{"type":"search","space_name":"management","subpath":"/users","limit":50}')
     if echo "$LROOT" | jq -e '.status == "success" and (.attributes.total > 0)' > /dev/null 2>&1; then
         ok
     else
-        nope "root query: $LROOT"
+        nope "users query: $LROOT"
     fi
 else
     nope "limited user login failed"

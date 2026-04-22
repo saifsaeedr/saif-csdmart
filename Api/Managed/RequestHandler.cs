@@ -27,13 +27,38 @@ public static class RequestHandler
 {
     public static void Map(RouteGroupBuilder g) =>
         g.MapPost("/request",
-            async Task<Response> (Request req, EntryService entries, UserRepository users,
+            async Task<Response> (HttpRequest httpReq, EntryService entries, UserRepository users,
                                   AccessRepository access, SpaceRepository spaces,
                                   AttachmentRepository attachments, PasswordHasher hasher,
                                   Plugins.PluginManager plugins,
                                   IOptions<DmartSettings> dmartSettings,
                                   HttpContext http, CancellationToken ct) =>
             {
+                // Manual body parse so deserialization errors surface as dmart's
+                // structured failure envelope instead of Kestrel's empty-body 400.
+                // When we let the minimal-API binder receive `Request req` directly,
+                // a malformed body (typo, mis-nested quote, literal newline inside
+                // a JSON string) failed the binder BEFORE the handler ran — and
+                // Kestrel's fallback response is a 400 with zero content. Operators
+                // got no signal about WHAT was wrong.
+                Request? req;
+                try
+                {
+                    req = await System.Text.Json.JsonSerializer.DeserializeAsync(
+                        httpReq.Body, Models.Json.DmartJsonContext.Default.Request, ct);
+                }
+                catch (System.Text.Json.JsonException ex)
+                {
+                    return Response.Fail(InternalErrorCode.INVALID_DATA,
+                        $"invalid request body: {ex.Message}", ErrorTypes.Request);
+                }
+                if (req is null)
+                    return Response.Fail(InternalErrorCode.INVALID_DATA,
+                        "invalid request body: empty or null", ErrorTypes.Request);
+                if (req.Records is null)
+                    return Response.Fail(InternalErrorCode.INVALID_DATA,
+                        "invalid request body: 'records' is required", ErrorTypes.Request);
+
                 var actor = http.ActorOrAnonymous();
                 var managementSpace = dmartSettings.Value.ManagementSpace;
                 var responses = new List<Record>();
