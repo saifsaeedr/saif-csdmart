@@ -53,6 +53,8 @@
     <Compile Remove="dmart.Client/**" />
     <Content Remove="dmart.Client/**" />
     <None Remove="dmart.Client/**" />
+    <None Remove="catalog\**" />
+    <None Remove="cxb\**" />
   </ItemGroup>
 
   <ItemGroup>
@@ -81,6 +83,8 @@
     <Compile Remove="catalog/**" />
     <Content Remove="catalog/**" />
     <EmbeddedResource Include="catalog/dist/client/**" LinkBase="catalog-dist" />
+    <EmbeddedResource Remove="catalog\**" />
+    <EmbeddedResource Remove="cxb\**" />
   </ItemGroup>
 
   <ItemGroup>
@@ -105,6 +109,34 @@
     <!-- CLI subcommand (merged from dmart.Cli) -->
     <PackageReference Include="ReadLine" Version="2.0.1" />
     <PackageReference Include="Spectre.Console" Version="0.50.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <_ContentIncludedByDefault Remove="catalog\babel.config.json" />
+    <_ContentIncludedByDefault Remove="catalog\dist\client\config.json" />
+    <_ContentIncludedByDefault Remove="catalog\package.json" />
+    <_ContentIncludedByDefault Remove="catalog\public\config.json" />
+    <_ContentIncludedByDefault Remove="catalog\src\i18n\ar.json" />
+    <_ContentIncludedByDefault Remove="catalog\src\i18n\en.json" />
+    <_ContentIncludedByDefault Remove="catalog\src\i18n\ku.json" />
+    <_ContentIncludedByDefault Remove="catalog\tsconfig.app.json" />
+    <_ContentIncludedByDefault Remove="catalog\tsconfig.json" />
+    <_ContentIncludedByDefault Remove="catalog\tsconfig.node.json" />
+    <_ContentIncludedByDefault Remove="cxb\babel.config.json" />
+    <_ContentIncludedByDefault Remove="cxb\dist\client\config.json" />
+    <_ContentIncludedByDefault Remove="cxb\dist\client\config.sample.json" />
+    <_ContentIncludedByDefault Remove="cxb\package.json" />
+    <_ContentIncludedByDefault Remove="cxb\public\config.json" />
+    <_ContentIncludedByDefault Remove="cxb\src\i18n\ar.json" />
+    <_ContentIncludedByDefault Remove="cxb\src\i18n\en.json" />
+    <_ContentIncludedByDefault Remove="cxb\src\utils\jsons\list_cols.json" />
+    <_ContentIncludedByDefault Remove="cxb\src\utils\jsons\list_cols_events.json" />
+    <_ContentIncludedByDefault Remove="cxb\src\utils\validations\meta.content.json" />
+    <_ContentIncludedByDefault Remove="cxb\src\utils\validations\meta.permission.json" />
+    <_ContentIncludedByDefault Remove="cxb\src\utils\validations\meta.role.json" />
+    <_ContentIncludedByDefault Remove="cxb\src\utils\validations\meta.ticket.json" />
+    <_ContentIncludedByDefault Remove="cxb\src\utils\validations\meta.user.json" />
+    <_ContentIncludedByDefault Remove="cxb\tsconfig.json" />
   </ItemGroup>
 
 </Project>
