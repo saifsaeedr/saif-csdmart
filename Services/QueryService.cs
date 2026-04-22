@@ -155,10 +155,17 @@ public sealed class QueryService(
                     return Response.Fail(InternalErrorCode.JQ_TIMEOUT,
                         "jq filter took too long to execute", ErrorTypes.Request);
                 case JqRunner.FailureKind.JqMissing:
-                case JqRunner.FailureKind.JqError:
+                    return Response.Fail(InternalErrorCode.JQ_ERROR,
+                        "jq binary not available on this dmart deployment", ErrorTypes.Request);
                 case JqRunner.FailureKind.Invalid:
                     return Response.Fail(InternalErrorCode.JQ_ERROR,
-                        "jq filter failed to be executed", ErrorTypes.Request);
+                        "jq_filter validation failed", ErrorTypes.Request);
+                case JqRunner.FailureKind.JqError:
+                    // Surface jq's stderr for runtime failures — same
+                    // rationale as the join path above.
+                    return Response.Fail(InternalErrorCode.JQ_ERROR,
+                        $"jq filter failed: {(jqResult.Stderr ?? "unknown error").Trim()}",
+                        ErrorTypes.Request);
             }
 
             var attrs = response.Attributes is null
@@ -646,7 +653,22 @@ public sealed class QueryService(
                     : $"{subQuery.Search} {injectedSearch}";
                 // Python caps sub-query at 1000; we do the same so a single
                 // join pull can't blow up memory when the base set is wide.
-                var widened = subQuery with { Search = combinedSearch, Limit = 1000 };
+                // Critical: strip JqFilter from the recursive call. If we let
+                // ExecuteAsync see it, the top-level-jq extension would run
+                // and rewrite the sub-response to {Records:null,
+                // Attributes:{jq_result:...}} — the join then reads Records
+                // and finds nothing to match against. The sub-query's jq
+                // filter belongs to the join (outer path) below, wrapped
+                // with map() so it batches across every matched base record
+                // together. Same rationale applies to a nested Join: an
+                // inner-inner join would do its own post-match jq pass.
+                var widened = subQuery with
+                {
+                    Search = combinedSearch,
+                    Limit = 1000,
+                    JqFilter = null,
+                    Join = null,
+                };
                 var subResponse = await ExecuteAsync(widened, actor, ct);
                 if (subResponse.Status == Status.Success && subResponse.Records is not null)
                     rightRecords = subResponse.Records;
@@ -731,9 +753,19 @@ public sealed class QueryService(
                     throw new JqJoinFailure(InternalErrorCode.JQ_ERROR,
                         "jq_filter validation failed");
 
+                // Python parity (adapter.py:1817): vectorize the user filter
+                // with `map( [ <expr> ] )` so a single jq invocation handles
+                // the whole list-of-lists input in one pass. Without the wrap,
+                // the user's `.[] | {...}` would iterate the OUTER list and
+                // try to index an inner list with a string key — exact error:
+                // "Cannot index array with string". The outer `map` walks
+                // base-record slices; the inner `[ ... ]` aggregates per-slice
+                // output back into an array so the top-level result is aligned
+                // 1:1 with matchedByBase.
+                var wrappedFilter = $"map( [ {subQuery.JqFilter} ] )";
                 var inputBytes = SerializeMatchedForJq(matchedByBase);
                 var jqResult = await JqRunner.RunAsync(
-                    subQuery.JqFilter, inputBytes, settings.Value.JqTimeout, ct);
+                    wrappedFilter, inputBytes, settings.Value.JqTimeout, ct);
 
                 switch (jqResult.Failure)
                 {
@@ -741,10 +773,22 @@ public sealed class QueryService(
                         throw new JqJoinFailure(InternalErrorCode.JQ_TIMEOUT,
                             "jq filter took too long to execute");
                     case JqRunner.FailureKind.JqMissing:
-                    case JqRunner.FailureKind.JqError:
+                        throw new JqJoinFailure(InternalErrorCode.JQ_ERROR,
+                            "jq binary not available on this dmart deployment");
                     case JqRunner.FailureKind.Invalid:
                         throw new JqJoinFailure(InternalErrorCode.JQ_ERROR,
-                            "jq filter failed to be executed");
+                            "jq_filter validation failed");
+                    case JqRunner.FailureKind.JqError:
+                        // Runtime jq error — the filter's own expression ran
+                        // against real data and jq emitted a non-zero exit.
+                        // Surface jq's stderr so the filter author can see
+                        // which record / which expression failed. jq stderr
+                        // lines look like "jq: error (at <stdin>:N): ...".
+                        // Not a security concern (it's the CALLER's filter,
+                        // not dmart internals), and it's what the caller
+                        // needs to debug their own expression.
+                        throw new JqJoinFailure(InternalErrorCode.JQ_ERROR,
+                            $"jq filter failed: {(jqResult.Stderr ?? "unknown error").Trim()}");
                 }
 
                 // Python wraps with `map( [ <expr> ] )` so the output is an
