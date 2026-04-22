@@ -94,4 +94,33 @@ public class JqRunnerTests
         var r = await JqRunner.RunAsync("env", Encoding.UTF8.GetBytes("[]"), timeoutSeconds: 2);
         r.Failure.ShouldBe(JqRunner.FailureKind.Invalid);
     }
+
+    // ---- RunRawAsync ----
+
+    [Fact]
+    public async Task RunRawAsync_Returns_Raw_Stdout_Bytes()
+    {
+        if (!await JqAvailableAsync()) return;
+        var input = Encoding.UTF8.GetBytes("""[{"name":"a"},{"name":"b"}]""");
+        var r = await JqRunner.RunRawAsync("map(.name)", input, timeoutSeconds: 2);
+        r.Failure.ShouldBe(JqRunner.FailureKind.None);
+        r.StdoutBytes.ShouldNotBeNull();
+        // jq -c emits a compact JSON array on one line.
+        Encoding.UTF8.GetString(r.StdoutBytes!).Trim().ShouldBe("""["a","b"]""");
+    }
+
+    [Fact]
+    public async Task RunRawAsync_Bad_Filter_Returns_JqError()
+    {
+        if (!await JqAvailableAsync()) return;
+        var r = await JqRunner.RunRawAsync(".[syntax error", Encoding.UTF8.GetBytes("[]"), timeoutSeconds: 2);
+        r.Failure.ShouldBe(JqRunner.FailureKind.JqError);
+    }
+
+    [Fact]
+    public async Task RunRawAsync_Blocked_Builtin_Returns_Invalid_Without_Shelling_Out()
+    {
+        var r = await JqRunner.RunRawAsync("env", Encoding.UTF8.GetBytes("[]"), timeoutSeconds: 2);
+        r.Failure.ShouldBe(JqRunner.FailureKind.Invalid);
+    }
 }

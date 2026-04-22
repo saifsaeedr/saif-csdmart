@@ -44,6 +44,8 @@ public static class JqRunner
 
     public readonly record struct Result(FailureKind Failure, JsonElement? Output, string? Stderr);
 
+    public readonly record struct RawResult(FailureKind Failure, byte[]? StdoutBytes, string? Stderr);
+
     /// <summary>Validate the filter expression against length and blocklist.
     /// Mirrors Python's Pydantic field_validator.</summary>
     public static bool ValidateFilter(string filter, out string? reason)
@@ -173,6 +175,80 @@ public static class JqRunner
             {
                 return new Result(FailureKind.JqError, null, $"jq produced non-JSON output: {ex.Message}");
             }
+        }
+    }
+
+    /// <summary>Same as <see cref="RunAsync"/> but returns jq's raw stdout bytes
+    /// without parsing. Used by the top-level jq_filter path to write jq output
+    /// directly into the response envelope via <c>Utf8JsonWriter.WriteRawValue</c>
+    /// — saves a parse+reserialize round-trip.</summary>
+    public static async Task<RawResult> RunRawAsync(
+        string filter, byte[] inputJson, int timeoutSeconds, CancellationToken ct = default)
+    {
+        if (!ValidateFilter(filter, out _))
+            return new RawResult(FailureKind.Invalid, null, null);
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = "jq",
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        psi.ArgumentList.Add("-c");
+        psi.ArgumentList.Add(filter);
+
+        Process proc;
+        try
+        {
+            proc = Process.Start(psi) ?? throw new InvalidOperationException("jq failed to start");
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            return new RawResult(FailureKind.JqMissing, null, "jq binary not found on PATH");
+        }
+        catch (Exception ex)
+        {
+            return new RawResult(FailureKind.JqMissing, null, ex.Message);
+        }
+
+        using (proc)
+        {
+            var stdinTask = Task.Run(async () =>
+            {
+                try { await proc.StandardInput.BaseStream.WriteAsync(inputJson, ct); }
+                catch (IOException) { }
+                catch (ObjectDisposedException) { }
+                try { proc.StandardInput.Close(); }
+                catch (IOException) { }
+                catch (ObjectDisposedException) { }
+            }, ct);
+
+            using var stdoutMs = new MemoryStream();
+            var stdoutTask = proc.StandardOutput.BaseStream.CopyToAsync(stdoutMs, ct);
+            var stderrTask = proc.StandardError.ReadToEndAsync(ct);
+
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeoutCts.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
+
+            try
+            {
+                await proc.WaitForExitAsync(timeoutCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                try { proc.Kill(entireProcessTree: true); } catch { }
+                return new RawResult(FailureKind.Timeout, null, "jq timed out");
+            }
+
+            await Task.WhenAll(stdinTask, stdoutTask, stderrTask);
+
+            if (proc.ExitCode != 0)
+                return new RawResult(FailureKind.JqError, null, stderrTask.Result);
+
+            return new RawResult(FailureKind.None, stdoutMs.ToArray(), null);
         }
     }
 }

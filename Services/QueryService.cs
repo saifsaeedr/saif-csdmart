@@ -124,62 +124,6 @@ public sealed class QueryService(
             }
         }
 
-        // Top-level jq_filter. Python dmart only applies jq on join
-        // sub-queries; we extend to the top-level records array as a
-        // strict superset so clients can reshape query results directly
-        // without synthesizing a join. User's filter runs on the whole
-        // array (no map() wrapping) so they can use `.[] | <expr>`,
-        // `map(<expr>)`, aggregates, etc. The transformed output
-        // replaces `records` and surfaces at `attributes.jq_result` —
-        // clients get exactly what jq produced, not a synthetic Record
-        // envelope wrapping arbitrary JSON shapes.
-        if (!string.IsNullOrWhiteSpace(q.JqFilter)
-            && response.Status == Status.Success
-            && response.Records is not null)
-        {
-            // Keep the wire message terse — do not leak the blocklist
-            // enumeration. JqRunner.ValidateFilter's detailed reason stays
-            // available for operator-side logging via JqRunner API callers
-            // (e.g. unit tests); clients get a uniform message.
-            if (!JqRunner.ValidateFilter(q.JqFilter, out _))
-                return Response.Fail(InternalErrorCode.JQ_ERROR,
-                    "jq_filter validation failed", ErrorTypes.Request);
-
-            var inputBytes = SerializeRecordsForJq(response.Records);
-            var jqResult = await JqRunner.RunAsync(
-                q.JqFilter, inputBytes, settings.Value.JqTimeout, ct);
-
-            switch (jqResult.Failure)
-            {
-                case JqRunner.FailureKind.Timeout:
-                    return Response.Fail(InternalErrorCode.JQ_TIMEOUT,
-                        "jq filter took too long to execute", ErrorTypes.Request);
-                case JqRunner.FailureKind.JqMissing:
-                    return Response.Fail(InternalErrorCode.JQ_ERROR,
-                        "jq binary not available on this dmart deployment", ErrorTypes.Request);
-                case JqRunner.FailureKind.Invalid:
-                    return Response.Fail(InternalErrorCode.JQ_ERROR,
-                        "jq_filter validation failed", ErrorTypes.Request);
-                case JqRunner.FailureKind.JqError:
-                    // Surface jq's stderr for runtime failures — same
-                    // rationale as the join path above.
-                    return Response.Fail(InternalErrorCode.JQ_ERROR,
-                        $"jq filter failed: {(jqResult.Stderr ?? "unknown error").Trim()}",
-                        ErrorTypes.Request);
-            }
-
-            var attrs = response.Attributes is null
-                ? new Dictionary<string, object>()
-                : new Dictionary<string, object>(response.Attributes);
-            if (jqResult.Output is JsonElement out1)
-                attrs["jq_result"] = out1;
-            response = response with
-            {
-                Records = null,
-                Attributes = attrs,
-            };
-        }
-
         return response;
     }
 
@@ -651,17 +595,11 @@ public sealed class QueryService(
                 var combinedSearch = string.IsNullOrEmpty(subQuery.Search)
                     ? injectedSearch
                     : $"{subQuery.Search} {injectedSearch}";
-                // Python caps sub-query at 1000; we do the same so a single
-                // join pull can't blow up memory when the base set is wide.
-                // Critical: strip JqFilter from the recursive call. If we let
-                // ExecuteAsync see it, the top-level-jq extension would run
-                // and rewrite the sub-response to {Records:null,
-                // Attributes:{jq_result:...}} — the join then reads Records
-                // and finds nothing to match against. The sub-query's jq
-                // filter belongs to the join (outer path) below, wrapped
-                // with map() so it batches across every matched base record
-                // together. Same rationale applies to a nested Join: an
-                // inner-inner join would do its own post-match jq pass.
+                // Python caps sub-query at 1000 so a single join pull can't
+                // blow up memory when the base set is wide. Sub-query's
+                // jq_filter applies to the join's matched_list below (wrapped
+                // with map() for vectorization), not to the sub-query's own
+                // records — strip it before recursing.
                 var widened = subQuery with
                 {
                     Search = combinedSearch,
@@ -816,23 +754,6 @@ public sealed class QueryService(
         }
 
         return baseRecords;
-    }
-
-    // Serialize a flat records list as a JSON array, ready to feed to
-    // `jq -c`. Used by the top-level jq_filter path (our extension over
-    // Python). Uses the source-generated Record serializer so the shape
-    // fed into jq matches dmart's wire format byte-for-byte.
-    private static byte[] SerializeRecordsForJq(List<Record> records)
-    {
-        using var ms = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(ms))
-        {
-            writer.WriteStartArray();
-            foreach (var rec in records)
-                JsonSerializer.Serialize(writer, rec, DmartJsonContext.Default.Record);
-            writer.WriteEndArray();
-        }
-        return ms.ToArray();
     }
 
     // Serialize matchedByBase as an array-of-arrays of Record dicts, ready
