@@ -12,7 +12,12 @@ public sealed class DmartSettings
     public string JwtSecret { get; set; } = "change-me-change-me-change-me-32b";
     public string JwtIssuer { get; set; } = "dmart";
     public string JwtAudience { get; set; } = "dmart";
-    public int JwtAccessMinutes { get; set; } = 15;
+    // Python parity: backend/utils/settings.py sets jwt_access_expires =
+    // 30 * 86400 (30 days) and issues only an access token at /user/login.
+    // We match that default so Python-origin clients (tsdmart/cxb/catalog/
+    // pydmart) don't 401 mid-session against C# dmart. The 2-token model
+    // remains available for MCP OAuth clients via /oauth/token.
+    public int JwtAccessMinutes { get; set; } = 60 * 24 * 30;
     public int JwtRefreshDays { get; set; } = 30;
     // Invitation tokens (minted via /user/reset or on user creation) live for
     // this many days. Python's jwt_access_expires default is 30 days for the

@@ -248,15 +248,49 @@ public sealed class McpOAuthAndSseTests : IClassFixture<DmartFactory>
     [FactIfPg]
     public async Task RefreshToken_Issues_New_Access()
     {
-        // Login the old-fashioned way to grab a refresh_token, then exchange.
+        // /user/login follows Python dmart's wire contract and does NOT
+        // return a refresh_token — only the /oauth/token endpoint does,
+        // for MCP OAuth clients. Go through the authorization_code grant
+        // to obtain a refresh_token, then exercise the refresh_token grant.
         using var client = _factory.CreateClient();
-        var login = new UserLoginRequest(
-            _factory.AdminShortname, null, null, _factory.AdminPassword, null);
-        var loginResp = await client.PostAsJsonAsync("/user/login", login,
-            DmartJsonContext.Default.UserLoginRequest);
-        var loginBody = await loginResp.Content.ReadFromJsonAsync(
-            DmartJsonContext.Default.Response);
-        var refresh = loginBody!.Records!.First().Attributes!["refresh_token"].ToString()!;
+        using var noRedirect = _factory.CreateClient(
+            new Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactoryClientOptions
+            { AllowAutoRedirect = false });
+
+        const string redirectUri = "http://localhost/mcp-client/refresh-cb";
+        var reg = await client.PostAsync("/oauth/register",
+            new StringContent(
+                $$"""{"redirect_uris":["{{redirectUri}}"],"client_name":"refresh-test"}""",
+                Encoding.UTF8, "application/json"));
+        var clientId = (await ReadJson(reg)).GetProperty("client_id").GetString()!;
+
+        var verifier = CreatePkceVerifier();
+        var authResp = await noRedirect.PostAsync("/oauth/authorize",
+            new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["response_type"] = "code",
+                ["client_id"] = clientId,
+                ["redirect_uri"] = redirectUri,
+                ["state"] = "refresh-state",
+                ["code_challenge"] = S256Challenge(verifier),
+                ["code_challenge_method"] = "S256",
+                ["shortname"] = _factory.AdminShortname,
+                ["password"] = _factory.AdminPassword,
+            }));
+        var code = System.Web.HttpUtility.ParseQueryString(
+            new Uri(authResp.Headers.Location!.ToString()).Query)["code"]!;
+
+        var firstTokenResp = await client.PostAsync("/oauth/token", new FormUrlEncodedContent(
+            new Dictionary<string, string>
+            {
+                ["grant_type"] = "authorization_code",
+                ["code"] = code,
+                ["client_id"] = clientId,
+                ["redirect_uri"] = redirectUri,
+                ["code_verifier"] = verifier,
+            }));
+        firstTokenResp.StatusCode.ShouldBe(HttpStatusCode.OK);
+        var refresh = (await ReadJson(firstTokenResp)).GetProperty("refresh_token").GetString()!;
 
         var tokenResp = await client.PostAsync("/oauth/token", new FormUrlEncodedContent(
             new Dictionary<string, string>

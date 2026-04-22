@@ -169,7 +169,10 @@ public static class OAuthHandlers
                 result.ErrorType ?? "auth"),
                 DmartJsonContext.Default.Response, statusCode: 401);
 
-        var (access, refresh, loggedIn) = result.Value;
+        // Python-parity: login emits a single long-lived access token; the
+        // refresh minted by ProcessLoginAsync is discarded here. MCP OAuth
+        // clients that need refresh go through /oauth/token directly.
+        var (access, _, loggedIn) = result.Value;
 
         // Match /user/login's cookie: httponly auth_token, same-site strict.
         var maxAgeSeconds = settings.Value.JwtAccessMinutes * 60;
@@ -190,7 +193,6 @@ public static class OAuthHandlers
             Attributes = new()
             {
                 ["access_token"] = access,
-                ["refresh_token"] = refresh,
                 ["type"] = loggedIn.Type.ToString().ToLowerInvariant(),
                 ["roles"] = loggedIn.Roles,
             },

@@ -40,7 +40,11 @@ public static class AuthHandler
                     Response.Fail(result.ErrorCode, result.ErrorMessage!, result.ErrorType ?? "auth"),
                     DmartJsonContext.Default.Response, statusCode: 401);
 
-            var (access, refresh, user) = result.Value;
+            // Python dmart issues a single long-lived access token at login
+            // (jwt_access_expires, default 30 days). The refresh JWT minted
+            // by the service is discarded here for parity; MCP OAuth clients
+            // that need refresh go through /oauth/token instead.
+            var (access, _, user) = result.Value;
 
             // dmart sets an httponly cookie called auth_token in addition to returning
             // the token in the body. Browser clients rely on the cookie.
@@ -58,8 +62,8 @@ public static class AuthHandler
             //   Response(status=success, records=[Record(
             //     resource_type="user", shortname=user.shortname,
             //     attributes={access_token, type, displayname?})])
-            // We mirror that plus include refresh_token and roles for parity
-            // with clients that already depend on those being in the response.
+            // We include roles for client convenience but omit refresh_token
+            // to match Python's wire shape exactly.
             var loginRecord = new Record
             {
                 ResourceType = Dmart.Models.Enums.ResourceType.User,
@@ -68,7 +72,6 @@ public static class AuthHandler
                 Attributes = new()
                 {
                     ["access_token"] = access,
-                    ["refresh_token"] = refresh,
                     ["type"] = user.Type.ToString().ToLowerInvariant(),
                     ["roles"] = user.Roles,
                 },
