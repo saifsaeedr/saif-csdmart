@@ -137,8 +137,13 @@ public sealed class QueryService(
             && response.Status == Status.Success
             && response.Records is not null)
         {
-            if (!JqRunner.ValidateFilter(q.JqFilter, out var reason))
-                return Response.Fail(InternalErrorCode.JQ_ERROR, reason!, ErrorTypes.Request);
+            // Keep the wire message terse — do not leak the blocklist
+            // enumeration. JqRunner.ValidateFilter's detailed reason stays
+            // available for operator-side logging via JqRunner API callers
+            // (e.g. unit tests); clients get a uniform message.
+            if (!JqRunner.ValidateFilter(q.JqFilter, out _))
+                return Response.Fail(InternalErrorCode.JQ_ERROR,
+                    "jq_filter validation failed", ErrorTypes.Request);
 
             var inputBytes = SerializeRecordsForJq(response.Records);
             var jqResult = await JqRunner.RunAsync(
@@ -697,8 +702,10 @@ public sealed class QueryService(
             object?[] joinPayloads = new object?[baseRecords.Count];
             if (!string.IsNullOrWhiteSpace(subQuery.JqFilter))
             {
-                if (!JqRunner.ValidateFilter(subQuery.JqFilter, out var rejectReason))
-                    throw new JqJoinFailure(InternalErrorCode.JQ_ERROR, rejectReason!);
+                // Match the top-level path: do not leak the blocklist.
+                if (!JqRunner.ValidateFilter(subQuery.JqFilter, out _))
+                    throw new JqJoinFailure(InternalErrorCode.JQ_ERROR,
+                        "jq_filter validation failed");
 
                 var inputBytes = SerializeMatchedForJq(matchedByBase);
                 var jqResult = await JqRunner.RunAsync(
