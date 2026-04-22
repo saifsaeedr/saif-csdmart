@@ -99,7 +99,9 @@ internal sealed class SubprocessPluginHost : IDisposable
             catch { /* process exited */ }
         });
 
-        Console.WriteLine($"SUBPROCESS_PLUGIN_STARTED: {Shortname} pid={_process.Id}");
+        // Status to stderr so stdout stays pure JSONL (matches ASP.NET Core's
+        // json-console-formatter output) — keeps `dmart serve | jq` usable.
+        Console.Error.WriteLine($"SUBPROCESS_PLUGIN_STARTED: {Shortname} pid={_process.Id}");
     }
 
     private void Kill()

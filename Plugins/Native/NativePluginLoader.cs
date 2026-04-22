@@ -69,23 +69,23 @@ public static class NativePluginLoader
             if (typeStr == "hook")
             {
                 services.AddSingleton<IHookPlugin>(new SubprocessHookPlugin(host));
-                Console.WriteLine($"SUBPROCESS_PLUGIN_REGISTERED: {shortname} (hook) from {execPath}");
+                Console.Error.WriteLine($"SUBPROCESS_PLUGIN_REGISTERED: {shortname} (hook) from {execPath}");
             }
             else if (typeStr == "api")
             {
                 var routes = ParseRoutes(root);
                 services.AddSingleton<IApiPlugin>(new SubprocessApiPlugin(host, routes));
-                Console.WriteLine($"SUBPROCESS_PLUGIN_REGISTERED: {shortname} (api, {routes.Count} routes) from {execPath}");
+                Console.Error.WriteLine($"SUBPROCESS_PLUGIN_REGISTERED: {shortname} (api, {routes.Count} routes) from {execPath}");
             }
             else
             {
-                Console.WriteLine($"SUBPROCESS_PLUGIN_ERROR: {shortname} unknown type '{typeStr}'");
+                Console.Error.WriteLine($"SUBPROCESS_PLUGIN_ERROR: {shortname} unknown type '{typeStr}'");
                 host.Dispose();
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"SUBPROCESS_PLUGIN_LOAD_FAILED: {dirName}: {ex.Message}");
+            Console.Error.WriteLine($"SUBPROCESS_PLUGIN_LOAD_FAILED: {dirName}: {ex.Message}");
         }
     }
 
@@ -105,7 +105,7 @@ public static class NativePluginLoader
             if (handle.Init is not null)
             {
                 try { handle.Init(NativePluginCallbacks.GetCallbacksPtr()); }
-                catch (Exception ex) { Console.WriteLine($"NATIVE_PLUGIN_INIT_FAILED: {dirName}: {ex.Message}"); }
+                catch (Exception ex) { Console.Error.WriteLine($"NATIVE_PLUGIN_INIT_FAILED: {dirName}: {ex.Message}"); }
             }
 
             var shortname = root.TryGetProperty("shortname", out var sn)
@@ -117,34 +117,34 @@ public static class NativePluginLoader
             {
                 if (handle.Hook is null)
                 {
-                    Console.WriteLine($"NATIVE_PLUGIN_ERROR: {shortname} type=hook but no hook() export");
+                    Console.Error.WriteLine($"NATIVE_PLUGIN_ERROR: {shortname} type=hook but no hook() export");
                     handle.Dispose();
                     return;
                 }
                 services.AddSingleton<IHookPlugin>(new NativeHookPlugin(handle, shortname));
-                Console.WriteLine($"NATIVE_PLUGIN_REGISTERED: {shortname} (hook, in-process) from {soPath}");
+                Console.Error.WriteLine($"NATIVE_PLUGIN_REGISTERED: {shortname} (hook, in-process) from {soPath}");
             }
             else if (typeStr == "api")
             {
                 if (handle.HandleRequest is null)
                 {
-                    Console.WriteLine($"NATIVE_PLUGIN_ERROR: {shortname} type=api but no handle_request() export");
+                    Console.Error.WriteLine($"NATIVE_PLUGIN_ERROR: {shortname} type=api but no handle_request() export");
                     handle.Dispose();
                     return;
                 }
                 var routes = ParseRoutes(root);
                 services.AddSingleton<IApiPlugin>(new NativeApiPlugin(handle, shortname, routes));
-                Console.WriteLine($"NATIVE_PLUGIN_REGISTERED: {shortname} (api, in-process) from {soPath}");
+                Console.Error.WriteLine($"NATIVE_PLUGIN_REGISTERED: {shortname} (api, in-process) from {soPath}");
             }
             else
             {
-                Console.WriteLine($"NATIVE_PLUGIN_ERROR: {shortname} unknown type '{typeStr}'");
+                Console.Error.WriteLine($"NATIVE_PLUGIN_ERROR: {shortname} unknown type '{typeStr}'");
                 handle.Dispose();
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"NATIVE_PLUGIN_LOAD_FAILED: {dirName}: {ex.Message}");
+            Console.Error.WriteLine($"NATIVE_PLUGIN_LOAD_FAILED: {dirName}: {ex.Message}");
         }
     }
 
