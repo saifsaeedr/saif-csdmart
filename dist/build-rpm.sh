@@ -152,7 +152,15 @@ if [[ "$TARGET" == "el9" || "$TARGET" == "rhel9" ]]; then
         # whose builder container predated it). `:z` tags the mount with the
         # shared `container_file_t` type so any file visible on the host is
         # visible in the container forever.
-        $ENGINE run -d \
+        # --replace unconditionally removes any container already squatting
+        # on this name. Covers the case where `container exists` returned
+        # non-zero but the name is still reserved by an "external entity"
+        # (podman's container registry and name registry can drift apart
+        # after storage corruption, interrupted builds, or a prior podman
+        # unshare / system migrate that left stray lock records). Without
+        # --replace the run fails with "name already in use" and the script
+        # aborts before the SDK gets installed.
+        $ENGINE run -d --replace \
             --name "$CONTAINER_NAME" \
             --userns=keep-id \
             --network=host \
