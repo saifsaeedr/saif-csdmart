@@ -2,6 +2,9 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Dmart.Models.Api;
+#if NET8_0_OR_GREATER
+using Dmart.Client.Json;
+#endif
 
 namespace Dmart.Client;
 
@@ -98,9 +101,15 @@ public sealed partial class DmartClient : IDisposable
         try
         {
             await using var stream = await resp.Content.ReadAsStreamAsync().ConfigureAwait(false);
+#if NET8_0_OR_GREATER
+            envelope = await JsonSerializer
+                .DeserializeAsync(stream, DmartClientJsonContext.Default.Response, ct)
+                .ConfigureAwait(false);
+#else
             envelope = await JsonSerializer
                 .DeserializeAsync<Response>(stream, DefaultJsonOptions, ct)
                 .ConfigureAwait(false);
+#endif
         }
         catch (JsonException ex)
         {
@@ -119,10 +128,25 @@ public sealed partial class DmartClient : IDisposable
         return envelope;
     }
 
-    // Build a JsonContent body honoring DefaultJsonOptions (camelCase by
-    // default in HttpClientJsonExtensions would break wire parity).
+    // Build a JsonContent body honoring the dmart wire convention
+    // (SnakeCaseLower, omit-when-null). On net8.0+ we route through typed
+    // overloads that use the source-gen context (AOT-safe); on
+    // netstandard2.1 we fall back to reflection-based serialization via
+    // DefaultJsonOptions — acceptable because AOT isn't available on that
+    // TFM anyway.
+#if NET8_0_OR_GREATER
+    private static HttpContent Json(Request value)
+        => JsonContent.Create(value, DmartClientJsonContext.Default.Request);
+    private static HttpContent Json(Record value)
+        => JsonContent.Create(value, DmartClientJsonContext.Default.Record);
+    private static HttpContent Json(Query value)
+        => JsonContent.Create(value, DmartClientJsonContext.Default.Query);
+    private static HttpContent Json(Dictionary<string, object?> value)
+        => JsonContent.Create(value!, DmartClientJsonContext.Default.DictionaryStringObject!);
+#else
     private static HttpContent Json<T>(T value)
         => JsonContent.Create(value, options: DefaultJsonOptions);
+#endif
 
     // ============================================================
     // Auth
@@ -234,8 +258,13 @@ public sealed partial class DmartClient : IDisposable
             && statusProp.GetString() == "failed"
             && doc.RootElement.TryGetProperty("error", out var errProp))
         {
+#if NET8_0_OR_GREATER
+            var err = JsonSerializer.Deserialize(errProp.GetRawText(), DmartClientJsonContext.Default.Error)
+                ?? new Error(ErrorTypes.Request, 500, "unknown error", null);
+#else
             var err = JsonSerializer.Deserialize<Error>(errProp.GetRawText(), DefaultJsonOptions)
                 ?? new Error(ErrorTypes.Request, 500, "unknown error", null);
+#endif
             doc.Dispose();
             throw new DmartException((int)resp.StatusCode, err);
         }
@@ -253,7 +282,11 @@ public sealed partial class DmartClient : IDisposable
         form.Add(new StringContent(spaceName), "space_name");
         if (!string.IsNullOrEmpty(sha)) form.Add(new StringContent(sha), "sha");
 
+#if NET8_0_OR_GREATER
+        var recordJson = JsonSerializer.Serialize(record, DmartClientJsonContext.Default.Record);
+#else
         var recordJson = JsonSerializer.Serialize(record, DefaultJsonOptions);
+#endif
         var recordContent = new StringContent(recordJson);
         recordContent.Headers.ContentType = new MediaTypeHeaderValue("application/json");
         form.Add(recordContent, "request_record", "request_record.json");

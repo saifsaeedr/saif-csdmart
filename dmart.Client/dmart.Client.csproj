@@ -32,6 +32,18 @@
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
   </PropertyGroup>
 
+  <!-- Modern TFM leg: route JSON through a source-gen JsonSerializerContext
+       (Json/DmartClientJsonContext.cs) and run the trim analyzer so
+       downstream AOT consumers get a clean compile. IsTrimmable advertises
+       this via assembly metadata (no IL2104 for consumers). The netstandard2.1
+       leg keeps the reflection-based DefaultJsonOptions path unchanged and
+       is not AOT-safe — acceptable because AOT isn't available on that TFM. -->
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net8.0' or '$(TargetFramework)' == 'net10.0'">
+    <IsTrimmable>true</IsTrimmable>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+
   <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="\" />
   </ItemGroup>

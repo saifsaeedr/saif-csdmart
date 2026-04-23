@@ -1,5 +1,8 @@
 using System.Text.Json;
 using Dmart.Models.Api;
+#if NET8_0_OR_GREATER
+using Dmart.Client.Json;
+#endif
 
 namespace Dmart.Client;
 
@@ -224,7 +227,11 @@ public sealed partial class DmartClient
     {
         var url = $"/public/submit/{spaceName}";
         if (resourceType is { } rt)
+#if NET8_0_OR_GREATER
+            url += $"/{JsonSerializer.Serialize(rt, DmartClientJsonContext.Default.ResourceType).Trim('"')}";
+#else
             url += $"/{JsonSerializer.Serialize(rt, DefaultJsonOptions).Trim('"')}";
+#endif
         if (!string.IsNullOrEmpty(workflowShortname)) url += $"/{workflowShortname}";
         url += $"/{schemaShortname}{NormalizeSubpath(subpath)}";
         using var req = BuildRequest(HttpMethod.Post, url, Json(record));
@@ -275,8 +282,13 @@ public sealed partial class DmartClient
             && statusProp.GetString() == "failed"
             && doc.RootElement.TryGetProperty("error", out var errProp))
         {
+#if NET8_0_OR_GREATER
+            var err = JsonSerializer.Deserialize(errProp.GetRawText(), DmartClientJsonContext.Default.Error)
+                ?? new Error(ErrorTypes.Request, 500, "unknown error", null);
+#else
             var err = JsonSerializer.Deserialize<Error>(errProp.GetRawText(), DefaultJsonOptions)
                 ?? new Error(ErrorTypes.Request, 500, "unknown error", null);
+#endif
             doc.Dispose();
             throw new DmartException((int)resp.StatusCode, err);
         }
