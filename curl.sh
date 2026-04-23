@@ -1345,6 +1345,37 @@ curl -s -H "$CT" -H "$AUTH_HEADER" "$API_URL/managed/request" -d "{
 }" > /dev/null 2>&1
 
 # ============================================================================
+# Auth rate limit probe (opt-in)
+# ============================================================================
+# Verifies AUTH_RATE_LIMIT_PER_MINUTE actually rejects with HTTP 429 once
+# the per-IP cap is exceeded. Opt-in because firing this eats the auth
+# budget (/user/login, /user/otp-*) for the test host's IP for up to 60
+# seconds — re-running curl.sh immediately after would 429 at the very
+# first login. Set DMART_PROBE_RATE_LIMIT=1 to enable.
+#
+# The default cap is 10/min (PermitLimit=10 at Program.cs:888). We fire
+# 14 bogus-credential logins to tolerate whatever tokens the earlier
+# sections already spent — the 429 must appear within that burst.
+if [[ "${DMART_PROBE_RATE_LIMIT:-0}" == "1" ]]; then
+    printf '%-45s' "Auth rate limit returns 429:" >&2
+    SAW_429=""
+    for i in $(seq 1 14); do
+        STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "$CT" \
+            -d '{"shortname":"__rate_probe__","password":"wrong"}' \
+            "$API_URL/user/login")
+        if [[ "$STATUS" == "429" ]]; then
+            SAW_429="yes"
+            break
+        fi
+    done
+    if [[ "$SAW_429" == "yes" ]]; then
+        ok
+    else
+        nope "expected a 429 within 14 rapid logins, saw none"
+    fi
+fi
+
+# ============================================================================
 # Summary
 # ============================================================================
 echo "" >&2
