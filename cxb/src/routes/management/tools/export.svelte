@@ -192,10 +192,8 @@
     }
 
     $effect(() => {
-        console.log("asddddd")
         if (space_name && selectedSpacename !== space_name) {
             (async () => {
-                console.log("asddddd")
                 subpaths = [];
                 tempSubpaths = [];
                 const _subpaths = await getChildren(space_name, "/");
