@@ -621,20 +621,21 @@ public sealed class ImportExportService(
 
             // Re-inline payload.body from the external file when it's a string
             // filename that points at a sibling JSON/HTML/text/image file.
-            var baseDir = isFolder ? rest[..rest.IndexOf("/.dm/", StringComparison.Ordinal)].PathJoin(spaceName) : null;
-            // For non-folder, baseDir is "{space}/{subpath}" (where the body file lives).
-            baseDir ??= $"{spaceName}/{subpath.TrimStart('/')}".TrimEnd('/');
-            // Folder body lives next to the folder directory: "{space}/{subpath}/{folder_sn}.json".
-            // Which we already captured via rest (subpath parent). Compute base dir accordingly.
+            //   non-folder: body lives at "{space}/{subpath}/{sn}.{ext}"
+            //   folder:     body lives next to the folder directory, i.e. one
+            //               level ABOVE the folder's own dir
+            string baseDir;
             if (isFolder)
             {
                 var cutAt = rest.LastIndexOf("/.dm/meta.folder.json", StringComparison.Ordinal);
-                // rest[..cutAt] is "{subpath}/{folder_sn}"; strip the trailing
-                // {folder_sn} so baseDir is the folder's PARENT dir in the zip.
-                var withFolder = rest[..cutAt];
+                var withFolder = rest[..cutAt];                 // "{subpath}/{folder_sn}"
                 var lastSlash = withFolder.LastIndexOf('/');
                 var parentDir = lastSlash < 0 ? "" : withFolder[..lastSlash];
                 baseDir = string.IsNullOrEmpty(parentDir) ? spaceName : $"{spaceName}/{parentDir}";
+            }
+            else
+            {
+                baseDir = $"{spaceName}/{subpath.TrimStart('/')}".TrimEnd('/');
             }
             InlinePayloadBody(node, baseDir, bodyLookup);
 
@@ -729,12 +730,25 @@ public sealed class ImportExportService(
         try
         {
             var (spaceName, rest) = SplitSpaceAndRest(ze.FullName);
-            // history path: "{space}/{subpath}/.dm/{sn}/history.jsonl"
-            var idx = rest.IndexOf("/.dm/", StringComparison.Ordinal);
-            if (idx < 0) throw new InvalidDataException("history path missing /.dm/");
-            var subpath = "/" + rest[..idx];
-            var after = rest[(idx + "/.dm/".Length)..];
-            var sn = after.Split('/')[0];
+            // history path: "{space}/{subpath}/.dm/{sn}/history.jsonl", or
+            // "{space}/.dm/{sn}/history.jsonl" when the entry sits at subpath "/".
+            // Handle both shapes — an entry at root has no `/.dm/` separator,
+            // `rest` starts with `.dm/` directly.
+            string subpath;
+            string afterDm;
+            if (rest.StartsWith(".dm/", StringComparison.Ordinal))
+            {
+                subpath = "/";
+                afterDm = rest[".dm/".Length..];
+            }
+            else
+            {
+                var idx = rest.IndexOf("/.dm/", StringComparison.Ordinal);
+                if (idx < 0) throw new InvalidDataException("history path missing /.dm/");
+                subpath = "/" + rest[..idx];
+                afterDm = rest[(idx + "/.dm/".Length)..];
+            }
+            var sn = afterDm.Split('/')[0];
 
             await using var stream = ze.Open();
             using var sr = new StreamReader(stream);
@@ -911,11 +925,4 @@ public sealed class ImportExportService(
         await using var s = entry.Open();
         await s.WriteAsync(bytes, ct);
     }
-}
-
-// Tiny extension used once above to keep the path construction readable.
-internal static class PathJoinExtensions
-{
-    internal static string PathJoin(this string head, string prefix)
-        => string.IsNullOrEmpty(head) ? prefix : $"{prefix}/{head}";
 }

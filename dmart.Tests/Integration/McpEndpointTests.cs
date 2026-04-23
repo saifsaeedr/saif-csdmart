@@ -276,8 +276,12 @@ public sealed class McpEndpointTests : IClassFixture<DmartFactory>
     // ---- v0.3 ----
 
     [FactIfPg]
-    public async Task History_Returns_CreateEvent()
+    public async Task History_Returns_UpdateEvent()
     {
+        // Python parity: create does NOT write a history row (see
+        // EntryService.CreateAsync — "Python doesn't write a history row on
+        // create"). Only updates/deletes/moves do. So the smoke path for
+        // the MCP dmart_history tool is create → update → query.
         using var client = await LoginClient();
 
         var suffix = Guid.NewGuid().ToString("N")[..10];
@@ -288,7 +292,6 @@ public sealed class McpEndpointTests : IClassFixture<DmartFactory>
 
         try
         {
-            // Seed an entry — history for this is the create record.
             var createCall = "{\"name\":\"dmart_create\",\"arguments\":"
                 + $"{{\"space_name\":\"{space}\",\"subpath\":\"{subpath}\","
                 + $"\"shortname\":\"{shortname}\",\"resource_type\":\"{resourceType}\""
@@ -296,6 +299,17 @@ public sealed class McpEndpointTests : IClassFixture<DmartFactory>
             var createResp = await client.PostAsync("/mcp",
                 JsonRpc("tools/call", id: 200, paramsJson: createCall));
             createResp.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+            // Flip `state` so ComputeHistoryDiff produces a non-empty diff
+            // and AppendAsync fires. Any patched field that reaches
+            // FlattenEntry would do — `state` is the cheapest.
+            var updateCall = "{\"name\":\"dmart_update\",\"arguments\":"
+                + $"{{\"space_name\":\"{space}\",\"subpath\":\"{subpath}\","
+                + $"\"shortname\":\"{shortname}\",\"resource_type\":\"{resourceType}\","
+                + "\"patch\":{\"state\":\"changed\"}}}";
+            var updateResp = await client.PostAsync("/mcp",
+                JsonRpc("tools/call", id: 202, paramsJson: updateCall));
+            updateResp.StatusCode.ShouldBe(HttpStatusCode.OK);
 
             var histCall = "{\"name\":\"dmart_history\",\"arguments\":"
                 + $"{{\"space_name\":\"{space}\",\"subpath\":\"{subpath}\","

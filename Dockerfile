@@ -25,3 +25,4 @@ COPY --from=cxb-build --chmod=755 /cxb/dist/client/ /app/cxb/
 WORKDIR /app
 ENV DOTNET_SYSTEM_NET_SECURITY_DISABLEGSSAPIPAL=true
 ENTRYPOINT ["./dmart"]
+CMD ["serve"]

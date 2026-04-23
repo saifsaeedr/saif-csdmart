@@ -195,7 +195,7 @@ public sealed class PublicQueryAnonymousTests : IClassFixture<DmartFactory>
             var response = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
             response!.Status.ShouldBe(Status.Success);
             ((JsonElement)response.Attributes!["total"]).GetInt32().ShouldBe(0);
-            response.Records!.Count.ShouldBe(0);
+            (response.Records?.Count ?? 0).ShouldBe(0);
         }
         finally
         {
@@ -278,7 +278,7 @@ public sealed class PublicQueryAnonymousTests : IClassFixture<DmartFactory>
                         FilterSchemaNames = new(), Limit = 10 },
             DmartJsonContext.Default.Query);
         var r = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
-        r!.Records!.Count.ShouldBe(0, "permission scoped to a different space must NOT grant this one");
+        (r!.Records?.Count ?? 0).ShouldBe(0, "permission scoped to a different space must NOT grant this one");
     }
 
     [FactIfPg]
@@ -297,7 +297,7 @@ public sealed class PublicQueryAnonymousTests : IClassFixture<DmartFactory>
                         FilterSchemaNames = new(), Limit = 10 },
             DmartJsonContext.Default.Query);
         var r = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
-        r!.Records!.Count.ShouldBe(0, "subpath outside the permission's list must NOT match");
+        (r!.Records?.Count ?? 0).ShouldBe(0, "subpath outside the permission's list must NOT match");
     }
 
     [FactIfPg]
@@ -316,7 +316,7 @@ public sealed class PublicQueryAnonymousTests : IClassFixture<DmartFactory>
                         FilterSchemaNames = new(), Limit = 10 },
             DmartJsonContext.Default.Query);
         var r = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
-        r!.Records!.Count.ShouldBe(0, "inactive permission must be ignored");
+        (r!.Records?.Count ?? 0).ShouldBe(0, "inactive permission must be ignored");
     }
 
     [FactIfPg]
@@ -335,7 +335,7 @@ public sealed class PublicQueryAnonymousTests : IClassFixture<DmartFactory>
                         FilterSchemaNames = new(), Limit = 10 },
             DmartJsonContext.Default.Query);
         var r = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
-        r!.Records!.Count.ShouldBe(0, "resource_type mismatch must deny");
+        (r!.Records?.Count ?? 0).ShouldBe(0, "resource_type mismatch must deny");
     }
 
     [FactIfPg]
@@ -357,7 +357,7 @@ public sealed class PublicQueryAnonymousTests : IClassFixture<DmartFactory>
                         FilterSchemaNames = new(), Limit = 10 },
             DmartJsonContext.Default.Query);
         var r = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
-        r!.Records!.Count.ShouldBe(0,
+        (r!.Records?.Count ?? 0).ShouldBe(0,
             "view alone + is_active condition cannot pass without a resource context; query action not listed");
     }
 }

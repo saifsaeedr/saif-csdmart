@@ -279,15 +279,17 @@ public class FullParityTests : IClassFixture<DmartFactory>
         attrs.ShouldContainKey("email");
         attrs.ShouldContainKey("type");
         attrs.ShouldContainKey("roles");
-        attrs.ShouldContainKey("groups");
         attrs.ShouldContainKey("is_email_verified");
         attrs.ShouldContainKey("is_msisdn_verified");
         attrs.ShouldContainKey("force_password_change");
         attrs.ShouldContainKey("permissions");
+        // `groups` is intentionally stripped when empty (JsonStripEmptiesMiddleware);
+        // the admin test user has no groups, so it's absent. Same conditional-present
+        // treatment as the displayname/description/msisdn/payload group below.
         // displayname/description/msisdn/payload are conditional — Python's
         // `if user.X:` guards omit them when the backing value is null.
         // Assert the parity rule instead of unconditional presence: present ⇒ non-empty.
-        foreach (var key in new[] { "displayname", "description", "msisdn", "payload" })
+        foreach (var key in new[] { "displayname", "description", "msisdn", "payload", "groups" })
         {
             if (attrs.TryGetValue(key, out var val) && val is string s)
                 s.ShouldNotBe("", $"attribute '{key}' present but empty string");

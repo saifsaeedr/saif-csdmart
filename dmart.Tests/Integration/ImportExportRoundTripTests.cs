@@ -159,6 +159,87 @@ public class ImportExportRoundTripTests : IClassFixture<DmartFactory>
         resp.Error!.Message.ShouldContain("legacy flat layout is not supported");
     }
 
+    [FactIfPg]
+    public async Task RootSubpath_History_Round_Trips()
+    {
+        // Regression: TryImportHistoryAsync previously computed the subpath via
+        // `rest.IndexOf("/.dm/")` which returns -1 for an entry at subpath "/"
+        // (its zip path starts with `.dm/` with no leading slash) → import
+        // crashed with "history path missing /.dm/" and the row was lost.
+        var sp = _factory.Services;
+        _factory.CreateClient();
+        var io = sp.GetRequiredService<ImportExportService>();
+        var entryRepo = sp.GetRequiredService<EntryRepository>();
+        var spaceRepo = sp.GetRequiredService<SpaceRepository>();
+        var historyRepo = sp.GetRequiredService<HistoryRepository>();
+
+        var spaceName = "rhist_" + Guid.NewGuid().ToString("N")[..6];
+        await spaceRepo.UpsertAsync(new Space
+        {
+            Uuid = Guid.NewGuid().ToString(),
+            Shortname = spaceName, SpaceName = spaceName, Subpath = "/",
+            OwnerShortname = "dmart", IsActive = true,
+            Languages = new() { Language.En }, ActivePlugins = new(),
+            CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        });
+
+        var sn = "readme";
+        var seedEntry = MakeContent(spaceName, "/", sn, new { text = "hi" });
+        await entryRepo.UpsertAsync(seedEntry);
+        // Seed one history row directly on the entry at subpath "/".
+        await historyRepo.AppendAsync(spaceName, "/", sn, "dmart", null,
+            new Dictionary<string, object>
+            {
+                ["state"] = new Dictionary<string, object>
+                    { ["old"] = "new", ["new"] = "confirmed" },
+            });
+
+        var q = new Query
+        {
+            Type = QueryType.Search, SpaceName = spaceName, Subpath = "/",
+            FilterSchemaNames = new(), Limit = 1000, RetrieveJsonPayload = true,
+        };
+        await using var exported = await io.ExportAsync(q, actor: null);
+        using var ms = new MemoryStream();
+        await exported.CopyToAsync(ms);
+
+        // Assert history.jsonl landed at the root-subpath path shape.
+        ms.Position = 0;
+        using (var read = new ZipArchive(ms, ZipArchiveMode.Read, leaveOpen: true))
+        {
+            read.Entries.Select(e => e.FullName)
+                .ShouldContain($"{spaceName}/.dm/{sn}/history.jsonl");
+        }
+
+        // Wipe entry + histories and re-import.
+        await entryRepo.DeleteAsync(spaceName, "/", sn, ResourceType.Content);
+        // Best-effort history cleanup — HistoryRepository doesn't expose a
+        // targeted delete, so we'll rely on the re-import to assert the row
+        // reappears rather than that it's strictly absent first.
+
+        ms.Position = 0;
+        var resp = await io.ImportZipAsync(ms, actor: null);
+
+        try
+        {
+            resp.Status.ShouldBe(Status.Success);
+            var stats = resp.Attributes!;
+            ((int)stats["histories_inserted"]!).ShouldBeGreaterThanOrEqualTo(1);
+            // `failed` must not contain a history-path error.
+            var failed = (List<Dictionary<string, object>>)stats["failed"]!;
+            var hasHistoryPathError = failed.Any(f =>
+                f.ContainsKey("kind") && (string)f["kind"] == "history"
+                && f.ContainsKey("error")
+                && ((string)f["error"]).Contains("history path missing /.dm/", StringComparison.Ordinal));
+            hasHistoryPathError.ShouldBeFalse("root-subpath history must import cleanly");
+        }
+        finally
+        {
+            try { await entryRepo.DeleteAsync(spaceName, "/", sn, ResourceType.Content); } catch { }
+            try { await spaceRepo.DeleteAsync(spaceName); } catch { }
+        }
+    }
+
     private static Entry MakeContent(string space, string subpath, string shortname, object body)
     {
         var bodyJson = JsonSerializer.Serialize(body);

@@ -21,9 +21,9 @@ using Microsoft.Extensions.Options;
 // dmart CLI — mirrors Python's dmart.py multi-subcommand entry point.
 //
 // Usage:
-//   dmart serve       Start the HTTP server (default if no subcommand)
+//   dmart help        Print available subcommands (default if no subcommand)
+//   dmart serve       Start the HTTP server
 //   dmart version     Print version info
-//   dmart help        Print available subcommands
 // ============================================================================
 
 
@@ -41,10 +41,13 @@ if (args.Length == 0 || !args[0].StartsWith('-'))
     };
 }
 
-// Parse subcommand from args. Default to "serve".
-// Flag-like args (--contentRoot etc.) are left for the web builder;
-// only our known flags (-v, -h) are treated as subcommands.
-var subcommand = "serve";
+// Parse subcommand from args.
+// - No args at all → "help" (terminal user intent: show subcommands).
+// - Flag-like args (--contentRoot etc., as injected by WebApplicationFactory)
+//   → "serve" so the test host actually starts.
+// - Bare subcommand (`dmart serve`, `dmart migrate`, ...) → that subcommand.
+// - `-v`/`-h`/`--version`/`--help` are also treated as subcommands.
+var subcommand = args.Length == 0 ? "help" : "serve";
 var serverArgs = args;
 if (args.Length > 0)
 {
@@ -1018,6 +1021,12 @@ app.Use(async (ctx, next) =>
 // GZip
 app.UseResponseCompression();
 
+// Strip empty object properties ("", [], {}) from JSON responses globally.
+// Registered AFTER UseResponseCompression so the strip happens on uncompressed
+// JSON; the compressed bytes that go on the wire reflect the trimmed body.
+// Intentional divergence from Python dmart — see middleware comment.
+app.UseJsonStripEmpties();
+
 // Correlation ID
 app.Use(async (ctx, next) =>
 {
@@ -1063,9 +1072,14 @@ app.UseDmartResponseHeaders();
     app.Use(async (ctx, next) =>
     {
         await next();
+        // GetEndpoint() is non-null iff a route matched and its handler ran.
+        // Without this guard, buffering middleware (JsonStripEmpties) keeps
+        // HasStarted=false after a handler returns 404, so the legacy
+        // HasStarted/ContentLength check would clobber handler-emitted 404s
+        // (e.g. /managed/entry for a missing resource) with INVALID_ROUTE.
         if (ctx.Response.StatusCode == 404
+            && ctx.GetEndpoint() is null
             && !ctx.Response.HasStarted
-            && (ctx.Response.ContentLength is null or 0)
             && !ctx.Request.Path.StartsWithSegments(cxbPath)
             && !ctx.Request.Path.StartsWithSegments(catPath))
         {

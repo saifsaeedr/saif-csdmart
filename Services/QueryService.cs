@@ -1213,7 +1213,13 @@ internal static class HistoryMapper
         var outNode = new System.Text.Json.Nodes.JsonObject();
         foreach (var prop in root.EnumerateObject())
         {
-            if (prop.Name == "password")
+            // Python's adapter.py:3101-3111 masks only the top-level `"password"`
+            // key. We go one step further: also mask flattened-dotted keys like
+            // `payload.body.password` so a password nested inside an Entry's
+            // payload body cannot leak via /managed/query?type=history. This
+            // one-line divergence from Python is deliberate defense-in-depth.
+            if (prop.Name == "password"
+                || prop.Name.EndsWith(".password", StringComparison.Ordinal))
             {
                 outNode[prop.Name] = new System.Text.Json.Nodes.JsonObject
                 {
