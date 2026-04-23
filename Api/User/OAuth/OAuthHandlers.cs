@@ -93,10 +93,9 @@ public static class OAuthHandlers
         }).RequireRateLimiting("auth-by-ip");
 
         // ---- Apple ----
-        // Apple's web-callback code exchange needs a signed client-assertion
-        // JWT (team id + key id + ES256 private key) — that's heavy and
-        // rarely used vs the mobile flow. We implement it only when
-        // AppleClientSecretPrivateKey is configured; otherwise clean error.
+        // Only the id_token path is implemented. Code → id_token exchange
+        // needs a signed ES256 client-assertion JWT — skipped for AOT
+        // simplicity. The mobile flow covers the common case.
         g.MapGet("/apple/callback", async (string? code, string? id_token,
             AppleProvider provider, OAuthUserResolver resolver,
             UserService users, IOptions<DmartSettings> settings,
@@ -112,12 +111,8 @@ public static class OAuthHandlers
             {
                 if (string.IsNullOrEmpty(code))
                     return ProviderError("apple callback needs either `code` or `id_token`");
-                // Code → id_token exchange requires client_secret JWT — not
-                // implemented for AOT-simplicity reasons. Mobile flow covers
-                // the 95% case. See AppleProvider config comments.
                 return ProviderError(
-                    "apple code exchange requires client_secret JWT signing — " +
-                    "configure AppleTeamId/AppleKeyId/AppleClientSecretPrivateKey or use the mobile flow");
+                    "apple code exchange is not implemented — use the mobile/id_token flow");
             }
             var info = await provider.ValidateIdTokenAsync(token, ct);
             if (info is null) return ProviderError("invalid apple id token");

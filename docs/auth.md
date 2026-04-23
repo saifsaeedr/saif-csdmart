@@ -231,13 +231,11 @@ id_token → local login).
 - `POST /user/facebook/mobile-login {access_token: "..."}`.
 
 ### Apple
-- `GET /user/apple/callback` (form-post or id_token) — verifies RS256
-  against `appleid.apple.com/auth/keys` (cached 1h).
+- `GET /user/apple/callback` (form-post with id_token) — verifies RS256
+  against `appleid.apple.com/auth/keys` (cached 1h). Code → id_token
+  exchange is not implemented; the callback returns a clean error when
+  Apple posts back only a `code`.
 - `POST /user/apple/mobile-login {id_token: "..."}`.
-
-Apple's web flow requires `AppleTeamId`, `AppleKeyId`,
-`AppleClientSecretPrivateKey` (ES256) for the client-assertion JWT. Mobile
-works without them.
 
 Resolution: if the email matches an existing user, log them in; otherwise
 create a new user with the OAuth provider's profile info

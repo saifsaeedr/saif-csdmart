@@ -166,16 +166,10 @@ public sealed class DmartSettings
 
     // Apple: id_token is a JWT signed with RS256 against one of the keys
     // published at https://appleid.apple.com/auth/keys. AppleClientId is the
-    // bundle id (iOS) or service id (web). No client secret needed for the
-    // mobile/id-token flow — web-callback code exchange requires a signed
-    // "client assertion" JWT built from AppleTeamId + AppleKeyId +
-    // AppleClientSecretPrivateKey (ES256); set those if you need the web
-    // callback, otherwise they can stay blank and the mobile flow still works.
+    // bundle id (iOS) or service id (web). Only the mobile / id-token flow
+    // is implemented — web-callback code exchange (which would need a signed
+    // ES256 client-assertion JWT) is stubbed out in OAuthHandlers.
     public string AppleClientId { get; set; } = "";
-    public string AppleOauthCallback { get; set; } = "";
-    public string AppleTeamId { get; set; } = "";
-    public string AppleKeyId { get; set; } = "";
-    public string AppleClientSecretPrivateKey { get; set; } = "";
 
     public bool LogoutOnPwdChange { get; set; } = true;
     public int RequestTimeout { get; set; } = 35;
