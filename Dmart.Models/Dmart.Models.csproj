@@ -11,10 +11,13 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <!-- The dmart server consumes this library under AOT; advertise that this
-         assembly is trim-safe so downstream AOT consumers don't get an
-         IL2104 "not known to be trim-compatible" warning. Trim analyzer runs
-         on every build so regressions surface immediately. -->
+         assembly is both trim-safe AND AOT-safe so downstream AOT consumers
+         don't get IL2104 ("not known to be trim-compatible") or IL3053
+         ("not known to be AOT-compatible") warnings. IsAotCompatible
+         implies IsTrimmable and also enables the AOT analyzer; the explicit
+         settings below match dmart.Client.csproj for consistency. -->
     <IsTrimmable>true</IsTrimmable>
+    <IsAotCompatible>true</IsAotCompatible>
     <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
     <RootNamespace>Dmart.Models</RootNamespace>
     <AssemblyName>Dmart.Models</AssemblyName>
