@@ -1172,19 +1172,25 @@ internal static class HistoryMapper
 {
     public static Record ToRecord(HistoryRecord h)
     {
-        // Python strips request_headers and masks passwords in diff.
-        var diff = h.Diff;
-        if (diff is not null && diff.Contains("password", StringComparison.OrdinalIgnoreCase))
-            diff = System.Text.RegularExpressions.Regex.Replace(
-                diff, @"""password""\s*:\s*""[^""]*""", @"""password"":""********""");
+        // Python-parity diff transform (adapter.py:3101-3111):
+        //   - for any diff key "password", replace old/new with "********"
+        //   - for every other key, if old/new is a dict, pop "headers" from it
+        // Walk structurally so nested {old,new} pairs are handled correctly —
+        // the previous regex pass only caught top-level "password":"string"
+        // values and missed the actual history shape.
+        JsonElement? diffElem = null;
+        if (h.Diff is not null)
+        {
+            using var doc = JsonDocument.Parse(h.Diff);
+            diffElem = TransformHistoryDiff(doc.RootElement);
+        }
 
         var attrs = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
             ["owner_shortname"] = h.OwnerShortname,
             ["timestamp"] = h.Timestamp,
-            // Deserialize diff JSON string into a JsonElement so it round-trips
-            // through the source-gen context without triggering AOT warnings.
-            ["diff"] = diff is not null ? JsonDocument.Parse(diff).RootElement.Clone() : null,
+            ["diff"] = diffElem,
+            ["last_checksum_history"] = h.LastChecksumHistory,
             ["space_name"] = h.SpaceName,
         };
         return new Record
@@ -1195,5 +1201,56 @@ internal static class HistoryMapper
             Uuid = h.Uuid.ToString(),
             Attributes = AttrHelper.StripNulls(attrs),
         };
+    }
+
+    // Walks a diff JsonElement and returns a transformed copy that mirrors
+    // Python's in-place mutation loop. Only produces a new tree when changes
+    // are needed — otherwise returns the cloned original.
+    private static JsonElement TransformHistoryDiff(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object) return root.Clone();
+
+        var outNode = new System.Text.Json.Nodes.JsonObject();
+        foreach (var prop in root.EnumerateObject())
+        {
+            if (prop.Name == "password")
+            {
+                outNode[prop.Name] = new System.Text.Json.Nodes.JsonObject
+                {
+                    ["old"] = "********",
+                    ["new"] = "********",
+                };
+                continue;
+            }
+            if (prop.Value.ValueKind == JsonValueKind.Object)
+            {
+                // Drop `headers` from each `old`/`new` nested dict.
+                var changeNode = new System.Text.Json.Nodes.JsonObject();
+                foreach (var state in prop.Value.EnumerateObject())
+                {
+                    if (state.Name is "old" or "new" && state.Value.ValueKind == JsonValueKind.Object)
+                    {
+                        var scrubbed = new System.Text.Json.Nodes.JsonObject();
+                        foreach (var kv in state.Value.EnumerateObject())
+                        {
+                            if (kv.Name == "headers") continue;
+                            scrubbed[kv.Name] = System.Text.Json.Nodes.JsonNode.Parse(kv.Value.GetRawText());
+                        }
+                        changeNode[state.Name] = scrubbed;
+                    }
+                    else
+                    {
+                        changeNode[state.Name] = System.Text.Json.Nodes.JsonNode.Parse(state.Value.GetRawText());
+                    }
+                }
+                outNode[prop.Name] = changeNode;
+            }
+            else
+            {
+                outNode[prop.Name] = System.Text.Json.Nodes.JsonNode.Parse(prop.Value.GetRawText());
+            }
+        }
+        using var doc2 = JsonDocument.Parse(outNode.ToJsonString());
+        return doc2.RootElement.Clone();
     }
 }

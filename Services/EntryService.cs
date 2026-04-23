@@ -110,8 +110,10 @@ public sealed class EntryService(
         // new definition is picked up by subsequent payload writes.
         if (toSave.ResourceType == ResourceType.Schema) schemas.ClearCache();
 
-        await history.AppendAsync(toSave.SpaceName, toSave.Subpath, toSave.Shortname, actor, null,
-            new() { ["action"] = "create" }, ct);
+        // Python doesn't write a history row on create (adapter.py::save does
+        // not call store_entry_diff), so skip the append here. Mirrors the
+        // /managed/query?type=history response shape — every row's diff is
+        // `{field: {old, new}}`, never a synthetic `{action:"create"}` envelope.
         await plugins.AfterActionAsync(BuildEvent(toSave, ActionType.Create, actor), ct);
         return Result<Entry>.Ok(toSave);
     }
@@ -158,10 +160,180 @@ public sealed class EntryService(
         // Invalidate compiled-schema cache if this entry IS a schema. A stale
         // cached schema would validate payloads against the pre-update definition.
         if (merged.ResourceType == ResourceType.Schema) schemas.ClearCache();
+
+        // Python parity: history.diff is stored as {field_path: {old, new}}.
+        // The same diff powers after_action's attributes.history_diff so both
+        // the persisted history row and the plugin event share one source of
+        // truth. Previously we wrote `{action:"update", patch:{...}}` into the
+        // diff column — broke the /managed/query?type=history response shape
+        // which clients expect to be `{old, new}`-only per key.
+        var historyDiff = ComputeHistoryDiff(existing, merged);
         await history.AppendAsync(locator.SpaceName, locator.Subpath, locator.Shortname, actor, null,
-            new() { ["action"] = "update", ["patch"] = patch }, ct);
-        await plugins.AfterActionAsync(BuildEvent(merged, ActionType.Update, actor), ct);
+            historyDiff.Count > 0 ? historyDiff : null, ct);
+
+        var afterEvent = BuildEvent(merged, ActionType.Update, actor);
+        if (historyDiff.Count > 0) afterEvent.Attributes["history_diff"] = historyDiff;
+        await plugins.AfterActionAsync(afterEvent, ct);
         return Result<Entry>.Ok(merged);
+    }
+
+    // Mirror of dmart's adapter.py::store_entry_diff: flatten both Entries,
+    // produce a {key: {"old": …, "new": …}} dict for every field whose value
+    // changed. Empty dict when nothing relevant differs. Used by the
+    // AfterAction event so plugins can introspect exactly what changed.
+    private static Dictionary<string, object> ComputeHistoryDiff(Entry oldE, Entry newE)
+    {
+        var oldFlat = FlattenEntry(oldE);
+        var newFlat = FlattenEntry(newE);
+        var keys = new HashSet<string>(oldFlat.Keys, StringComparer.Ordinal);
+        keys.UnionWith(newFlat.Keys);
+
+        var diff = new Dictionary<string, object>(StringComparer.Ordinal);
+        foreach (var k in keys)
+        {
+            oldFlat.TryGetValue(k, out var o);
+            newFlat.TryGetValue(k, out var n);
+            if (ValuesEqual(o, n)) continue;
+            diff[k] = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["old"] = o,
+                ["new"] = n,
+            };
+        }
+        return diff;
+    }
+
+    private static Dictionary<string, object?> FlattenEntry(Entry e)
+    {
+        var d = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["is_active"] = e.IsActive,
+            ["owner_shortname"] = e.OwnerShortname,
+            ["owner_group_shortname"] = e.OwnerGroupShortname,
+            ["slug"] = e.Slug,
+            ["tags"] = e.Tags ?? new(),
+            ["state"] = e.State,
+            ["is_open"] = e.IsOpen,
+            ["workflow_shortname"] = e.WorkflowShortname,
+            ["resolution_reason"] = e.ResolutionReason,
+        };
+        if (e.Displayname is not null)
+        {
+            d["displayname.en"] = e.Displayname.En;
+            d["displayname.ar"] = e.Displayname.Ar;
+            d["displayname.ku"] = e.Displayname.Ku;
+        }
+        if (e.Description is not null)
+        {
+            d["description.en"] = e.Description.En;
+            d["description.ar"] = e.Description.Ar;
+            d["description.ku"] = e.Description.Ku;
+        }
+        if (e.Payload?.Body is JsonElement body)
+            FlattenJson(body, "payload.body", d);
+        return d;
+    }
+
+    private static void FlattenJson(JsonElement el, string prefix, Dictionary<string, object?> outDict)
+    {
+        switch (el.ValueKind)
+        {
+            case JsonValueKind.Object:
+                foreach (var prop in el.EnumerateObject())
+                    FlattenJson(prop.Value, $"{prefix}.{prop.Name}", outDict);
+                break;
+            case JsonValueKind.Array:
+                // Python flatten_dict leaves arrays as whole list values at
+                // their key and then compares them with `!=` (semantic
+                // equality). Store the cloned JsonElement so ValuesEqual can
+                // walk it structurally — using GetRawText() here compared two
+                // semantically-equal arrays as unequal whenever JSONB's
+                // canonical form differed from the client's re-serialized form
+                // (whitespace, key order inside inner objects, numeric
+                // representation). That made unchanged arrays appear in the
+                // history_diff on every update.
+                outDict[prefix] = el.Clone();
+                break;
+            case JsonValueKind.String:
+                outDict[prefix] = el.GetString();
+                break;
+            case JsonValueKind.Number:
+                outDict[prefix] = el.TryGetInt64(out var i) ? (object)i : el.GetDouble();
+                break;
+            case JsonValueKind.True:  outDict[prefix] = true; break;
+            case JsonValueKind.False: outDict[prefix] = false; break;
+            case JsonValueKind.Null:  outDict[prefix] = null; break;
+        }
+    }
+
+    private static bool ValuesEqual(object? a, object? b)
+    {
+        if (a is null && b is null) return true;
+        if (a is null || b is null) return false;
+        if (a is JsonElement ja && b is JsonElement jb) return JsonElementEquals(ja, jb);
+        if (a is System.Collections.IEnumerable ae && a is not string
+            && b is System.Collections.IEnumerable be && b is not string)
+        {
+            var al = new List<object?>();
+            foreach (var x in ae) al.Add(x);
+            var bl = new List<object?>();
+            foreach (var x in be) bl.Add(x);
+            if (al.Count != bl.Count) return false;
+            for (var i = 0; i < al.Count; i++)
+                if (!ValuesEqual(al[i], bl[i])) return false;
+            return true;
+        }
+        return Equals(a, b);
+    }
+
+    // Structural JSON equality — same semantics as Python's `==` on the
+    // deserialized (dict / list / primitive) tree. Key order is ignored for
+    // objects, so JSONB's canonicalization doesn't show up as a diff.
+    private static bool JsonElementEquals(JsonElement a, JsonElement b)
+    {
+        if (a.ValueKind != b.ValueKind)
+        {
+            // Allow int↔double when numerically equal — JSONB normalizes to
+            // a single numeric representation, clients may send ints as either.
+            if (a.ValueKind == JsonValueKind.Number && b.ValueKind == JsonValueKind.Number) { }
+            else return false;
+        }
+        switch (a.ValueKind)
+        {
+            case JsonValueKind.Null:
+            case JsonValueKind.True:
+            case JsonValueKind.False:
+                return true;
+            case JsonValueKind.String:
+                return string.Equals(a.GetString(), b.GetString(), StringComparison.Ordinal);
+            case JsonValueKind.Number:
+                return a.GetDouble() == b.GetDouble();
+            case JsonValueKind.Array:
+            {
+                if (a.GetArrayLength() != b.GetArrayLength()) return false;
+                using var aEnum = a.EnumerateArray().GetEnumerator();
+                using var bEnum = b.EnumerateArray().GetEnumerator();
+                while (aEnum.MoveNext() && bEnum.MoveNext())
+                    if (!JsonElementEquals(aEnum.Current, bEnum.Current)) return false;
+                return true;
+            }
+            case JsonValueKind.Object:
+            {
+                var aKeys = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+                foreach (var p in a.EnumerateObject()) aKeys[p.Name] = p.Value;
+                var bKeys = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+                foreach (var p in b.EnumerateObject()) bKeys[p.Name] = p.Value;
+                if (aKeys.Count != bKeys.Count) return false;
+                foreach (var (k, av) in aKeys)
+                {
+                    if (!bKeys.TryGetValue(k, out var bv)) return false;
+                    if (!JsonElementEquals(av, bv)) return false;
+                }
+                return true;
+            }
+            default:
+                return false;
+        }
     }
 
     public async Task<Result<bool>> DeleteAsync(Locator locator, string? actor, CancellationToken ct = default)
@@ -203,8 +375,10 @@ public sealed class EntryService(
         {
             // Schema entry removed → drop any compiled instance from the in-memory cache.
             if (locator.Type == ResourceType.Schema) schemas.ClearCache();
-            await history.AppendAsync(locator.SpaceName, locator.Subpath, locator.Shortname, actor, null,
-                new() { ["action"] = "delete" }, ct);
+            // Python doesn't write a history row on delete — the entry (and
+            // its per-entry history) is gone by this point anyway. Keeping
+            // parity here avoids `/managed/query?type=history` returning
+            // rows whose diff isn't the standard `{field: {old, new}}` shape.
             await plugins.AfterActionAsync(deleteEvent, ct);
         }
         return Result<bool>.Ok(ok);
@@ -244,8 +418,10 @@ public sealed class EntryService(
         }
 
         await entries.MoveAsync(from, to, ct);
-        await history.AppendAsync(to.SpaceName, to.Subpath, to.Shortname, actor, null,
-            new() { ["action"] = "move", ["from"] = $"{from.SpaceName}/{from.Subpath}/{from.Shortname}" }, ct);
+        // Python parity: no history row on move. Destination gets a fresh
+        // entry; the source's history stays with the old row (which is now
+        // gone). Keeping the /managed/query?type=history response shape
+        // uniformly `{field: {old, new}}` means no action-envelope rows.
         await plugins.AfterActionAsync(moveEvent, ct);
         var moved = await entries.GetAsync(to.SpaceName, to.Subpath, to.Shortname, to.Type, ct);
         return moved is null

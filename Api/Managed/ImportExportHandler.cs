@@ -1,4 +1,6 @@
+using System.Text.Json;
 using Dmart.Models.Api;
+using Dmart.Models.Json;
 using Dmart.Services;
 
 namespace Dmart.Api.Managed;
@@ -30,14 +32,37 @@ public static class ImportExportHandler
                 return await io.ImportZipAsync(zipStream, http.Actor(), ct);
             }).DisableAntiforgery();
 
+        // Python-parity: POST /export takes a Query JSON body (not query-string
+        // args). Mirrors dmart_plain/backend/api/managed/router.py::export_data
+        // which signature is `export_data(query: api.Query, ...)`. The Query
+        // fields (subpath, filter_types, filter_shortnames, search, offset,
+        // limit) all feed the selection. Previously we took `?space=&subpath=`
+        // on the query string — clients sending a Query body always got
+        // "space required" because `space` was unbound.
         g.MapPost("/export",
-            async (string? space, string? subpath,
-                   ImportExportService io, HttpContext http, CancellationToken ct) =>
+            async (HttpRequest req, ImportExportService io, HttpContext http, CancellationToken ct) =>
             {
-                if (string.IsNullOrEmpty(space))
-                    return Results.BadRequest(Response.Fail(InternalErrorCode.INVALID_SPACE_NAME, "space required", ErrorTypes.Request));
-                var stream = await io.ExportAsync(space, subpath, http.Actor(), ct);
-                return Results.Stream(stream, "application/zip", $"{space}.zip");
+                Query? query;
+                try
+                {
+                    query = await JsonSerializer.DeserializeAsync(
+                        req.Body, DmartJsonContext.Default.Query, ct);
+                }
+                catch (JsonException ex)
+                {
+                    return Results.Json(
+                        Response.Fail(InternalErrorCode.INVALID_DATA,
+                            $"invalid export query body: {ex.Message}", ErrorTypes.Request),
+                        DmartJsonContext.Default.Response, statusCode: 400);
+                }
+                if (query is null || string.IsNullOrEmpty(query.SpaceName))
+                    return Results.Json(
+                        Response.Fail(InternalErrorCode.INVALID_SPACE_NAME,
+                            "space_name is required in the export query body", ErrorTypes.Request),
+                        DmartJsonContext.Default.Response, statusCode: 400);
+
+                var stream = await io.ExportAsync(query, http.Actor(), ct);
+                return Results.Stream(stream, "application/zip", $"{query.SpaceName}.zip");
             });
     }
 }

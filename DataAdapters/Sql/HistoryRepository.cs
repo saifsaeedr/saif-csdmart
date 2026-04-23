@@ -116,6 +116,7 @@ public sealed class HistoryRepository(Db db)
                 Diff: reader.IsDBNull(2) ? null : reader.GetString(2),
                 Timestamp: reader.GetDateTime(3),
                 OwnerShortname: reader.IsDBNull(4) ? null : reader.GetString(4),
+                LastChecksumHistory: reader.IsDBNull(5) ? null : reader.GetString(5),
                 SpaceName: reader.GetString(6),
                 Subpath: reader.GetString(7),
                 Shortname: reader.GetString(8)));
@@ -159,4 +160,5 @@ public sealed record HistoryEntry(Guid Uuid, string? Actor, string? Diff, DateTi
 
 public sealed record HistoryRecord(
     Guid Uuid, string? RequestHeaders, string? Diff, DateTime Timestamp,
-    string? OwnerShortname, string SpaceName, string Subpath, string Shortname);
+    string? OwnerShortname, string? LastChecksumHistory,
+    string SpaceName, string Subpath, string Shortname);
