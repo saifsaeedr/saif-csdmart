@@ -37,6 +37,8 @@ internal sealed class DmartSettingsValidator : IValidateOptions<DmartSettings>
             failures.Add("JwtSecret must be at least 32 bytes (HS256 signing key)");
         if (s.MaxFailedLoginAttempts < 0)
             failures.Add($"MaxFailedLoginAttempts must be >= 0 (got {s.MaxFailedLoginAttempts})");
+        if (s.AuthRateLimitPerMinute < 1)
+            failures.Add($"AuthRateLimitPerMinute must be >= 1 (got {s.AuthRateLimitPerMinute})");
         if (s.MaxQueryLimit < 1)
             failures.Add($"MaxQueryLimit must be >= 1 (got {s.MaxQueryLimit})");
         if (s.RequestTimeout <= 0)

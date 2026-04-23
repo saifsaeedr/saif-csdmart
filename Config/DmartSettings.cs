@@ -68,6 +68,14 @@ public sealed class DmartSettings
     public int MaxSessionsPerUser { get; set; } = 5;
     public int MaxFailedLoginAttempts { get; set; } = 5;
     public int MaxQueryLimit { get; set; } = 10000;
+
+    // Per-IP cap on auth-endpoint calls (login/otp-request) in a 60-second
+    // window. Complements MaxFailedLoginAttempts (per-account) by stopping
+    // username enumeration across many shortnames from one host. Bump for
+    // legitimate batch clients; lower for stricter posture. Overshoot rejects
+    // immediately with HTTP 429 (no queue).
+    public int AuthRateLimitPerMinute { get; set; } = 10;
+
     public int UrlShorterExpires { get; set; } = 60 * 60;
     public bool IsRegistrable { get; set; } = true;
 

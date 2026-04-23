@@ -874,18 +874,21 @@ builder.Services.AddHostedService<AdminBootstrap>();
 // IP-based rate limiter for authentication endpoints. Account lockout (on the
 // user row) limits attempts per-account; this limits attempts per-IP so an
 // attacker can't enumerate accounts by slowly cycling shortnames at the
-// per-account threshold. 10 req/min/IP is a safe default — a legitimate user
-// retyping a password hits this much rarer than a scripted attack.
+// per-account threshold. Default 10 req/min/IP via AuthRateLimitPerMinute —
+// legitimate users rarely hit it; operators can raise it for batch clients
+// that repeatedly re-authenticate instead of caching the access token.
 builder.Services.AddRateLimiter(opts =>
 {
     opts.AddPolicy("auth-by-ip", ctx =>
     {
         var ip = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        var permit = ctx.RequestServices
+            .GetRequiredService<IOptions<DmartSettings>>().Value.AuthRateLimitPerMinute;
         return System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(
             ip,
             _ => new System.Threading.RateLimiting.FixedWindowRateLimiterOptions
             {
-                PermitLimit = 10,
+                PermitLimit = permit,
                 Window = TimeSpan.FromMinutes(1),
                 QueueLimit = 0,
             });
