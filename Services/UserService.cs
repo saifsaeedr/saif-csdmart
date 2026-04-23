@@ -248,7 +248,7 @@ public sealed class UserService(
         var user = await ResolveUserAsync(req, ct);
         if (user is null)
             return Result<(string, string, User)>.Fail(
-                InternalErrorCode.USERNAME_NOT_EXIST, "Invalid username or password", ErrorTypes.Auth);
+                InternalErrorCode.INVALID_USERNAME_AND_PASS, "Invalid username or password", ErrorTypes.Auth);
 
         // Pre-check: attempt_count >= max means a prior run of
         // HandleFailedLoginAttemptAsync already locked the account (or an
@@ -271,8 +271,12 @@ public sealed class UserService(
                 ? Result<(string, string, User)>.Fail(
                     InternalErrorCode.USER_ACCOUNT_LOCKED,
                     "Account has been locked due to too many failed login attempts.", ErrorTypes.Auth)
+                // Python returns INVALID_USERNAME_AND_PASS(10) for BOTH "no
+                // user" and "wrong password" to avoid username enumeration.
+                // Previously C# surfaced PASSWORD_NOT_VALIDATED(13) here which
+                // lets callers tell the two apart — parity gap.
                 : Result<(string, string, User)>.Fail(
-                    InternalErrorCode.PASSWORD_NOT_VALIDATED, "Invalid username or password", ErrorTypes.Auth);
+                    InternalErrorCode.INVALID_USERNAME_AND_PASS, "Invalid username or password", ErrorTypes.Auth);
         }
 
         // Device lock check — applies regardless of user type.
@@ -316,7 +320,7 @@ public sealed class UserService(
         var user = await ResolveUserAsync(req, ct);
         if (user is null)
             return Result<(string, string, User)>.Fail(
-                InternalErrorCode.USERNAME_NOT_EXIST, "Invalid username or password", ErrorTypes.Auth);
+                InternalErrorCode.INVALID_USERNAME_AND_PASS, "Invalid username or password", ErrorTypes.Auth);
         if (RejectIfNotActive(user) is { } inactiveReject) return inactiveReject;
 
         // Validate OTP code.
@@ -426,11 +430,16 @@ public sealed class UserService(
     // disabled), null when the user can proceed. Centralizing the message
     // prevents drift between the three login paths — clients branch on
     // the exact string via tsdmart.
+    // Python parity: `api/user/router.py::login` raises
+    // USER_ACCOUNT_LOCKED(110) "Account has been locked." when is_active=false
+    // (router.py:504-508). USER_ISNT_VERIFIED is a separate code Python uses
+    // only on the verify-otp / registration flow — not on login. Callers that
+    // still want the "verified" distinction live outside this helper.
     private static Result<(string Access, string Refresh, User User)>? RejectIfNotActive(User user)
         => user.IsActive
             ? null
             : Result<(string, string, User)>.Fail(
-                InternalErrorCode.USER_ISNT_VERIFIED, "This user is not verified", ErrorTypes.Auth);
+                InternalErrorCode.USER_ACCOUNT_LOCKED, "Account has been locked.", ErrorTypes.Auth);
 
     private async Task<bool> HandleFailedLoginAttemptAsync(User user, CancellationToken ct)
     {

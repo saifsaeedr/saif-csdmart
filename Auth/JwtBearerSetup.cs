@@ -99,18 +99,22 @@ public static class JwtBearerSetup
                     {
                         ctx.HandleResponse(); // suppress default empty-body 401
 
+                        // Python parity — messages come from
+                        // dmart_plain/backend/utils/jwt.py so clients keying
+                        // off error.message (e.g. for i18n) see the same
+                        // strings regardless of runtime.
                         int code = InternalErrorCode.NOT_AUTHENTICATED;
-                        string message = "Not authenticated";
+                        string message = "Not authenticated [1]";
 
                         if (ctx.AuthenticateFailure is SecurityTokenExpiredException)
                         {
                             code = InternalErrorCode.EXPIRED_TOKEN;
-                            message = "Token has expired";
+                            message = "Expired Token";
                         }
                         else if (ctx.AuthenticateFailure is SecurityTokenException)
                         {
                             code = InternalErrorCode.INVALID_TOKEN;
-                            message = "Invalid token";
+                            message = "Invalid Token [1]";
                         }
 
                         // MCP clients (Zed, Cursor, Claude Desktop) only kick

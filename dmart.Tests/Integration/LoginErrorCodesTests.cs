@@ -21,17 +21,20 @@ public sealed class LoginErrorCodesTests : IClassFixture<DmartFactory>
     public LoginErrorCodesTests(DmartFactory factory) => _factory = factory;
 
     [FactIfPg]
-    public async Task UserNotFound_Returns_USERNAME_NOT_EXIST()
+    public async Task UserNotFound_Returns_INVALID_USERNAME_AND_PASS()
     {
+        // Python parity: both "unknown user" and "wrong password" surface as
+        // INVALID_USERNAME_AND_PASS(10) so the error can't be used for username
+        // enumeration (router.py:510-517).
         var (type, code, msg) = await ExpectLoginFailureAsync(
             new UserLoginRequest($"ghost_{Guid.NewGuid():N}"[..16], null, null, "pw", null));
         type.ShouldBe("auth");
-        code.ShouldBe(InternalErrorCode.USERNAME_NOT_EXIST);
+        code.ShouldBe(InternalErrorCode.INVALID_USERNAME_AND_PASS);
         msg.ShouldBe("Invalid username or password");
     }
 
     [FactIfPg]
-    public async Task WrongPassword_Returns_PASSWORD_NOT_VALIDATED()
+    public async Task WrongPassword_Returns_INVALID_USERNAME_AND_PASS()
     {
         var (shortname, _) = await CreateUserAsync(password: "correct-pw");
         try
@@ -39,7 +42,7 @@ public sealed class LoginErrorCodesTests : IClassFixture<DmartFactory>
             var (type, code, msg) = await ExpectLoginFailureAsync(
                 new UserLoginRequest(shortname, null, null, "wrong-pw", null));
             type.ShouldBe("auth");
-            code.ShouldBe(InternalErrorCode.PASSWORD_NOT_VALIDATED);
+            code.ShouldBe(InternalErrorCode.INVALID_USERNAME_AND_PASS);
             msg.ShouldBe("Invalid username or password");
         }
         finally { await DeleteUserAsync(shortname); }

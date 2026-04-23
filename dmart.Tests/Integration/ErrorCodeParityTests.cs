@@ -22,11 +22,15 @@ public sealed class ErrorCodeParityTests : IClassFixture<DmartFactory>
     private readonly DmartFactory _factory;
     public ErrorCodeParityTests(DmartFactory factory) => _factory = factory;
 
-    // ---------- USER_ISNT_VERIFIED ----------
+    // ---------- USER_ACCOUNT_LOCKED (inactive user on login) ----------
 
     [FactIfPg]
-    public async Task Login_InactiveUser_Returns_USER_ISNT_VERIFIED()
+    public async Task Login_InactiveUser_Returns_USER_ACCOUNT_LOCKED()
     {
+        // Python parity: router.py:504-508 — `is_active=false` surfaces as
+        // USER_ACCOUNT_LOCKED(110) with "Account has been locked.", NOT
+        // USER_ISNT_VERIFIED. The verified code is reserved for the OTP /
+        // verification flow, not the login path.
         var (shortname, pw) = await CreateInactiveUserAsync("correct-pw");
         try
         {
@@ -37,8 +41,8 @@ public sealed class ErrorCodeParityTests : IClassFixture<DmartFactory>
             var body = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
             body!.Error.ShouldNotBeNull();
             body.Error!.Type.ShouldBe("auth");
-            body.Error.Code.ShouldBe(InternalErrorCode.USER_ISNT_VERIFIED);
-            body.Error.Message.ShouldBe("This user is not verified");
+            body.Error.Code.ShouldBe(InternalErrorCode.USER_ACCOUNT_LOCKED);
+            body.Error.Message.ShouldBe("Account has been locked.");
         }
         finally { await DeleteUserAsync(shortname); }
     }
