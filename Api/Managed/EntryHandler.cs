@@ -85,8 +85,15 @@ public static class EntryHandler
                 var entry = await svc.GetAsync(new Locator(rt, space, subpath, shortname), actor, ct);
                 if (entry is null) return NotFoundMedia();
 
-                // Build attachments grouped by type. Each attachment is flat —
-                // attributes are spread at root, not nested under "attributes".
+                // Build attachments grouped by resource_type. Each attachment
+                // keeps its `attributes` wrapper around the meta fields, to
+                // match Python's `get_entry_attachments` shape (adapter.py:
+                // 1342 — `attachment["attributes"] = {...}` — and the /entry
+                // handler's `return {**meta.model_dump(), "attachments":
+                // attachments}` composition at router.py:1003). Previously we
+                // spread the attributes at the record root, which made every
+                // attachment flat — clients parsing attachment.attributes.X
+                // got `undefined`.
                 var attNode = new JsonObject();
                 if (retrieve_attachments == true)
                 {
@@ -97,17 +104,7 @@ public static class EntryHandler
                         foreach (var rec in grp.Select(a => AttachmentMapper.ToEntryRecord(a)))
                         {
                             var recJson = JsonSerializer.Serialize(rec, DmartJsonContext.Default.Record);
-                            var recNode = JsonNode.Parse(recJson)!.AsObject();
-                            if (recNode["attributes"] is JsonObject attrs)
-                            {
-                                recNode.Remove("attributes");
-                                foreach (var prop in attrs.ToList())
-                                {
-                                    attrs.Remove(prop.Key);
-                                    recNode[prop.Key] = prop.Value;
-                                }
-                            }
-                            arr.Add((JsonNode)recNode);
+                            arr.Add(JsonNode.Parse(recJson));
                         }
                         attNode[grp.Key] = arr;
                     }
