@@ -14,7 +14,7 @@ public class SettingsTests
         var s = new DmartSettings();
         s.JwtIssuer.ShouldBe("dmart");
         s.JwtAudience.ShouldBe("dmart");
-        s.JwtAccessMinutes.ShouldBeGreaterThan(0);
+        s.JwtAccessExpires.ShouldBeGreaterThan(0);
         s.ManagementSpace.ShouldBe("management");
     }
 
@@ -25,14 +25,14 @@ public class SettingsTests
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["Dmart:JwtSecret"] = "test-secret-test-secret-test-secret-32",
-                ["Dmart:JwtAccessMinutes"] = "30",
+                ["Dmart:JwtAccessExpires"] = "30",
                 ["Dmart:AdminPassword"] = "hunter22hunter",
             })
             .Build();
         var s = new DmartSettings();
         cfg.GetSection("Dmart").Bind(s);
         s.JwtSecret.ShouldBe("test-secret-test-secret-test-secret-32");
-        s.JwtAccessMinutes.ShouldBe(30);
+        s.JwtAccessExpires.ShouldBe(30);
         s.AdminPassword.ShouldBe("hunter22hunter");
     }
 }

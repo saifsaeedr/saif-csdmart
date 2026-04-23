@@ -86,7 +86,9 @@ public sealed class DmartFactory : WebApplicationFactory<Program>
                 ["Dmart:JwtSecret"] = "test-secret-test-secret-test-secret-32-bytes",
                 ["Dmart:JwtIssuer"] = "dmart",
                 ["Dmart:JwtAudience"] = "dmart",
-                ["Dmart:JwtAccessMinutes"] = "5",
+                // 300 seconds = 5 minutes — renamed from JwtAccessMinutes,
+                // unit is now seconds to match Python's jwt_access_expires.
+                ["Dmart:JwtAccessExpires"] = "300",
                 ["Dmart:AdminPassword"] = AdminPassword,
                 ["Dmart:AdminEmail"] = "admin@test.local",
             };

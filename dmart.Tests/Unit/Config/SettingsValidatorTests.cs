@@ -69,11 +69,12 @@ public class SettingsValidatorTests
     }
 
     [Fact]
-    public void JwtAccessMinutes_Zero_Fails()
+    public void JwtAccessExpires_Zero_Fails()
     {
-        // Zero-minute tokens would be immediately expired — almost certainly a config mistake.
+        // Zero-second access lifetime would mint tokens that expire on the
+        // very next request — almost certainly a config mistake.
         var s = Valid();
-        s.JwtAccessMinutes = 0;
+        s.JwtAccessExpires = 0;
         new DmartSettingsValidator().Validate(null, s).Failed.ShouldBeTrue();
     }
 

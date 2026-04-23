@@ -208,7 +208,7 @@ public sealed class LogFileTests
                     ["Dmart:JwtSecret"] = "test-secret-test-secret-test-secret-32-bytes",
                     ["Dmart:JwtIssuer"] = "dmart",
                     ["Dmart:JwtAudience"] = "dmart",
-                    ["Dmart:JwtAccessMinutes"] = "5",
+                    ["Dmart:JwtAccessExpires"] = "300",
                     ["Dmart:AdminPassword"] = _adminPassword,
                     ["Dmart:AdminEmail"] = "admin@test.local",
                     ["Dmart:LogFile"] = _logFilePath,

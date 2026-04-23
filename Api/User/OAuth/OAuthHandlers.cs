@@ -175,7 +175,7 @@ public static class OAuthHandlers
         var (access, _, loggedIn) = result.Value;
 
         // Match /user/login's cookie: httponly auth_token, same-site strict.
-        var maxAgeSeconds = settings.Value.JwtAccessMinutes * 60;
+        var maxAgeSeconds = settings.Value.JwtAccessExpires;
         http.Response.Cookies.Append("auth_token", access, new CookieOptions
         {
             HttpOnly = true,

@@ -16,7 +16,7 @@ public class JwtIssuerTests
         JwtSecret = "test-secret-test-secret-test-secret-32",
         JwtIssuer = "dmart",
         JwtAudience = "dmart",
-        JwtAccessMinutes = 5,
+        JwtAccessExpires = 300,
         JwtRefreshDays = 1,
     }));
 

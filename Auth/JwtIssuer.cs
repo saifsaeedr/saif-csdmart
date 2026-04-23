@@ -21,7 +21,7 @@ public sealed class JwtIssuer(IOptions<DmartSettings> settings)
 
     public string IssueAccess(string subject, IEnumerable<string>? roles = null,
         UserType userType = UserType.Web)
-        => Sign(subject, roles, userType, TimeSpan.FromMinutes(_s.JwtAccessMinutes));
+        => Sign(subject, roles, userType, TimeSpan.FromSeconds(_s.JwtAccessExpires));
 
     public string IssueRefresh(string subject, UserType userType = UserType.Web)
         => Sign(subject, null, userType, TimeSpan.FromDays(_s.JwtRefreshDays));

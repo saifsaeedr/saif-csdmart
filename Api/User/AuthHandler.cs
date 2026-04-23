@@ -48,7 +48,7 @@ public static class AuthHandler
 
             // dmart sets an httponly cookie called auth_token in addition to returning
             // the token in the body. Browser clients rely on the cookie.
-            var maxAgeSeconds = settings.Value.JwtAccessMinutes * 60;
+            var maxAgeSeconds = settings.Value.JwtAccessExpires;
             http.Response.Cookies.Append("auth_token", access, new CookieOptions
             {
                 HttpOnly = true,

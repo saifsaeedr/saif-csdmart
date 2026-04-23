@@ -27,8 +27,8 @@ internal sealed class DmartSettingsValidator : IValidateOptions<DmartSettings>
             failures.Add("DatabaseHost (or PostgresConnection) must be configured");
         if (string.IsNullOrWhiteSpace(s.DatabaseName) && string.IsNullOrWhiteSpace(s.PostgresConnection))
             failures.Add("DatabaseName (or PostgresConnection) must be configured");
-        if (s.JwtAccessMinutes <= 0)
-            failures.Add($"JwtAccessMinutes must be > 0 (got {s.JwtAccessMinutes})");
+        if (s.JwtAccessExpires <= 0)
+            failures.Add($"JwtAccessExpires must be > 0 (got {s.JwtAccessExpires})");
         if (s.JwtRefreshDays <= 0)
             failures.Add($"JwtRefreshDays must be > 0 (got {s.JwtRefreshDays})");
         if (s.JwtInvitationDays <= 0)

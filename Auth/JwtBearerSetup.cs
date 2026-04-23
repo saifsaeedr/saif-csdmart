@@ -49,6 +49,11 @@ public static class JwtBearerSetup
                     // JWT has no kid, so we always return the symmetric key directly.
                     IssuerSigningKeyResolver = (_, _, _, _) => new[] { signingKey },
                     NameClaimType = "sub",
+                    // Default ClockSkew is 5 minutes — tokens stay valid for
+                    // 5m past `exp`. That made JWT_ACCESS_EXPIRES=1 appear to
+                    // be ignored (1-sec tokens stayed live for 5 min). Python
+                    // dmart has no skew tolerance, so match: 0.
+                    ClockSkew = TimeSpan.Zero,
                 };
 
                 // dmart Python accepts the JWT from EITHER the Authorization header

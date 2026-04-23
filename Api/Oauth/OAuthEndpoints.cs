@@ -309,7 +309,7 @@ public static class OAuthEndpoints
             w.WriteStartObject();
             w.WriteString("access_token", access);
             w.WriteString("token_type", "Bearer");
-            w.WriteNumber("expires_in", settings.JwtAccessMinutes * 60);
+            w.WriteNumber("expires_in", settings.JwtAccessExpires);
             w.WriteString("refresh_token", refresh);
             w.WriteString("scope", scope);
             w.WriteEndObject();

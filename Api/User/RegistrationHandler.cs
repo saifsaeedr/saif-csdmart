@@ -65,7 +65,7 @@ public static class RegistrationHandler
 
             // Set auth_token cookie — mirrors the login flow so browser
             // clients are authenticated immediately after create.
-            var maxAgeSeconds = settings.Value.JwtAccessMinutes * 60;
+            var maxAgeSeconds = settings.Value.JwtAccessExpires;
             http.Response.Cookies.Append("auth_token", access, new CookieOptions
             {
                 HttpOnly = true,
