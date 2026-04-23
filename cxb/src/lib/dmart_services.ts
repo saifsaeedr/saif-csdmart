@@ -76,7 +76,8 @@ export async function getChildren(
     if (!folders) {
         throw new Error(`Failed to query children for ${space_name}/${subpath}`);
     }
-    if (ignoreFilter === false && spaces !== null) {
+    folders.records = folders.records ?? [];
+    if (!ignoreFilter && spaces !== null) {
         const selectedSpace = spaces.records?.find(record => record.shortname === space_name);
         const hiddenFolders: string[] | undefined = selectedSpace?.attributes?.hide_folders;
         if (hiddenFolders) {
