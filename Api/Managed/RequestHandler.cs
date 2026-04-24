@@ -524,7 +524,8 @@ public static class RequestHandler
                     UpdatedAt = DateTime.UtcNow,
                 };
                 await users.UpsertAsync(updated, ct);
-                return (Response.Ok(), rec with { Uuid = updated.Uuid });
+                return (Response.Ok(),
+                    WithCreatedMetaAttributes(rec, updated.Uuid, updated.CreatedAt, updated.UpdatedAt, updated.OwnerShortname));
             }
             case ResourceType.Space:
             {
@@ -572,7 +573,8 @@ public static class RequestHandler
                     UpdatedAt = DateTime.UtcNow,
                 };
                 await spaces.UpsertAsync(updated, ct);
-                return (Response.Ok(), rec with { Uuid = updated.Uuid });
+                return (Response.Ok(),
+                    WithCreatedMetaAttributes(rec, updated.Uuid, updated.CreatedAt, updated.UpdatedAt, updated.OwnerShortname));
             }
             // Role/Permission live in their own tables, not `entries` — falling
             // through to EntryService.UpdateAsync would silently no-op.
@@ -596,7 +598,8 @@ public static class RequestHandler
                     UpdatedAt = DateTime.UtcNow,
                 };
                 await access.UpsertRoleAsync(updated, ct);
-                return (Response.Ok(), rec with { Uuid = updated.Uuid });
+                return (Response.Ok(),
+                    WithCreatedMetaAttributes(rec, updated.Uuid, updated.CreatedAt, updated.UpdatedAt, updated.OwnerShortname));
             }
             case ResourceType.Permission:
             {
@@ -627,14 +630,22 @@ public static class RequestHandler
                     UpdatedAt = DateTime.UtcNow,
                 };
                 await access.UpsertPermissionAsync(updated, ct);
-                return (Response.Ok(), rec with { Uuid = updated.Uuid });
+                return (Response.Ok(),
+                    WithCreatedMetaAttributes(rec, updated.Uuid, updated.CreatedAt, updated.UpdatedAt, updated.OwnerShortname));
             }
             default:
             {
                 var result = await entries.UpdateAsync(locator, rec.Attributes ?? new(), actor, ct);
-                return result.IsOk
-                    ? (Response.Ok(), rec with { Uuid = result.Value!.Uuid })
-                    : (Response.Fail(result.ErrorCode!, result.ErrorMessage!, ErrorTypes.Request), rec);
+                if (!result.IsOk)
+                    return (Response.Fail(result.ErrorCode!, result.ErrorMessage!, ErrorTypes.Request), rec);
+                var saved = result.Value!;
+                // Python parity: update responses echo the fresh created_at /
+                // updated_at / owner_shortname from the saved entry (same
+                // helper the create branch uses). Previously only Uuid flowed
+                // back, so clients couldn't tell whether the server touched
+                // updated_at.
+                return (Response.Ok(),
+                    WithCreatedMetaAttributes(rec, saved.Uuid, saved.CreatedAt, saved.UpdatedAt, saved.OwnerShortname));
             }
         }
     }
