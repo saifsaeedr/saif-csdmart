@@ -14,8 +14,6 @@ namespace Dmart.DataAdapters.Sql;
 //     `language`. We pre-create them so dmart Python can hot-swap.
 //   * Histories, Locks, Sessions, Invitations, URLShorts, OTP, UserPermissionsCache
 //     do NOT inherit from Metas — they're flat tables.
-//   * Materialized views mv_user_roles and mv_role_permissions feed permission
-//     resolution; recreated from the JSONB user.roles / role.permissions arrays.
 public static class SqlSchema
 {
     public const string CreateAll = """
@@ -138,14 +136,6 @@ public static class SqlSchema
         query_policies          TEXT[] NOT NULL DEFAULT '{}',
 
         UNIQUE (shortname, space_name, subpath)
-    );
-
-    -- ============================================================
-    -- USER PERMISSIONS CACHE
-    -- ============================================================
-    CREATE TABLE IF NOT EXISTS user_permissions_cache (
-        user_shortname  TEXT PRIMARY KEY,
-        permissions     JSONB NOT NULL DEFAULT '{}'::jsonb
     );
 
     -- ============================================================
@@ -328,61 +318,6 @@ public static class SqlSchema
         user_shortname VARCHAR(64) PRIMARY KEY,
         permissions    JSONB
     );
-
-    -- ============================================================
-    -- COUNT_HISTORY  (analytics — populated by both dmart Python and dmart C#)
-    -- ============================================================
-    CREATE TABLE IF NOT EXISTS count_history (
-        id            SERIAL PRIMARY KEY,
-        spacename     VARCHAR(255) NOT NULL,
-        entries_count BIGINT NOT NULL,
-        recorded_at   TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE INDEX IF NOT EXISTS idx_count_history_spacename ON count_history (spacename);
-
-    -- ============================================================
-    -- ALEMBIC MIGRATION TRACKING
-    -- ============================================================
-    -- dmart Python uses Alembic. We mirror the same head version so dmart Python's
-    -- alembic upgrade command sees the schema as already-current and doesn't try to
-    -- re-apply migrations. The version below is dmart's current head as of this port;
-    -- update it whenever dmart releases a new migration.
-    CREATE TABLE IF NOT EXISTS alembic_version (
-        version_num VARCHAR(32) NOT NULL,
-        CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)
-    );
-    INSERT INTO alembic_version (version_num) VALUES ('b2c3d4e5f6a7')
-    ON CONFLICT (version_num) DO NOTHING;
-
-    -- ============================================================
-    -- AUTHZ MV META + MATERIALIZED VIEWS
-    -- ============================================================
-    CREATE TABLE IF NOT EXISTS authz_mv_meta (
-        id              INT PRIMARY KEY,
-        last_source_ts  TIMESTAMPTZ,
-        refreshed_at    TIMESTAMPTZ
-    );
-    INSERT INTO authz_mv_meta (id, last_source_ts, refreshed_at)
-    VALUES (1, to_timestamp(0), now())
-    ON CONFLICT (id) DO NOTHING;
-
-    CREATE MATERIALIZED VIEW IF NOT EXISTS mv_user_roles AS
-    SELECT u.shortname AS user_shortname,
-           r.shortname AS role_shortname
-    FROM users u
-    JOIN LATERAL jsonb_array_elements_text(u.roles) AS role_name ON TRUE
-    JOIN roles r ON r.shortname = role_name;
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_user_roles_unique
-        ON mv_user_roles (user_shortname, role_shortname);
-
-    CREATE MATERIALIZED VIEW IF NOT EXISTS mv_role_permissions AS
-    SELECT r.shortname AS role_shortname,
-           p.shortname AS permission_shortname
-    FROM roles r
-    JOIN LATERAL jsonb_array_elements_text(r.permissions) AS perm_name ON TRUE
-    JOIN permissions p ON p.shortname = perm_name;
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_role_permissions_unique
-        ON mv_role_permissions (role_shortname, permission_shortname);
 
     -- ============================================================
     -- PERFORMANCE INDEXES (mirrors create_tables.py)

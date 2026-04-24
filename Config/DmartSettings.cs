@@ -53,11 +53,6 @@ public sealed class DmartSettings
     public string? AdminPassword { get; set; }
     public string? AdminEmail { get; set; }
 
-    // count_history snapshot cadence (in minutes). Set to a large value to
-    // disable periodic recording — the snapshotter still writes one row on
-    // startup.
-    public int CountHistoryIntervalMinutes { get; set; } = 360;
-
     // Python-parity runtime knobs. Defaults mirror utils/settings.py so a
     // deployment config.env carrying only the DATABASE_* block still lands
     // on the same behavior as Python.

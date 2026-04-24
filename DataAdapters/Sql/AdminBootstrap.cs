@@ -10,13 +10,11 @@ namespace Dmart.DataAdapters.Sql;
 
 // Hosted service that runs after SchemaInitializer. Idempotently:
 //   1. Creates the super_admin role + admin user (if config provided + not already there)
-//   2. Refreshes the authz materialized views so the in-process permission resolver
-//      sees fresh data even when the bootstrap is a no-op (existing user case)
-//   3. Records an initial count_history snapshot so the analytics table has at least
-//      one row right after the host comes up
+//   2. Invalidates the in-process permission cache so stale entries from a prior
+//      run don't leak into the newly-booted host
 //
-// Designed to be safe to leave in production: if the admin shortname is unset, the
-// admin-creation step is a no-op but #2 and #3 still run.
+// Designed to be safe to leave in production: if the admin shortname is unset,
+// the admin-creation step is a no-op but #2 still runs.
 public sealed class AdminBootstrap(
     Db db,
     IOptions<DmartSettings> settings,
@@ -26,7 +24,6 @@ public sealed class AdminBootstrap(
     EntryRepository entries,
     PasswordHasher hasher,
     AuthzCacheRefresher authzRefresher,
-    CountHistoryRepository countHistory,
     ILogger<AdminBootstrap> log) : IHostedService
 {
     private const string MgmtSpace = "management";
@@ -48,7 +45,6 @@ public sealed class AdminBootstrap(
         if (!db.IsConfigured) return;
         await BootstrapAdminAsync(ct);
         await RefreshAuthzAsync(ct);
-        await SnapshotCountHistoryAsync(ct);
     }
 
     private const string AdminShortname = "dmart";
@@ -202,22 +198,9 @@ public sealed class AdminBootstrap(
 
     private async Task RefreshAuthzAsync(CancellationToken ct)
     {
-        // Always refresh — the user/role rows may have been written by dmart Python
-        // since the last C# startup, in which case the materialized views are stale.
+        // Clear the in-memory permission cache so stale entries from a prior
+        // process don't leak into the newly-booted host.
         await authzRefresher.RefreshAsync(ct);
-    }
-
-    private async Task SnapshotCountHistoryAsync(CancellationToken ct)
-    {
-        try
-        {
-            await countHistory.RecordSnapshotForAllSpacesAsync(ct);
-            log.LogDebug("count_history initial snapshot recorded");
-        }
-        catch (Exception ex)
-        {
-            log.LogWarning(ex, "count_history initial snapshot failed");
-        }
     }
 
     public Task StopAsync(CancellationToken ct) => Task.CompletedTask;

@@ -164,7 +164,7 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher)
         });
 
         await cmd.ExecuteNonQueryAsync(ct);
-        // user.roles changed → mv_user_roles is now stale.
+        // user.roles may have changed → clear the in-memory permission cache.
         await refresher.RefreshAsync(ct);
     }
 

@@ -104,7 +104,7 @@ public sealed class AccessRepository(Db db, AuthzCacheRefresher refresher)
         });
 
         await cmd.ExecuteNonQueryAsync(ct);
-        // role.permissions changed → mv_role_permissions is now stale.
+        // role.permissions may have changed → clear the in-memory permission cache.
         await refresher.RefreshAsync(ct);
     }
 
@@ -198,14 +198,13 @@ public sealed class AccessRepository(Db db, AuthzCacheRefresher refresher)
         });
 
         await cmd.ExecuteNonQueryAsync(ct);
-        // permission shape changed → invalidate cached resolutions; the materialized
-        // views key off role.permissions which doesn't change here, so just clear cache.
+        // permission shape changed → invalidate cached resolutions.
         await InvalidateAllCachesAsync(ct);
     }
 
     // Returns true when a row was deleted, false when no matching role existed.
-    // Invalidates the MV + in-memory permission caches on success so permission
-    // decisions don't keep hitting stale mv_role_permissions/mv_user_roles rows.
+    // Invalidates the in-memory permission cache on success so permission
+    // decisions don't keep hitting stale resolutions.
     public async Task<bool> DeleteRoleAsync(string shortname, CancellationToken ct = default)
     {
         await using var conn = await db.OpenAsync(ct);

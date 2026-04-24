@@ -284,7 +284,7 @@ switch (subcommand)
         var (s, dbInst) = CliBootstrap.BuildOrExit(dotenvPath, dotenvValues);
 
         var nlog = Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance;
-        var refresher = new AuthzCacheRefresher(dbInst, nlog.CreateLogger<AuthzCacheRefresher>());
+        var refresher = new AuthzCacheRefresher();
         var entryRepo = new EntryRepository(dbInst);
         var entryService = new EntryService(entryRepo,
             new AttachmentRepository(dbInst),
@@ -345,7 +345,7 @@ switch (subcommand)
         var (s, dbInst) = CliBootstrap.BuildOrExit(dotenvPath, dotenvValues);
 
         var nlog = Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance;
-        var refresher = new AuthzCacheRefresher(dbInst, nlog.CreateLogger<AuthzCacheRefresher>());
+        var refresher = new AuthzCacheRefresher();
         var entryRepo = new EntryRepository(dbInst);
         var entryService = new EntryService(entryRepo,
             new AttachmentRepository(dbInst),
@@ -809,10 +809,8 @@ builder.Services.AddSingleton<LockRepository>();
 builder.Services.AddSingleton<LinkRepository>();
 builder.Services.AddSingleton<OtpRepository>();
 builder.Services.AddSingleton<InvitationRepository>();
-builder.Services.AddSingleton<CountHistoryRepository>();
 builder.Services.AddSingleton<HealthCheckRepository>();
 builder.Services.AddSingleton<SpaceRepository>();
-builder.Services.AddHostedService<CountHistorySnapshotter>();
 
 // Schema bootstrapper runs once on startup. AdminBootstrap MUST be registered AFTER
 // SchemaInitializer — IHostedServices run StartAsync sequentially in registration order.
