@@ -94,8 +94,10 @@ switch (subcommand)
     case "--version":
     {
         // Version info is baked into the binary via InformationalVersion at build time.
-        // Format: "tag branch=X date=Y" — set by build.sh -p:InformationalVersion=...
-        // Falls back to info.json or live git for development (dotnet run).
+        // Format: "describe branch=X date=Y" — set by build.sh -p:InformationalVersion=...
+        // `describe` is the raw `git describe --tags --always` output: an exact
+        // tag like "v0.8.11" on a clean release, or "v0.8.11-1-gdc7f250" past it
+        // (the short SHA is already embedded, so there's no separate commit field).
         string json;
         var asmVersion = typeof(Program).Assembly
             .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
@@ -104,15 +106,14 @@ switch (subcommand)
 
         if (!string.IsNullOrEmpty(asmVersion) && asmVersion.Contains("branch="))
         {
-            // Parse "tag branch=X date=Y" format
             var parts = asmVersion.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            var tag = parts[0];
+            var version = parts[0];
             var branch = parts.FirstOrDefault(p => p.StartsWith("branch="))?[7..] ?? "";
-            var date = string.Join(' ', parts.Where(p => p.StartsWith("date=")).Select(p => p[5..]));
-            if (string.IsNullOrEmpty(date))
-                date = parts.SkipWhile(p => !p.StartsWith("date=")).Skip(1).FirstOrDefault() ?? "";
-            var commit = tag.Contains('-') ? tag.Split('-').LastOrDefault()?.TrimStart('g') ?? "" : tag;
-            json = $"{{\"branch\":\"{branch}\",\"version\":\"{commit}\",\"tag\":\"{tag}\",\"version_date\":\"{date}\",\"runtime\":\".NET {Environment.Version}\"}}";
+            // VERSION_DATE from build.sh is "YYYY-MM-DD HH:MM:SS +ZONE" — the
+            // space-split already isolates the date component as the first
+            // date= token; later time/zone tokens are discarded on purpose.
+            var date = parts.FirstOrDefault(p => p.StartsWith("date="))?[5..] ?? "";
+            json = $"{{\"version\":\"{version}\",\"branch\":\"{branch}\",\"version_date\":\"{date}\",\"runtime\":\".NET {Environment.Version}\"}}";
         }
         else
         {

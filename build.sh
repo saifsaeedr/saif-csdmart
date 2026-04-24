@@ -1,12 +1,20 @@
 #!/bin/bash
 set -e
 
-# Collect git metadata — baked into the binary via InformationalVersion
+# Collect git metadata — baked into the binary via InformationalVersion.
+# `git describe --tags` already encodes the tag and (when past it) the short
+# SHA in one string: "v0.8.11" on an exact tag, "v0.8.11-1-gdc7f250" past it.
 BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
-COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "")
-TAG=$(git describe --tags 2>/dev/null || echo "")
+# actions/checkout lands on a detached HEAD for tag/release builds, so a raw
+# `rev-parse --abbrev-ref` returns the literal string "HEAD". Prefer the
+# workflow-supplied GITHUB_REF_NAME when that happens so `dmart -v` shows a
+# useful label instead of "HEAD".
+if [ "$BRANCH" = "HEAD" ] && [ -n "$GITHUB_REF_NAME" ]; then
+  BRANCH="$GITHUB_REF_NAME"
+fi
+DESCRIBE=$(git describe --tags --always 2>/dev/null || echo "0.1.0")
 VERSION_DATE=$(git show --pretty=format:%ad --date=iso -q 2>/dev/null | head -1 || echo "")
-INFORMATIONAL_VERSION="${TAG:-${COMMIT:-0.1.0}} branch=${BRANCH} date=${VERSION_DATE}"
+INFORMATIONAL_VERSION="${DESCRIBE} branch=${BRANCH} date=${VERSION_DATE}"
 echo "Version: $INFORMATIONAL_VERSION"
 
 # Build UI frontends (cxb + catalog, both embedded into the dmart binary).

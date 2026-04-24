@@ -7,9 +7,19 @@
 #   podman run --name dmart -p 8000:8000 -d dmart
 
 ARG VERSION=unknown
+# Git metadata is passed in from CI — .dockerignore excludes .git/ so the
+# csproj's `git describe` fallback can't see anything here. GIT_DESCRIBE is
+# the raw `git describe --tags --always` output (already encodes tag + SHA).
+ARG GIT_DESCRIBE=
+ARG GIT_BRANCH=unknown
+ARG GIT_DATE=
 
 # Stage 1: Build C# AOT binary (musl for Alpine)
 FROM mcr.microsoft.com/dotnet/sdk:10.0-alpine AS build
+ARG VERSION
+ARG GIT_DESCRIBE
+ARG GIT_BRANCH
+ARG GIT_DATE
 RUN apk add --no-cache clang build-base zlib-dev
 WORKDIR /src
 
@@ -25,8 +35,11 @@ RUN dotnet restore dmart.csproj -r linux-musl-x64
 # dmart.Tests/, cxb/ source, bin/, obj/, .git/, and other bulk that
 # shouldn't inflate the build layer.
 COPY . .
-RUN dotnet publish dmart.csproj -r linux-musl-x64 --no-restore \
+RUN INFO_DATE="${GIT_DATE:-$(date -u +%Y-%m-%d)}" && \
+    INFO_VERSION="${GIT_DESCRIBE:-v${VERSION}}" && \
+    dotnet publish dmart.csproj -r linux-musl-x64 --no-restore \
         -p:PublishAot=true -p:StripSymbols=true -c Release -o /out \
+        -p:InformationalVersion="${INFO_VERSION} branch=${GIT_BRANCH} date=${INFO_DATE}" \
     && rm -f /out/*.dbg /out/*.pdb /out/*.Development.json \
              /out/*.staticwebassets* /out/*.deps.json
 

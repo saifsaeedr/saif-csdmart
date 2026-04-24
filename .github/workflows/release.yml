@@ -263,8 +263,14 @@ jobs:
       - name: Publish AOT win-x64
         shell: pwsh
         run: |
-          $v = "${{ steps.version.outputs.version }}"
-          $info = "v$v branch=${env:GITHUB_REF_NAME} date=$(Get-Date -Format yyyy-MM-dd)"
+          # Mirror build.sh's format: "describe branch=X date=Y". `git describe`
+          # already embeds the SHA when past a tag, so there's no separate
+          # commit field. fetch-depth: 0 above guarantees tag history.
+          $describe = (git describe --tags --always 2>$null).Trim()
+          if (-not $describe) { $describe = "v${{ steps.version.outputs.version }}" }
+          $date = (git show --pretty=format:%ad --date=short -q 2>$null).Trim()
+          if (-not $date) { $date = Get-Date -Format yyyy-MM-dd }
+          $info = "$describe branch=${env:GITHUB_REF_NAME} date=$date"
           dotnet publish dmart.csproj -r win-x64 -c Release `
             -p:PublishAot=true `
             -p:StripSymbols=true `
@@ -300,12 +306,12 @@ jobs:
     name: Build & Push Container Image
     runs-on: self-hosted
     steps:
-      # fetch-depth: 1 — the container build reads the source tree, not
-      # git history. The RPM jobs above need fetch-depth: 0 for
-      # `git describe`, but this job doesn't.
+      # fetch-depth: 0 — need tag history so `git describe --tags` below
+      # produces a proper version label for the baked-in InformationalVersion.
+      # .dockerignore excludes .git/, so we compute it out here and pass in.
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 1
+          fetch-depth: 0
 
       # Reclaim podman storage WITHOUT wiping base images or the long-lived
       # el9 builder container. `podman system prune -af` would also blow
@@ -350,11 +356,18 @@ jobs:
 
       - name: Build all-in-one container image
         run: |
+          # Pass git metadata explicitly — .dockerignore excludes .git/, so
+          # the csproj can't derive these inside the build stage.
+          GIT_DESCRIBE=$(git describe --tags --always)
+          GIT_DATE=$(git show --pretty=format:%cs -q HEAD)
           podman build \
             -t ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }} \
             -t ghcr.io/${{ github.repository }}:latest \
             -f admin_scripts/docker/Dockerfile \
             --build-arg VERSION=${{ steps.version.outputs.version }} \
+            --build-arg GIT_DESCRIBE="${GIT_DESCRIBE}" \
+            --build-arg GIT_BRANCH="${GITHUB_REF_NAME}" \
+            --build-arg GIT_DATE="${GIT_DATE}" \
             .
 
       - name: Push container image
