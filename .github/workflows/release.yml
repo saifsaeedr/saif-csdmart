@@ -110,13 +110,24 @@ jobs:
   build-srpm:
     name: Build Source RPM
     runs-on: self-hosted
+    needs: build-ui-tarballs
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - name: Build UI frontends (cxb + catalog)
-        run: ./build-ui.sh
+      - name: Download UI tarballs
+        uses: actions/download-artifact@v7
+        with:
+          name: ui-tarballs
+          path: dist/out
+
+      - name: Extract UI dists
+        run: |
+          V="${GITHUB_REF_NAME#v}"; V="${V:-0.1.0}"
+          mkdir -p cxb/dist/client catalog/dist/client
+          tar -xzf "dist/out/cxb-${V}.tar.gz"     -C cxb/dist/client
+          tar -xzf "dist/out/catalog-${V}.tar.gz" -C catalog/dist/client
 
       - name: Build SRPM
         run: |
@@ -145,13 +156,24 @@ jobs:
   build-fedora-rpm:
     name: Build Fedora RPM
     runs-on: self-hosted
+    needs: build-ui-tarballs
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - name: Build UI frontends (cxb + catalog)
-        run: ./build-ui.sh
+      - name: Download UI tarballs
+        uses: actions/download-artifact@v7
+        with:
+          name: ui-tarballs
+          path: dist/out
+
+      - name: Extract UI dists
+        run: |
+          V="${GITHUB_REF_NAME#v}"; V="${V:-0.1.0}"
+          mkdir -p cxb/dist/client catalog/dist/client
+          tar -xzf "dist/out/cxb-${V}.tar.gz"     -C cxb/dist/client
+          tar -xzf "dist/out/catalog-${V}.tar.gz" -C catalog/dist/client
 
       - name: Build Fedora RPM
         run: |
@@ -180,13 +202,24 @@ jobs:
   build-el9-rpm:
     name: Build RHEL 9 RPM
     runs-on: self-hosted
+    needs: build-ui-tarballs
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - name: Build UI frontends (cxb + catalog)
-        run: ./build-ui.sh
+      - name: Download UI tarballs
+        uses: actions/download-artifact@v7
+        with:
+          name: ui-tarballs
+          path: dist/out
+
+      - name: Extract UI dists
+        run: |
+          V="${GITHUB_REF_NAME#v}"; V="${V:-0.1.0}"
+          mkdir -p cxb/dist/client catalog/dist/client
+          tar -xzf "dist/out/cxb-${V}.tar.gz"     -C cxb/dist/client
+          tar -xzf "dist/out/catalog-${V}.tar.gz" -C catalog/dist/client
 
       # Reclaim podman storage WITHOUT touching the dmart-el9-builder
       # container. build-rpm.sh keeps that container (with dotnet-sdk-10.0,
@@ -230,6 +263,7 @@ jobs:
   build-windows:
     name: Build Windows (win-x64 AOT)
     runs-on: windows-latest
+    needs: build-ui-tarballs
     steps:
       - uses: actions/checkout@v6
         with:
@@ -240,18 +274,27 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: Setup Node (for CXB frontend)
-        uses: actions/setup-node@v6
+      - name: Download UI tarballs
+        uses: actions/download-artifact@v7
         with:
-          node-version: '20'
+          name: ui-tarballs
+          path: dist/out
 
-      - name: Build UI frontends (cxb + catalog)
+      - name: Extract UI dists
         shell: bash
         run: |
-          # Windows runner has no yarn by default — install globally once
-          # before invoking build-ui.sh, which will then pick it up.
-          npm install --global yarn
-          ./build-ui.sh
+          V="${GITHUB_REF_NAME#v}"; V="${V:-0.1.0}"
+          mkdir -p cxb/dist/client catalog/dist/client
+          tar -xzf "dist/out/cxb-${V}.tar.gz"     -C cxb/dist/client
+          tar -xzf "dist/out/catalog-${V}.tar.gz" -C catalog/dist/client
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', '**/Directory.Packages.props', '**/Directory.Build.props') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
 
       - name: Set version
         id: version
@@ -305,6 +348,7 @@ jobs:
   build-container:
     name: Build & Push Container Image
     runs-on: self-hosted
+    needs: build-ui-tarballs
     steps:
       # fetch-depth: 0 — need tag history so `git describe --tags` below
       # produces a proper version label for the baked-in InformationalVersion.
@@ -312,6 +356,19 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      - name: Download UI tarballs
+        uses: actions/download-artifact@v7
+        with:
+          name: ui-tarballs
+          path: dist/out
+
+      - name: Extract UI dists
+        run: |
+          V="${GITHUB_REF_NAME#v}"; V="${V:-0.1.0}"
+          mkdir -p cxb/dist/client catalog/dist/client
+          tar -xzf "dist/out/cxb-${V}.tar.gz"     -C cxb/dist/client
+          tar -xzf "dist/out/catalog-${V}.tar.gz" -C catalog/dist/client
 
       # Reclaim podman storage WITHOUT wiping base images or the long-lived
       # el9 builder container. `podman system prune -af` would also blow
@@ -340,9 +397,6 @@ jobs:
             | grep -v ":${KEEP_VER}$" \
             | xargs -r -n1 podman rmi -f || true
           df -h ~ || true
-
-      - name: Build UI frontends (cxb + catalog)
-        run: ./build-ui.sh
 
       - name: Set version
         id: version

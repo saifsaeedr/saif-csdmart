@@ -85,13 +85,17 @@ if [[ "$TARGET" == "el9" || "$TARGET" == "rhel9" ]]; then
     fi
     echo "Building dmart-${VERSION} RPM for RHEL 9 via ${ENGINE}..."
     # Build UI frontends on the host (the el9 container has no Node.js — it
-    # only ships dotnet-sdk + rpm-build + clang). build-ui.sh is idempotent:
-    # yarn install is a no-op on a warm cache and vite build is fast, so
-    # running unconditionally is cheaper than the class of "one dist stale"
-    # bugs from a narrower check.
-    if [ -f cxb/package.json ] || [ -f catalog/package.json ]; then
+    # only ships dotnet-sdk + rpm-build + clang). Skip per-SPA when a dist is
+    # already present — CI pre-extracts dists from the shared ui-tarballs
+    # artifact, so rebuilding them here would be ~95s of wasted work per job.
+    needs_ui=false
+    [ -f cxb/package.json ]     && [ ! -f cxb/dist/client/index.html ]     && needs_ui=true
+    [ -f catalog/package.json ] && [ ! -f catalog/dist/client/index.html ] && needs_ui=true
+    if [ "$needs_ui" = true ]; then
         echo "Building UI frontends locally (pre-container)..."
         ./build-ui.sh || { echo "UI build failed" >&2; exit 1; }
+    else
+        echo "UI frontends ready (dists present or sources absent), skipping"
     fi
     mkdir -p dist/out
     CONTAINER_NAME="dmart-el9-builder"
