@@ -33,7 +33,8 @@ public sealed class QueryService(
     HistoryRepository history,
     PermissionService perms,
     Db db,
-    IOptions<DmartSettings> settings)
+    IOptions<DmartSettings> settings,
+    ILogger<QueryService> logger)
 {
     // Permission gate for query methods. Tries "view" first (works for anonymous +
     // authenticated), then "query" — Python exempts the "query" action from
@@ -110,7 +111,7 @@ public sealed class QueryService(
                 // return the un-joined base results rather than failing the
                 // whole query. jq failures are already handled above via the
                 // tuple return — this catch is for join-algorithm bugs only.
-                Console.Error.WriteLine($"[client_join] {ex.Message}");
+                logger.LogWarning(ex, "client_join join failed");
             }
         }
 
@@ -554,7 +555,7 @@ public sealed class QueryService(
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[client_join] failed to deserialize sub-query for alias '{joinItem.Alias}': {ex.Message}");
+                logger.LogWarning(ex, "client_join failed to deserialize sub-query for alias {Alias}", joinItem.Alias);
                 continue;
             }
             if (subQuery is null) continue;

@@ -5,9 +5,11 @@ using System.Text;
 using System.Text.Json;
 using Dmart.DataAdapters.Sql;
 using Dmart.Models.Api;
+using Dmart.Models.Core;
 using Dmart.Models.Enums;
 using Dmart.Models.Json;
 using Dmart.Services;
+using Dmart.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
 using Xunit;
@@ -222,9 +224,13 @@ public class RecentParityTests : IClassFixture<DmartFactory>
                     Encoding.UTF8, "application/json"));
             var body = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
             body!.Status.ShouldBe(Status.Success);
-            await Task.Delay(500);
             var entries = _factory.Services.GetRequiredService<EntryRepository>();
-            var schemaFolder = await entries.GetAsync(spaceName, "/", "schema", ResourceType.Folder);
+            Entry? schemaFolder = null;
+            await WaitFor.UntilAsync(async () =>
+            {
+                schemaFolder = await entries.GetAsync(spaceName, "/", "schema", ResourceType.Folder);
+                return schemaFolder is not null;
+            }, TimeSpan.FromSeconds(2));
             schemaFolder.ShouldNotBeNull("resource_folders_creation plugin should create /schema");
         }
         finally

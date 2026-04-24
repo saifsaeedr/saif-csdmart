@@ -5,6 +5,7 @@ using System.Text.Json;
 using Dmart.Models.Api;
 using Dmart.Models.Enums;
 using Dmart.Models.Json;
+using Dmart.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
 using Xunit;
@@ -97,11 +98,18 @@ public class LockDbTests : IClassFixture<DmartFactory>
         var first = await client.PutAsync($"/managed/lock/content/{space}/{subpath}/{shortname}", null);
         first.StatusCode.ShouldBe(HttpStatusCode.OK);
 
-        // Wait past the 1-second TTL.
-        await Task.Delay(1500);
-
-        var refreshed = await client.PutAsync($"/managed/lock/content/{space}/{subpath}/{shortname}", null);
-        refreshed.StatusCode.ShouldBe(HttpStatusCode.OK);
+        // Lock's INSERT uses ON CONFLICT DO NOTHING, so a second PUT returns
+        // non-OK until the 1s TTL elapses and the purge step deletes the row.
+        // Poll the PUT itself — whichever call first lands after expiry wins.
+        HttpResponseMessage? refreshed = null;
+        var ok = await WaitFor.UntilAsync(async () =>
+        {
+            refreshed?.Dispose();
+            refreshed = await client.PutAsync($"/managed/lock/content/{space}/{subpath}/{shortname}", null);
+            return refreshed.StatusCode == HttpStatusCode.OK;
+        }, timeout: TimeSpan.FromSeconds(5), interval: TimeSpan.FromMilliseconds(200));
+        ok.ShouldBeTrue("lock should become re-acquirable after TTL expiry");
+        refreshed!.StatusCode.ShouldBe(HttpStatusCode.OK);
 
         await client.DeleteAsync($"/managed/lock/{space}/{subpath}/{shortname}");
     }

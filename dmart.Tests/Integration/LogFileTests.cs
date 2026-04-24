@@ -4,6 +4,7 @@ using Dmart;
 using Dmart.Config;
 using Dmart.Models.Api;
 using Dmart.Models.Json;
+using Dmart.Tests.Infrastructure;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
@@ -106,14 +107,17 @@ public sealed class LogFileTests
             var users = factory.Services.GetRequiredService<Dmart.DataAdapters.Sql.UserRepository>();
             await users.ResetAttemptsAsync("dmart");
 
-            // Allow any trailing writes to flush — FileStream autoflush is
-            // synchronous but we want the process-level file handle released.
-            await Task.Delay(100);
-
-            var loginLines = File.ReadAllLines(path)
-                .Where(l => l.Contains("\"path\":\"/user/login\"", StringComparison.Ordinal))
-                .Select(l => JsonDocument.Parse(l))
-                .ToList();
+            // Allow any trailing writes to flush — poll the file until both
+            // the success and failure log lines show up (or timeout).
+            List<JsonDocument> loginLines = new();
+            await WaitFor.UntilAsync(() =>
+            {
+                loginLines = File.ReadAllLines(path)
+                    .Where(l => l.Contains("\"path\":\"/user/login\"", StringComparison.Ordinal))
+                    .Select(l => JsonDocument.Parse(l))
+                    .ToList();
+                return Task.FromResult(loginLines.Count >= 2);
+            }, TimeSpan.FromSeconds(2));
             loginLines.Count.ShouldBeGreaterThanOrEqualTo(2);
 
             JsonElement? okLine = null, badLine = null;

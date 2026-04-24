@@ -6,6 +6,7 @@ using Dmart.Models.Core;
 using Dmart.Models.Enums;
 using Dmart.Plugins;
 using Dmart.Services;
+using Dmart.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
 using Xunit;
@@ -119,16 +120,14 @@ public class PluginManagerIntegrationTests : IClassFixture<DmartFactory>
                 ResourceType = ResourceType.Space,
                 UserShortname = "dmart",
             });
-            // AfterActionAsync fires concurrent hooks as fire-and-forget — give
-            // the background task a moment to land before we check. A small
-            // polling loop is more robust than a fixed sleep.
+            // AfterActionAsync fires concurrent hooks as fire-and-forget — poll
+            // for the side effect to land rather than trusting a fixed sleep.
             Entry? schemaFolder = null;
-            for (var i = 0; i < 20; i++)
+            await WaitFor.UntilAsync(async () =>
             {
                 schemaFolder = await entryRepo.GetAsync(spaceName, "/", "schema", ResourceType.Folder);
-                if (schemaFolder is not null) break;
-                await Task.Delay(100);
-            }
+                return schemaFolder is not null;
+            }, TimeSpan.FromSeconds(2));
             schemaFolder.ShouldNotBeNull("resource_folders_creation should have materialized /schema");
             // Let the plugin's fire-and-forget background task finish its
             // transaction before we try to delete — avoids a deadlock between
