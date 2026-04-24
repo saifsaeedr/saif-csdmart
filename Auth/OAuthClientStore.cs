@@ -60,6 +60,19 @@ public sealed class OAuthClientStore
         return false;
     }
 
+    // Removes clients registered more than `maxAge` ago. Called by
+    // OAuthStoreSweeper so the dictionary doesn't grow unbounded from
+    // abandoned MCP registrations. Real clients re-register on startup.
+    public void RemoveOlderThan(TimeSpan maxAge)
+    {
+        var cutoff = DateTime.UtcNow - maxAge;
+        foreach (var (key, client) in _clients)
+        {
+            if (client.CreatedAt < cutoff)
+                _clients.TryRemove(key, out _);
+        }
+    }
+
     private static string GenerateClientId()
     {
         Span<byte> bytes = stackalloc byte[16];

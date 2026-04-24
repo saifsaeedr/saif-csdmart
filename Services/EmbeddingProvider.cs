@@ -30,8 +30,11 @@ public sealed class EmbeddingProvider(
     Db db,
     ILogger<EmbeddingProvider> log)
 {
-    // Cached once on first access — avoids a round-trip per embed call.
+    // Cached with a TTL — avoids a round-trip per embed call but re-probes
+    // periodically so the feature activates if pgvector is installed later.
     private bool? _pgVectorAvailable;
+    private DateTime _probeExpiry = DateTime.MinValue;
+    private static readonly TimeSpan ProbeTtl = TimeSpan.FromMinutes(5);
     private readonly SemaphoreSlim _probeLock = new(1, 1);
 
     // Total embeddable text cap. Most embedding APIs have an 8k-token limit;
@@ -55,11 +58,11 @@ public sealed class EmbeddingProvider(
 
     public async Task<bool> IsPgVectorAvailableAsync(CancellationToken ct = default)
     {
-        if (_pgVectorAvailable is bool cached) return cached;
+        if (_pgVectorAvailable is bool cached && DateTime.UtcNow < _probeExpiry) return cached;
         await _probeLock.WaitAsync(ct);
         try
         {
-            if (_pgVectorAvailable is bool cachedInner) return cachedInner;
+            if (_pgVectorAvailable is bool cachedInner && DateTime.UtcNow < _probeExpiry) return cachedInner;
             if (!db.IsConfigured) { _pgVectorAvailable = false; return false; }
 
             bool available;
@@ -81,6 +84,7 @@ public sealed class EmbeddingProvider(
                 available = false;
             }
             _pgVectorAvailable = available;
+            _probeExpiry = DateTime.UtcNow.Add(ProbeTtl);
             if (!available)
                 log.LogInformation(
                     "pgvector not installed or entries.embedding column missing — semantic search disabled");

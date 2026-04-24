@@ -37,7 +37,7 @@ public sealed class OAuthCodeStore
         _codes[code] = new AuthCodeEntry(
             userShortname, clientId, redirectUri,
             codeChallenge,
-            string.IsNullOrEmpty(codeChallengeMethod) ? "plain" : codeChallengeMethod!,
+            string.IsNullOrEmpty(codeChallengeMethod) ? "S256" : codeChallengeMethod!,
             scope, DateTime.UtcNow.Add(Ttl));
         return code;
     }
@@ -61,7 +61,6 @@ public sealed class OAuthCodeStore
             var computed = entry.CodeChallengeMethod.ToLowerInvariant() switch
             {
                 "s256"  => S256Challenge(codeVerifier),
-                "plain" => codeVerifier,
                 _       => null,
             };
             if (computed is null || computed != entry.CodeChallenge) return null;
@@ -70,9 +69,17 @@ public sealed class OAuthCodeStore
         return entry;
     }
 
-    // Periodic sweep would be nice but unnecessary — Consume already rejects
-    // stale entries, and the dictionary entries are small. Restarts wipe
-    // everything, which is fine since codes are meant to be ephemeral.
+    // Removes expired entries that were never redeemed. Called by
+    // OAuthStoreSweeper on a timer so the dictionary doesn't grow unbounded.
+    public void RemoveExpired()
+    {
+        var now = DateTime.UtcNow;
+        foreach (var (key, entry) in _codes)
+        {
+            if (entry.ExpiresAt < now)
+                _codes.TryRemove(key, out _);
+        }
+    }
 
     private static string CryptographicallyRandomToken()
     {

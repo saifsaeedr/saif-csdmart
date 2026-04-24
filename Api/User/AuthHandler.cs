@@ -53,7 +53,7 @@ public static class AuthHandler
             {
                 HttpOnly = true,
                 Secure = http.Request.IsHttps,
-                SameSite = SameSiteMode.Strict,
+                SameSite = SameSiteMode.Lax,
                 MaxAge = TimeSpan.FromSeconds(maxAgeSeconds),
                 Path = "/",
             });
@@ -94,7 +94,7 @@ public static class AuthHandler
             {
                 HttpOnly = true,
                 Secure = http.Request.IsHttps,
-                SameSite = SameSiteMode.Strict,
+                SameSite = SameSiteMode.Lax,
                 MaxAge = TimeSpan.Zero,
                 Path = "/",
             });

@@ -7,7 +7,7 @@ namespace Dmart.DataAdapters.Sql;
 
 // roles + permissions + userpermissionscache. Column-for-column mapping to dmart's
 // Roles, Permissions, and UserPermissionsCache SQLModel tables.
-public sealed class AccessRepository(Db db, AuthzCacheRefresher refresher)
+public sealed class AccessRepository(Db db, AuthzCacheRefresher refresher, UserRepository userRepository)
 {
     private const string SelectRoleColumns = """
         SELECT uuid, shortname, space_name, subpath, is_active, slug,
@@ -267,7 +267,7 @@ public sealed class AccessRepository(Db db, AuthzCacheRefresher refresher)
         if (cached is not null) return cached;
 
         // Walk: user.roles → role.permissions → permission rows.
-        var user = await new UserRepository(db, refresher).GetByShortnameAsync(userShortname, ct);
+        var user = await userRepository.GetByShortnameAsync(userShortname, ct);
         if (user is null) return new();
 
         var roles = user.Roles.Count > 0 ? await GetRolesAsync(user.Roles, ct) : new();

@@ -75,19 +75,40 @@ public static class WebSocketHandler
                 "{\"type\":\"connection_response\",\"message\":{\"status\":\"success\"}}");
 
             // Read loop — handle subscribe/unsubscribe messages.
+            // Use ctx.RequestAborted so the loop stops on server shutdown.
+            const int maxMessageSize = 64 * 1024; // 64 KB cap
             var buffer = new byte[4096];
             try
             {
                 while (ws.State == WebSocketState.Open)
                 {
-                    var result = await ws.ReceiveAsync(buffer, CancellationToken.None);
+                    // Accumulate fragments until EndOfMessage to handle
+                    // messages larger than the 4 KB receive buffer.
+                    using var ms = new MemoryStream();
+                    WebSocketReceiveResult result;
+                    do
+                    {
+                        result = await ws.ReceiveAsync(buffer, ctx.RequestAborted);
+                        if (result.MessageType == WebSocketMessageType.Close)
+                            break;
+                        if (ms.Length + result.Count > maxMessageSize)
+                        {
+                            // Message too large — discard and close.
+                            try { await ws.CloseAsync(WebSocketCloseStatus.MessageTooBig, "message too large", ctx.RequestAborted); }
+                            catch { /* best-effort */ }
+                            break;
+                        }
+                        ms.Write(buffer, 0, result.Count);
+                    } while (!result.EndOfMessage);
+
                     if (result.MessageType == WebSocketMessageType.Close)
                         break;
 
-                    var text = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                    var text = Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length);
                     try
                     {
-                        var msg = JsonDocument.Parse(text).RootElement;
+                        using var doc = JsonDocument.Parse(text);
+                        var msg = doc.RootElement;
                         var msgType = msg.TryGetProperty("type", out var t) ? t.GetString() : null;
 
                         if (msgType == "notification_subscription")
@@ -110,6 +131,7 @@ public static class WebSocketHandler
                     catch { /* malformed message — ignore */ }
                 }
             }
+            catch (OperationCanceledException) { /* server shutdown or client abort */ }
             catch { /* client disconnected */ }
             finally
             {
