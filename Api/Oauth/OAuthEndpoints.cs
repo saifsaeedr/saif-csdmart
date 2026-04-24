@@ -66,13 +66,13 @@ public static class OAuthEndpoints
         // POST — same form submits back to this endpoint; we validate
         //        credentials and return the same 302 on success.
         g.MapGet("/authorize", HandleAuthorizeGet);
-        g.MapPost("/authorize", HandleAuthorizePostAsync);
+        g.MapPost("/authorize", HandleAuthorizePostAsync).RequireRateLimiting("auth-by-ip");
 
         // ---- Token endpoint (RFC 6749 §3.2) ----
         //
         // Exchanges the auth code + PKCE verifier for a dmart access token.
         // Issues a matching refresh token (standard dmart JWT).
-        g.MapPost("/token", HandleTokenAsync);
+        g.MapPost("/token", HandleTokenAsync).RequireRateLimiting("auth-by-ip");
 
         return app;
     }
@@ -461,6 +461,7 @@ public static class OAuthEndpoints
             <head>
               <meta charset="utf-8">
               <meta name="viewport" content="width=device-width,initial-scale=1">
+              <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none';" />
               <title>dmart — authorize MCP client</title>
               <style>
                 body { font-family: -apple-system, system-ui, sans-serif; background:#0f172a; color:#e5e7eb;

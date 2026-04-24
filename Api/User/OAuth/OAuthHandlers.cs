@@ -175,7 +175,7 @@ public static class OAuthHandlers
         {
             HttpOnly = true,
             Secure = http.Request.IsHttps,
-            SameSite = SameSiteMode.Strict,
+            SameSite = SameSiteMode.Lax,
             MaxAge = TimeSpan.FromSeconds(maxAgeSeconds),
             Path = "/",
         });

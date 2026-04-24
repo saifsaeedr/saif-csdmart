@@ -25,7 +25,7 @@ public static class JqRunner
     // `path(` needs the `\(` so a literal "path(" in a filter triggers the
     // rejection even if it appears inside an expression.
     private static readonly Regex DangerousBuiltins = new(
-        @"\benv\b|\$ENV\b|\binput\b|\bdebug\b|\bstderr\b|\bpath\(",
+        @"\benv\b|\$ENV\b|\binput\b|\bdebug\b|\bstderr\b|\bpath\(|\bhalt\b|\bhalt_error\b|\bbuiltins\b|\bmodulemeta\b|\bgetpath\b|\$__loc__",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     public const int MaxFilterLength = 1024;

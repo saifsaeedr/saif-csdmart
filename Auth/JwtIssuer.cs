@@ -93,7 +93,8 @@ public sealed class JwtIssuer(IOptions<DmartSettings> settings)
 
         // Decode payload.
         var payloadJson = Encoding.UTF8.GetString(Base64UrlDecode(parts[1]));
-        var payload = JsonDocument.Parse(payloadJson).RootElement;
+        using var doc = JsonDocument.Parse(payloadJson);
+        var payload = doc.RootElement;
 
         // Check expiration.
         if (payload.TryGetProperty("exp", out var exp))

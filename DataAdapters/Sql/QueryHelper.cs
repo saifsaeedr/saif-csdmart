@@ -2,6 +2,8 @@ using System.Globalization;
 using System.Text.RegularExpressions;
 using Dmart.Models.Api;
 using Dmart.Models.Enums;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using NpgsqlTypes;
 
@@ -13,6 +15,12 @@ namespace Dmart.DataAdapters.Sql;
 // the filter logic is identical; only the FROM clause differs.
 public static class QueryHelper
 {
+    private static ILogger _log = NullLogger.Instance;
+
+    // Called once at startup from Program.cs to wire structured logging.
+    public static void SetLogger(ILoggerFactory factory) =>
+        _log = factory.CreateLogger("Dmart.QueryHelper");
+
     // ====================================================================
     // WHERE CLAUSE BUILDER
     // ====================================================================
@@ -1067,7 +1075,7 @@ public static class QueryHelper
         while (await reader.ReadAsync(ct))
         {
             try { results.Add(hydrate(reader)); }
-            catch (Exception ex) { Console.Error.WriteLine($"WARN: skipped row with bad data: {ex.Message}"); }
+            catch (Exception ex) { _log.LogWarning(ex, "Skipped row with bad data"); }
         }
         return results;
     }
@@ -1113,7 +1121,9 @@ public static class QueryHelper
         // Group-by columns
         foreach (var gb in q.AggregationData.GroupBy)
         {
-            var expr = gb.StartsWith('@') ? gb[1..] : ResolveFieldExpr(gb);
+            var raw = gb.StartsWith('@') ? gb[1..] : gb;
+            var expr = ResolveFieldExpr(raw);
+            if (expr is null) continue;
             selectParts.Add($"{expr} AS {SanitizeAlias(gb)}");
         }
 
@@ -1130,7 +1140,9 @@ public static class QueryHelper
             {
                 var arg0 = reducer.Args[0];
                 if (arg0.StartsWith('@')) arg0 = arg0[1..];
-                fieldExpr = ResolveFieldExpr(arg0);
+                var resolved = ResolveFieldExpr(arg0);
+                if (resolved is null) continue;
+                fieldExpr = resolved;
 
                 // Type casting for numeric aggregates
                 if (funcName is "SUM" or "AVG")
@@ -1150,7 +1162,9 @@ public static class QueryHelper
         if (q.AggregationData.GroupBy.Count > 0)
         {
             var gbExprs = q.AggregationData.GroupBy
-                .Select(gb => gb.StartsWith('@') ? gb[1..] : ResolveFieldExpr(gb));
+                .Select(gb => gb.StartsWith('@') ? gb[1..] : gb)
+                .Select(ResolveFieldExpr)
+                .Where(e => e is not null);
             sql.Append($"GROUP BY {string.Join(", ", gbExprs)} ");
         }
 
@@ -1193,7 +1207,7 @@ public static class QueryHelper
     };
 
     // Resolves a field name (possibly dotted JSONB path) to a SQL expression.
-    private static string ResolveFieldExpr(string field)
+    private static string? ResolveFieldExpr(string field)
     {
         if (field.StartsWith("payload.body.", StringComparison.Ordinal))
             return BuildJsonbPath("payload", field["payload.".Length..]);
@@ -1202,8 +1216,11 @@ public static class QueryHelper
         if (field.Contains('.'))
         {
             var dot = field.IndexOf('.');
-            return BuildJsonbPath(field[..dot], field[(dot + 1)..]);
+            var col = field[..dot];
+            if (!SafeColumnIdent.IsMatch(col)) return null;
+            return BuildJsonbPath(col, field[(dot + 1)..]);
         }
+        if (!SafeColumnIdent.IsMatch(field)) return null;
         return field;
     }
 

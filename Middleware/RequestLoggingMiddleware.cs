@@ -100,10 +100,13 @@ public static class RequestLoggingMiddleware
             requestBody = ParseJsonOrRaw(bodyBytes);
         }
 
-        // --- intercept response body so we can mirror it into the log ---
+        // --- intercept response body so we can capture the first MaxBodyBytes
+        // for the log record, while writing through to the real stream. This
+        // avoids buffering the entire response in memory (which doubles RAM for
+        // large exports/CSV/binary payloads). ---
         var originalResponseBody = ctx.Response.Body;
-        using var responseBuffer = new MemoryStream();
-        ctx.Response.Body = responseBuffer;
+        using var captureTee = new TeeStream(originalResponseBody, MaxBodyBytes);
+        ctx.Response.Body = captureTee;
 
         var sw = Stopwatch.StartNew();
         Exception? captured = null;
@@ -111,17 +114,14 @@ public static class RequestLoggingMiddleware
         catch (Exception ex) { captured = ex; }
         sw.Stop();
 
-        // Copy buffered response back to the real stream so the client sees it.
-        responseBuffer.Position = 0;
-        await responseBuffer.CopyToAsync(originalResponseBody, ctx.RequestAborted);
         ctx.Response.Body = originalResponseBody;
 
         object? responseBody = new Dictionary<string, object?>();
         if (HasJsonContent(ctx.Response.ContentType))
         {
-            var bytes = responseBuffer.ToArray();
+            var bytes = captureTee.CapturedBytes;
             if (bytes.Length > 0)
-                responseBody = ParseJsonOrRaw(bytes.AsSpan(0, Math.Min(bytes.Length, MaxBodyBytes)).ToArray());
+                responseBody = ParseJsonOrRaw(bytes);
         }
 
         var status = ctx.Response.StatusCode;
@@ -252,5 +252,57 @@ public static class RequestLoggingMiddleware
                 : RedactBody(v);
         }
         return result;
+    }
+
+    // Writes through to the inner stream while capturing the first `capBytes`
+    // bytes in memory for log inspection. Once the cap is reached, subsequent
+    // writes go directly to the inner stream with zero copy overhead.
+    private sealed class TeeStream(Stream inner, int capBytes) : Stream
+    {
+        private readonly MemoryStream _capture = new(Math.Min(capBytes, 4096));
+
+        public byte[] CapturedBytes => _capture.ToArray();
+
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => inner.Length;
+        public override long Position { get => inner.Position; set => inner.Position = value; }
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            inner.Write(buffer, offset, count);
+            var remaining = capBytes - (int)_capture.Length;
+            if (remaining > 0)
+                _capture.Write(buffer, offset, Math.Min(count, remaining));
+        }
+
+        public override async Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken ct)
+        {
+            await inner.WriteAsync(buffer, offset, count, ct);
+            var remaining = capBytes - (int)_capture.Length;
+            if (remaining > 0)
+                _capture.Write(buffer, offset, Math.Min(count, remaining));
+        }
+
+        public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken ct = default)
+        {
+            await inner.WriteAsync(buffer, ct);
+            var remaining = capBytes - (int)_capture.Length;
+            if (remaining > 0)
+                _capture.Write(buffer.Span[..Math.Min(buffer.Length, remaining)]);
+        }
+
+        public override void Flush() => inner.Flush();
+        public override Task FlushAsync(CancellationToken ct) => inner.FlushAsync(ct);
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) _capture.Dispose();
+            base.Dispose(disposing);
+        }
     }
 }

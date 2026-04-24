@@ -286,11 +286,12 @@ switch (subcommand)
         var nlog = Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance;
         var refresher = new AuthzCacheRefresher();
         var entryRepo = new EntryRepository(dbInst);
+        var userRepo = new UserRepository(dbInst, refresher);
+        var accessRepo = new AccessRepository(dbInst, refresher, userRepo);
         var entryService = new EntryService(entryRepo,
             new AttachmentRepository(dbInst),
             new HistoryRepository(dbInst),
-            new PermissionService(new UserRepository(dbInst, refresher),
-                new AccessRepository(dbInst, refresher), refresher),
+            new PermissionService(userRepo, accessRepo, refresher),
             new PluginManager(Array.Empty<IHookPlugin>(), Array.Empty<IApiPlugin>(),
                 new SpaceRepository(dbInst), nlog.CreateLogger<PluginManager>()),
             new SchemaValidator(entryRepo, nlog.CreateLogger<SchemaValidator>()),
@@ -298,12 +299,11 @@ switch (subcommand)
             nlog.CreateLogger<EntryService>());
         var exportService = new ImportExportService(entryRepo,
             new AttachmentRepository(dbInst),
-            new UserRepository(dbInst, refresher),
-            new AccessRepository(dbInst, refresher),
+            userRepo,
+            accessRepo,
             new SpaceRepository(dbInst),
             new HistoryRepository(dbInst),
-            new PermissionService(new UserRepository(dbInst, refresher),
-                new AccessRepository(dbInst, refresher), refresher),
+            new PermissionService(userRepo, accessRepo, refresher),
             Microsoft.Extensions.Options.Options.Create(s),
             nlog.CreateLogger<ImportExportService>());
 
@@ -347,11 +347,12 @@ switch (subcommand)
         var nlog = Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance;
         var refresher = new AuthzCacheRefresher();
         var entryRepo = new EntryRepository(dbInst);
+        var userRepo = new UserRepository(dbInst, refresher);
+        var accessRepo = new AccessRepository(dbInst, refresher, userRepo);
         var entryService = new EntryService(entryRepo,
             new AttachmentRepository(dbInst),
             new HistoryRepository(dbInst),
-            new PermissionService(new UserRepository(dbInst, refresher),
-                new AccessRepository(dbInst, refresher), refresher),
+            new PermissionService(userRepo, accessRepo, refresher),
             new PluginManager(Array.Empty<IHookPlugin>(), Array.Empty<IApiPlugin>(),
                 new SpaceRepository(dbInst), nlog.CreateLogger<PluginManager>()),
             new SchemaValidator(entryRepo, nlog.CreateLogger<SchemaValidator>()),
@@ -359,12 +360,11 @@ switch (subcommand)
             nlog.CreateLogger<EntryService>());
         var importService = new ImportExportService(entryRepo,
             new AttachmentRepository(dbInst),
-            new UserRepository(dbInst, refresher),
-            new AccessRepository(dbInst, refresher),
+            userRepo,
+            accessRepo,
             new SpaceRepository(dbInst),
             new HistoryRepository(dbInst),
-            new PermissionService(new UserRepository(dbInst, refresher),
-                new AccessRepository(dbInst, refresher), refresher),
+            new PermissionService(userRepo, accessRepo, refresher),
             Microsoft.Extensions.Options.Options.Create(s),
             nlog.CreateLogger<ImportExportService>());
 
@@ -812,6 +812,14 @@ builder.Services.AddSingleton<InvitationRepository>();
 builder.Services.AddSingleton<HealthCheckRepository>();
 builder.Services.AddSingleton<SpaceRepository>();
 
+// Forwarded headers — configured here so the parameterless UseForwardedHeaders()
+// picks up XForwardedFor + XForwardedProto for correct client IP and scheme.
+builder.Services.Configure<Microsoft.AspNetCore.Builder.ForwardedHeadersOptions>(opts =>
+{
+    opts.ForwardedHeaders = Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedFor
+                          | Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedProto;
+});
+
 // Schema bootstrapper runs once on startup. AdminBootstrap MUST be registered AFTER
 // SchemaInitializer — IHostedServices run StartAsync sequentially in registration order.
 builder.Services.AddHostedService<SchemaInitializer>();
@@ -881,6 +889,7 @@ builder.Services.AddSingleton<Dmart.Auth.OAuth.AppleProvider>();
 builder.Services.AddSingleton<Dmart.Auth.OAuth.OAuthUserResolver>();
 builder.Services.AddSingleton<Dmart.Auth.OAuthCodeStore>();
 builder.Services.AddSingleton<Dmart.Auth.OAuthClientStore>();
+builder.Services.AddHostedService<Dmart.Auth.OAuthStoreSweeper>();
 builder.Services.AddDmartAuth(builder.Configuration);
 
 // Plugins
@@ -945,6 +954,15 @@ Dmart.Plugins.Native.NativePluginLoader.WireSubprocessShutdown(
         .CreateLogger("Microsoft.Hosting.Lifetime")
         .LogInformation("dmart {Version} on .NET {Runtime}", v, Environment.Version);
 }
+
+// Wire structured logging into static QueryHelper so it doesn't use Console.Error.
+Dmart.DataAdapters.Sql.QueryHelper.SetLogger(app.Services.GetRequiredService<ILoggerFactory>());
+
+// Forwarded headers — must be first so RemoteIpAddress, Scheme and Host
+// reflect the real client values behind any reverse proxy (Nginx, Traefik, ALB).
+// Without this, rate-limiter IP partitioning uses the proxy IP and cookie
+// Secure flags derive from the proxy→backend leg (usually plain HTTP).
+app.UseForwardedHeaders();
 
 // Exception handler
 app.Use(async (ctx, next) =>
@@ -1059,11 +1077,12 @@ app.MapOpenApi("/docs/openapi.json");
 app.MapGet("/docs", () => Results.Content("""
 <html>
 <head>
-    <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist/swagger-ui.css" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline' https://unpkg.com; script-src 'self' 'unsafe-inline' https://unpkg.com; img-src 'self' data:;" />
+    <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.18.2/swagger-ui.css" />
 </head>
 <body>
     <div id="swagger-ui"></div>
-    <script src="https://unpkg.com/swagger-ui-dist/swagger-ui-bundle.js"></script>
+    <script src="https://unpkg.com/swagger-ui-dist@5.18.2/swagger-ui-bundle.js"></script>
     <script>
         SwaggerUIBundle({ url: 'openapi.json', dom_id: '#swagger-ui' });
     </script>

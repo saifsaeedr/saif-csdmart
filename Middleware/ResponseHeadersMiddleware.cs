@@ -39,11 +39,13 @@ public static class ResponseHeadersMiddleware
 
     public static IApplicationBuilder UseDmartResponseHeaders(this IApplicationBuilder app)
     {
+        // Resolve once at setup — DmartSettings is singleton-scoped.
+        var settings = app.ApplicationServices.GetRequiredService<IOptions<DmartSettings>>().Value;
+        var allowlist = settings.ParseAllowedCorsOrigins();
+
         return app.Use(async (ctx, next) =>
         {
-            var settings = ctx.RequestServices.GetRequiredService<IOptions<DmartSettings>>().Value;
             var origin = ctx.Request.Headers.Origin.ToString();
-            var allowlist = settings.ParseAllowedCorsOrigins();
 
             // Register an OnStarting callback so the headers land right before
             // the response body is flushed. Writing them here would be lost if
@@ -78,6 +80,10 @@ public static class ResponseHeadersMiddleware
                         string.Equals(origin, defaultOrigin, StringComparison.Ordinal) ? origin : defaultOrigin;
                     headers["Access-Control-Allow-Credentials"] = "true";
                 }
+
+                // Vary: Origin ensures CDNs/proxies don't cache one origin's
+                // CORS headers and serve them to a different origin.
+                headers.Append("Vary", "Origin");
 
                 // --- Static CORS contract ---
                 headers["Access-Control-Allow-Headers"] = AllowHeaders;
