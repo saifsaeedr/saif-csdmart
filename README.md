@@ -260,6 +260,7 @@ Engineering reference for maintainers and contributors, with Mermaid
 architecture diagrams:
 
 - [docs/README.md](./docs/README.md) — navigation
+- [GLOSSARY.md](./GLOSSARY.md) — DMART-specific terms (Entry, Space, CXB, MCP, …)
 - [docs/architecture.md](./docs/architecture.md) — layers, request lifecycle, startup sequence
 - [docs/data-model.md](./docs/data-model.md) — ER diagram, wire format rules, repositories
 - [docs/permissions.md](./docs/permissions.md) — the permission walk, anonymous + world, ACL, conditions
