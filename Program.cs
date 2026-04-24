@@ -4,6 +4,7 @@ using Dmart.Api.Public;
 using Dmart.Api.Qr;
 using Dmart.Api.User;
 using Dmart.Auth;
+using Dmart.Cli;
 using Dmart.Config;
 using Dmart.DataAdapters.Sql;
 using Dmart.Middleware;
@@ -205,15 +206,7 @@ switch (subcommand)
         if (string.IsNullOrEmpty(password) || password.Length < 8) { Console.Error.WriteLine("Password must be >= 8 chars"); Environment.ExitCode = 1; return; }
 
         // Build minimal DI to get Db + UserRepository + PasswordHasher
-        var cfgBuilder = new ConfigurationBuilder();
-
-        if (dotenvPath is not null) cfgBuilder.AddInMemoryCollection(dotenvValues);
-        cfgBuilder.AddEnvironmentVariables();
-        var cfg = cfgBuilder.Build();
-        var s = new DmartSettings();
-        cfg.GetSection("Dmart").Bind(s);
-        var dbInst = new Db(Microsoft.Extensions.Options.Options.Create(s));
-        if (!dbInst.IsConfigured) { Console.Error.WriteLine("Database not configured"); Environment.ExitCode = 1; return; }
+        var (s, dbInst) = CliBootstrap.BuildOrExit(dotenvPath, dotenvValues);
         var hasher = new PasswordHasher();
         var hashed = hasher.Hash(password);
         await using var conn = await dbInst.OpenAsync();
@@ -242,15 +235,7 @@ switch (subcommand)
     {
         // Run health checks — mirrors Python's check subcommand.
         var space = serverArgs.Length > 0 ? serverArgs[0] : null;
-        var cfgBuilder = new ConfigurationBuilder();
-
-        if (dotenvPath is not null) cfgBuilder.AddInMemoryCollection(dotenvValues);
-        cfgBuilder.AddEnvironmentVariables();
-        var cfg = cfgBuilder.Build();
-        var s = new DmartSettings();
-        cfg.GetSection("Dmart").Bind(s);
-        var dbInst = new Db(Microsoft.Extensions.Options.Options.Create(s));
-        if (!dbInst.IsConfigured) { Console.Error.WriteLine("Database not configured"); Environment.ExitCode = 1; return; }
+        var (_, dbInst) = CliBootstrap.BuildOrExit(dotenvPath, dotenvValues);
         var healthRepo = new HealthCheckRepository(dbInst);
         var spacesToCheck = new List<string>();
         if (!string.IsNullOrEmpty(space))
@@ -296,15 +281,7 @@ switch (subcommand)
         if (string.IsNullOrEmpty(output)) { Console.Error.WriteLine("Usage: dmart export [space_name] --output file.zip"); Environment.ExitCode = 1; return; }
         if (!output.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) output += ".zip";
 
-        var cfgBuilder = new ConfigurationBuilder();
-
-        if (dotenvPath is not null) cfgBuilder.AddInMemoryCollection(dotenvValues);
-        cfgBuilder.AddEnvironmentVariables();
-        var cfg = cfgBuilder.Build();
-        var s = new DmartSettings();
-        cfg.GetSection("Dmart").Bind(s);
-        var dbInst = new Db(Microsoft.Extensions.Options.Options.Create(s));
-        if (!dbInst.IsConfigured) { Console.Error.WriteLine("Database not configured"); Environment.ExitCode = 1; return; }
+        var (s, dbInst) = CliBootstrap.BuildOrExit(dotenvPath, dotenvValues);
 
         var nlog = Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance;
         var refresher = new AuthzCacheRefresher(dbInst, nlog.CreateLogger<AuthzCacheRefresher>());
@@ -365,14 +342,7 @@ switch (subcommand)
             return;
         }
 
-        var cfgBuilder = new ConfigurationBuilder();
-        if (dotenvPath is not null) cfgBuilder.AddInMemoryCollection(dotenvValues);
-        cfgBuilder.AddEnvironmentVariables();
-        var cfg = cfgBuilder.Build();
-        var s = new DmartSettings();
-        cfg.GetSection("Dmart").Bind(s);
-        var dbInst = new Db(Microsoft.Extensions.Options.Options.Create(s));
-        if (!dbInst.IsConfigured) { Console.Error.WriteLine("Database not configured"); Environment.ExitCode = 1; return; }
+        var (s, dbInst) = CliBootstrap.BuildOrExit(dotenvPath, dotenvValues);
 
         var nlog = Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance;
         var refresher = new AuthzCacheRefresher(dbInst, nlog.CreateLogger<AuthzCacheRefresher>());
@@ -519,19 +489,8 @@ switch (subcommand)
         //   -q, --quiet    Suppress per-statement output (show summary only)
         var quiet = serverArgs.Contains("-q") || serverArgs.Contains("--quiet");
 
-        var cfgBuilder = new ConfigurationBuilder();
-        if (dotenvPath is not null) cfgBuilder.AddInMemoryCollection(dotenvValues);
-        cfgBuilder.AddEnvironmentVariables();
-        var cfg = cfgBuilder.Build();
-        var s = new DmartSettings();
-        cfg.GetSection("Dmart").Bind(s);
-        var dbInst = new Db(Microsoft.Extensions.Options.Options.Create(s));
-        if (!dbInst.IsConfigured)
-        {
-            Console.Error.WriteLine("Error: Database not configured. Set DATABASE_HOST/PORT/USERNAME/PASSWORD/NAME in config.env.");
-            Environment.ExitCode = 1;
-            return;
-        }
+        var (s, dbInst) = CliBootstrap.BuildOrExit(dotenvPath, dotenvValues,
+            "Error: Database not configured. Set DATABASE_HOST/PORT/USERNAME/PASSWORD/NAME in config.env.");
 
         try
         {
@@ -616,19 +575,8 @@ switch (subcommand)
             else if (!a.StartsWith('-')) spaceFilter = a;
         }
 
-        var cfgBuilder = new ConfigurationBuilder();
-        if (dotenvPath is not null) cfgBuilder.AddInMemoryCollection(dotenvValues);
-        cfgBuilder.AddEnvironmentVariables();
-        var cfg = cfgBuilder.Build();
-        var s = new DmartSettings();
-        cfg.GetSection("Dmart").Bind(s);
-        var dbInst = new Db(Microsoft.Extensions.Options.Options.Create(s));
-        if (!dbInst.IsConfigured)
-        {
-            Console.Error.WriteLine("Error: Database not configured. Set DATABASE_* in config.env.");
-            Environment.ExitCode = 1;
-            return;
-        }
+        var (s, dbInst) = CliBootstrap.BuildOrExit(dotenvPath, dotenvValues,
+            "Error: Database not configured. Set DATABASE_* in config.env.");
 
         Console.WriteLine($"{(dryRun ? "[dry-run] " : "")}Scanning {s.DatabaseName}@{s.DatabaseHost}:{s.DatabasePort} for rows with empty query_policies"
             + (spaceFilter is null ? " across all spaces..." : $" in space '{spaceFilter}'..."));
