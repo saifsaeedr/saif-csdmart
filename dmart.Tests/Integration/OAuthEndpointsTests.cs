@@ -97,12 +97,19 @@ public sealed class OAuthEndpointsTests : IClassFixture<DmartFactory>
     }
 
     [FactIfPg]
-    public async Task Resolver_EmailMatch_PromotesExisting()
+    public async Task Resolver_EmailMatch_CreatesSeparateAccount_NoSilentMerge()
     {
+        // Previously: if a local user already had the email the OAuth provider
+        // supplied, the resolver would attach the provider id to that account.
+        // That was a silent pre-auth account-takeover primitive — anyone able
+        // to register a Google/Facebook account with the victim's email would
+        // take over the victim's local dmart account on first OAuth login.
+        // Now: email is NOT a merge key. The two accounts stay separate;
+        // linking has to be a deliberate, authenticated ceremony.
         var resolver = _factory.Services.GetRequiredService<OAuthUserResolver>();
         var users = _factory.Services.GetRequiredService<UserRepository>();
 
-        // Seed a user with a known email but no google_id.
+        // Seed a local user with a known email but no google_id.
         var suffix = Guid.NewGuid().ToString("N")[..10];
         var shortname = $"oauth_pre_{suffix}";
         var email = $"{shortname}@test.local";
@@ -122,21 +129,27 @@ public sealed class OAuthEndpointsTests : IClassFixture<DmartFactory>
             Roles = [], Groups = [],
         });
 
+        var providerId = Guid.NewGuid().ToString("N")[..12];
+        var oauthShortname = $"google_{providerId}";
         try
         {
-            var providerId = Guid.NewGuid().ToString("N")[..12];
             var info = new OAuthUserInfo("google", providerId, email, "A", "B", null);
             var resolved = await resolver.ResolveAsync(info);
 
-            // Kept the original shortname (we don't rename people).
-            resolved.Shortname.ShouldBe(shortname);
-            // Promoted with the google id.
+            // New account — shortname keyed on the provider id.
+            resolved.Shortname.ShouldBe(oauthShortname);
             resolved.GoogleId.ShouldBe(providerId);
             resolved.IsEmailVerified.ShouldBeTrue();
+
+            // Pre-existing local user is untouched — no google_id attached.
+            var preExisting = await users.GetByShortnameAsync(shortname);
+            preExisting.ShouldNotBeNull();
+            preExisting!.GoogleId.ShouldBeNull();
         }
         finally
         {
             try { await users.DeleteAsync(shortname); } catch { }
+            try { await users.DeleteAsync(oauthShortname); } catch { }
         }
     }
 }
