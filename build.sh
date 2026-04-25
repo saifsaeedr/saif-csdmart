@@ -2,8 +2,10 @@
 set -e
 
 # Collect git metadata — baked into the binary via InformationalVersion.
-# `git describe --tags` already encodes the tag and (when past it) the short
-# SHA in one string: "v0.8.11" on an exact tag, "v0.8.11-1-gdc7f250" past it.
+# `git describe --tags --long` always emits "<tag>-<n>-g<sha>" — even when
+# HEAD is exactly on the tag (n=0). Without --long, `git describe` collapses
+# to just the tag name on tagged commits and the short SHA disappears from
+# `dmart -v` output for release builds.
 BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
 # actions/checkout lands on a detached HEAD for tag/release builds, so a raw
 # `rev-parse --abbrev-ref` returns the literal string "HEAD". Prefer the
@@ -12,7 +14,7 @@ BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
 if [ "$BRANCH" = "HEAD" ] && [ -n "$GITHUB_REF_NAME" ]; then
   BRANCH="$GITHUB_REF_NAME"
 fi
-DESCRIBE=$(git describe --tags --always 2>/dev/null || echo "0.1.0")
+DESCRIBE=$(git describe --tags --always --long 2>/dev/null || echo "0.1.0")
 VERSION_DATE=$(git show --pretty=format:%ad --date=iso -q 2>/dev/null | head -1 || echo "")
 INFORMATIONAL_VERSION="${DESCRIBE} branch=${BRANCH} date=${VERSION_DATE}"
 echo "Version: $INFORMATIONAL_VERSION"

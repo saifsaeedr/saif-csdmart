@@ -306,10 +306,11 @@ jobs:
       - name: Publish AOT win-x64
         shell: pwsh
         run: |
-          # Mirror build.sh's format: "describe branch=X date=Y". `git describe`
-          # already embeds the SHA when past a tag, so there's no separate
-          # commit field. fetch-depth: 0 above guarantees tag history.
-          $describe = (git describe --tags --always 2>$null).Trim()
+          # Mirror build.sh's format: "describe branch=X date=Y". --long
+          # forces `git describe` to always emit "<tag>-<n>-g<sha>" — without
+          # it, an exact-tag commit collapses to just the tag and the short
+          # SHA goes missing. fetch-depth: 0 above guarantees tag history.
+          $describe = (git describe --tags --always --long 2>$null).Trim()
           if (-not $describe) { $describe = "v${{ steps.version.outputs.version }}" }
           $date = (git show --pretty=format:%ad --date=short -q 2>$null).Trim()
           if (-not $date) { $date = Get-Date -Format yyyy-MM-dd }
@@ -411,8 +412,10 @@ jobs:
       - name: Build all-in-one container image
         run: |
           # Pass git metadata explicitly — .dockerignore excludes .git/, so
-          # the csproj can't derive these inside the build stage.
-          GIT_DESCRIBE=$(git describe --tags --always)
+          # the csproj can't derive these inside the build stage. --long
+          # forces "<tag>-<n>-g<sha>" so the SHA stays in `dmart -v` even
+          # for builds cut exactly on a tag.
+          GIT_DESCRIBE=$(git describe --tags --always --long)
           GIT_DATE=$(git show --pretty=format:%cs -q HEAD)
           podman build \
             -t ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }} \
