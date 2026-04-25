@@ -124,8 +124,19 @@ public static class RequestLoggingMiddleware
                 responseBody = ParseJsonOrRaw(bytes);
         }
 
+        // Client-disconnect = the captured exception is a cancellation AND
+        // RequestAborted has fired. Same heuristic WebSocketHandler and
+        // McpEndpoint use for streaming endpoints; extended here to unary HTTP.
+        // Treat as a benign info event: drop the `exception` decoration, mark
+        // `client_aborted: true`, and don't re-throw to the global exception
+        // handler (the client is gone — writing a 500 into a dead connection
+        // just generates a second misleading ERROR line).
+        var clientAborted = captured is OperationCanceledException
+            && ctx.RequestAborted.IsCancellationRequested;
+
         var status = ctx.Response.StatusCode;
-        var level = status >= 500 ? LogLevel.Error
+        var level = clientAborted ? LogLevel.Information
+                  : status >= 500 ? LogLevel.Error
                   : status >= 400 ? LogLevel.Warning
                   : LogLevel.Information;
         var user = ctx.ActorOrAnonymous();
@@ -165,7 +176,11 @@ public static class RequestLoggingMiddleware
             ["process"] = Environment.ProcessId,
         };
 
-        if (captured is not null)
+        if (clientAborted)
+        {
+            ((Dictionary<string, object?>)record["props"]!)["client_aborted"] = true;
+        }
+        else if (captured is not null)
         {
             ((Dictionary<string, object?>)record["props"]!)["exception"] =
                 $"{captured.GetType().FullName}: {captured.Message}";
@@ -173,7 +188,7 @@ public static class RequestLoggingMiddleware
 
         sink.WriteAccessRecord(record);
 
-        if (captured is not null) throw captured;
+        if (captured is not null && !clientAborted) throw captured;
     }
 
     private static bool HasJsonContent(string? contentType) =>
