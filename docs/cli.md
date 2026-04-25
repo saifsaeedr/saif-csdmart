@@ -157,8 +157,11 @@ export --space management --subpath /users --type folder --limit 100 --out ./use
 export csv --space zainmart --subpath /products --type content --limit 1000000 --out ./products.csv
 export csv --all --space zainmart --out ./everything.csv
 
+# Round-trip a folder + its contents in one zip via --include-self
+export --space management --subpath /rt_test --include-self --out ./rt_test.zip
+
 # ZIP import (a previous export, or any zip following dmart's layout)
-import ./users.zip
+import ./rt_test.zip
 ```
 
 - Both `export` and `export csv` accept either a `<query.json>` path **or**
@@ -166,6 +169,14 @@ import ./users.zip
   / --to / --search / --all / --out`. `--all` mirrors the catalog modal's
   "download everything" toggle: limit becomes 1M and date filters are
   cleared.
+- `--include-self` (ZIP only) runs **two passes** under the hood — one for
+  `--subpath` itself (the parent folder meta) and one for everything inside
+  it — and merges the results into a single zip. Without this flag,
+  `--subpath foo` exports entries *under* foo but not foo itself, and
+  `import` would silently skip the folder. End-to-end round-trip
+  (export → delete → import) preserves entries and attachments
+  byte-for-byte (including multilingual displayname/description and media
+  bytes).
 - Default output path when `--out` is omitted: `~/Downloads/<space>.zip` (or
   `.csv`).
 - `import` posts the zip to `/managed/import` — same endpoint cxb's import

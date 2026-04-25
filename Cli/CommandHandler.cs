@@ -19,7 +19,8 @@ public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
         ["pwd"]      = ("pwd",                             "Print current space:subpath."),
         ["switch"]   = ("switch <space>",                  "Switch to space (prefix match)."),
         ["mkdir"]    = ("mkdir <name>",                    "Create folder under current subpath."),
-        ["create"]   = ("create <type|space> <name>",      "Create entry of <type>; or 'create space <name>'."),
+        ["create"]   = ("create <name> <type> | create space <name>",
+                                                            "Create entry of <type> at current subpath; or 'create space <name>'."),
         ["rm"]       = ("rm [--dry-run] [-f] <name|*>",    "Delete entry; --dry-run prints; -f skips confirm."),
         ["move"]     = ("move <type> <src> <dst>",         "Move resource."),
         ["mv"]       = ("mv <type> <src> <dst>",           "Alias for move."),
@@ -35,8 +36,8 @@ public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
         ["request"]  = ("request <json_file>",             "POST raw managed/request JSON."),
         ["progress"] = ("progress <sub> <sn> <action>",    "Progress a ticket."),
         ["import"]   = ("import <zip_file>",               "Import a ZIP archive."),
-        ["export"]   = ("export [csv] (<query.json> | --space S [--subpath /] [--type T] [--limit N] [--from D] [--to D] [--all] [--out P])",
-                                                            "Export to ZIP (or CSV) — query from file or from shortcut flags."),
+        ["export"]   = ("export [csv] (<query.json> | --space S [--subpath P] [--type T] [--limit N] [--from D] [--to D] [--all] [--include-self] [--out P])",
+                                                            "Export to ZIP (or CSV) — query from file or from shortcut flags. --include-self also exports the parent folder of --subpath so a folder + its contents round-trip in one zip."),
         ["help"]     = ("help [command]",                  "Show this help, or details for one command."),
         ["exit"]     = ("exit | q | quit | Ctrl+D",        "Exit the CLI."),
     };
@@ -85,6 +86,11 @@ public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
 
             case "mkdir" when parts.Length >= 2:
                 PrintJson(await dmart.CreateFolderAsync(parts[1]));
+                // Refresh the cached listing so a follow-up `cd <newdir>`
+                // can find the just-created folder. Without this, the next
+                // `cd` walks the stale CurrentEntries from the prior ls
+                // and silently fails with "Folder not found".
+                await dmart.ListAsync();
                 break;
 
             case "create" when parts.Length >= 3:
@@ -702,18 +708,24 @@ public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
         if (rest.Length == 0)
         {
             LastCommandFailed = true;
-            CliTheme.Line($"{CliTheme.Wrap(CliTheme.Error, "Usage:")} export [csv] <query.json> | export [csv] --space S [--subpath /sub] [--type T] [--limit N] [--from DATE] [--to DATE] [--all] [--out PATH]");
+            CliTheme.Line($"{CliTheme.Wrap(CliTheme.Error, "Usage:")} export [csv] <query.json> | export [csv] --space S [--subpath /sub] [--type T] [--limit N] [--from DATE] [--to DATE] [--all] [--include-self] [--out PATH]");
             return;
         }
 
         string queryJson;
         string? outPath = null;
+        var includeSelf = false;
+        var exportSpace = dmart.CurrentSpace;
+        var exportSubpath = "/";
         if (rest[0].StartsWith("--"))
         {
-            var (json, op) = BuildExportQueryJson(rest);
+            var (json, op, flags) = BuildExportQueryJson(rest);
             if (json is null) { LastCommandFailed = true; return; }
             queryJson = json;
             outPath = op;
+            includeSelf = flags.IncludeSelf;
+            exportSpace = flags.Space;
+            exportSubpath = flags.Subpath;
         }
         else
         {
@@ -725,22 +737,144 @@ public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
                 return;
             }
             queryJson = await File.ReadAllTextAsync(rest[0]);
-            // A trailing --out can still pin the output path even with a file query.
-            for (var i = 1; i < rest.Length - 1; i++)
-                if (rest[i] == "--out") { outPath = rest[i + 1]; break; }
+            // A trailing --out / --include-self can still apply on top of a file query.
+            for (var i = 1; i < rest.Length; i++)
+            {
+                if (rest[i] == "--out" && i + 1 < rest.Length) outPath = rest[i + 1];
+                if (rest[i] == "--include-self") includeSelf = true;
+            }
         }
 
         var label = isCsv ? "Exporting CSV…" : "Exporting…";
-        var msg = isCsv
-            ? await Spinner(label, () => dmart.ExportCsvAsync(queryJson, outPath))
-            : await Spinner(label, () => dmart.ExportAsync(queryJson, outPath));
-        CliTheme.Plain(msg);
+
+        // CSV doesn't compose under --include-self (the merge logic targets
+        // zip archives). Fail loudly rather than silently dropping the flag.
+        if (isCsv && includeSelf)
+        {
+            LastCommandFailed = true;
+            CliTheme.Line($"{CliTheme.Wrap(CliTheme.Error, "--include-self is only meaningful for ZIP export, not CSV")}");
+            return;
+        }
+
+        // Plain path — single fetch, single write.
+        var subClean = exportSubpath.Trim('/');
+        if (!includeSelf || string.IsNullOrEmpty(subClean))
+        {
+            var msg = isCsv
+                ? await Spinner(label, () => dmart.ExportCsvAsync(queryJson, outPath))
+                : await Spinner(label, () => dmart.ExportAsync(queryJson, outPath));
+            CliTheme.Plain(msg);
+            return;
+        }
+
+        // Two-pass: fetch parent folder meta + subtree, merge zips.
+        var lastSlash = subClean.LastIndexOf('/');
+        var leaf = lastSlash < 0 ? subClean : subClean[(lastSlash + 1)..];
+        var parent = lastSlash < 0 ? "/" : subClean[..lastSlash];
+        var folderQuery = BuildFolderQueryJson(exportSpace, parent, leaf);
+
+        var (subtreeBytes, parentBytes) = await Spinner(label, async () => (
+            await dmart.ExportToBytesAsync(queryJson),
+            await dmart.ExportToBytesAsync(folderQuery)
+        ));
+        if (subtreeBytes is null || parentBytes is null)
+        {
+            LastCommandFailed = true;
+            CliTheme.Line($"{CliTheme.Wrap(CliTheme.Error, "Export failed")} (one of the two passes returned a non-2xx)");
+            return;
+        }
+        // The parent query at subpath=/ in the management space pulls every
+        // user / role / permission alongside the folder meta we actually
+        // need (server-side export branch — see ImportExportService). Strip
+        // those down to just the leaf folder's tree + the space meta so the
+        // merged zip stays focused on what --include-self promised.
+        var leafPrefix = $"{exportSpace}/{subClean}/";
+        var parentBytesTrimmed = FilterZip(parentBytes, path =>
+            path == $"{exportSpace}/.dm/meta.space.json" || path.StartsWith(leafPrefix, StringComparison.Ordinal));
+        var merged = MergeZips(parentBytesTrimmed, subtreeBytes);
+        var msg2 = await dmart.WriteExportBytesAsync(merged, outPath, $"{exportSpace}.zip");
+        CliTheme.Plain(msg2);
     }
+
+    // Return a copy of `src` containing only entries whose FullName matches
+    // `keep`. Used to drop unrelated rows from the --include-self parent
+    // pass without touching the subtree zip.
+    private static byte[] FilterZip(byte[] src, Func<string, bool> keep)
+    {
+        using var output = new MemoryStream();
+        using (var outZip = new System.IO.Compression.ZipArchive(output,
+                   System.IO.Compression.ZipArchiveMode.Create, leaveOpen: true))
+        {
+            using var ms = new MemoryStream(src);
+            using var inZip = new System.IO.Compression.ZipArchive(ms,
+                System.IO.Compression.ZipArchiveMode.Read);
+            foreach (var entry in inZip.Entries)
+            {
+                if (string.IsNullOrEmpty(entry.FullName) || entry.FullName.EndsWith("/")) continue;
+                if (!keep(entry.FullName)) continue;
+                var newEntry = outZip.CreateEntry(entry.FullName,
+                    System.IO.Compression.CompressionLevel.Optimal);
+                using var fromStream = entry.Open();
+                using var toStream = newEntry.Open();
+                fromStream.CopyTo(toStream);
+            }
+        }
+        return output.ToArray();
+    }
+
+    // Build a query that grabs just the named entry sitting at parentSubpath.
+    // Used by --include-self to fetch the folder meta that the main subtree
+    // query (subpath=foo) wouldn't include because foo itself lives one
+    // level up.
+    private static string BuildFolderQueryJson(string space, string parentSubpath, string shortname)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.Append("{\"type\":\"search\"");
+        sb.Append($",\"space_name\":\"{JsonStr(space)}\"");
+        sb.Append($",\"subpath\":\"{JsonStr(parentSubpath)}\"");
+        sb.Append($",\"filter_shortnames\":[\"{JsonStr(shortname)}\"]");
+        sb.Append(",\"limit\":10,\"retrieve_json_payload\":true}");
+        return sb.ToString();
+    }
+
+    // Merge two zip archives byte-for-byte. The first wins on duplicates
+    // (typically `<space>/.dm/meta.space.json` shows up in both — we want
+    // exactly one copy). Output is a fresh archive in memory.
+    private static byte[] MergeZips(byte[] first, byte[] second)
+    {
+        using var output = new MemoryStream();
+        using (var outZip = new System.IO.Compression.ZipArchive(output,
+                   System.IO.Compression.ZipArchiveMode.Create, leaveOpen: true))
+        {
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var src in new[] { first, second })
+            {
+                using var ms = new MemoryStream(src);
+                using var inZip = new System.IO.Compression.ZipArchive(ms,
+                    System.IO.Compression.ZipArchiveMode.Read);
+                foreach (var entry in inZip.Entries)
+                {
+                    if (string.IsNullOrEmpty(entry.FullName) || entry.FullName.EndsWith("/")) continue;
+                    if (!seen.Add(entry.FullName)) continue;
+                    var newEntry = outZip.CreateEntry(entry.FullName,
+                        System.IO.Compression.CompressionLevel.Optimal);
+                    using var fromStream = entry.Open();
+                    using var toStream = newEntry.Open();
+                    fromStream.CopyTo(toStream);
+                }
+            }
+        }
+        return output.ToArray();
+    }
+
+    internal record struct ExportFlags(string Space, string Subpath, bool IncludeSelf);
 
     // Synthesize the JSON body for /managed/export and /managed/csv from
     // CLI flags. Defaults match the common case: search across the current
-    // space at /, recursive, 10k records.
-    private (string? Json, string? OutPath) BuildExportQueryJson(string[] args)
+    // space at /, recursive, 10k records. Returns the parsed Space/Subpath/
+    // IncludeSelf alongside the JSON so the caller can decide whether the
+    // two-pass include-self path applies.
+    private (string? Json, string? OutPath, ExportFlags Flags) BuildExportQueryJson(string[] args)
     {
         var space = dmart.CurrentSpace;
         var subpath = "/";
@@ -748,6 +882,7 @@ public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
         var limit = 10_000;
         string? from = null, to = null;
         var all = false;
+        var includeSelf = false;
         string? outPath = null;
         string? search = null;
 
@@ -769,9 +904,12 @@ public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
                     all = true;
                     limit = 1_000_000;  // Mirrors catalog's downloadAll behavior.
                     break;
+                case "--include-self":
+                    includeSelf = true;
+                    break;
                 default:
                     CliTheme.Line($"{CliTheme.Wrap(CliTheme.Error, "Unknown export flag:")} {CliTheme.Escape(args[i])}");
-                    return (null, null);
+                    return (null, null, default);
             }
         }
 
@@ -789,7 +927,7 @@ public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
         if (!all && from is not null) sb.Append($",\"from_date\":\"{JsonStr(from)}\"");
         if (!all && to is not null)   sb.Append($",\"to_date\":\"{JsonStr(to)}\"");
         sb.Append('}');
-        return (sb.ToString(), outPath);
+        return (sb.ToString(), outPath, new ExportFlags(space, subpath, includeSelf));
     }
 
     // ---- whoami / version ----

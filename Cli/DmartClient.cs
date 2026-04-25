@@ -240,6 +240,25 @@ public sealed class DmartClient : IDisposable
     public async Task<string> ExportCsvAsync(string queryJson, string? outPath = null)
         => await DownloadAsync("/managed/csv", queryJson, outPath, defaultName: $"{CurrentSpace}.csv");
 
+    // Raw byte fetch — used by --include-self to merge two zip responses
+    // into one before writing to disk. Returns null on a non-2xx (caller
+    // surfaces the error).
+    public async Task<byte[]?> ExportToBytesAsync(string queryJson, string endpoint = "/managed/export")
+    {
+        var resp = await SendWithRefreshAsync(() => _http.PostAsync(endpoint, Json(queryJson)));
+        if (!resp.IsSuccessStatusCode) return null;
+        return await resp.Content.ReadAsByteArrayAsync();
+    }
+
+    // Write pre-computed bytes (typically a merged zip) to disk using the
+    // same default-path semantics as DownloadAsync.
+    public async Task<string> WriteExportBytesAsync(byte[] bytes, string? outPath, string defaultName)
+    {
+        outPath = ResolveOutPath(outPath, defaultName);
+        await File.WriteAllBytesAsync(outPath, bytes);
+        return $"Exported to {outPath}";
+    }
+
     private async Task<string> DownloadAsync(string endpoint, string queryJson, string? outPath, string defaultName)
     {
         var resp = await SendWithRefreshAsync(() => _http.PostAsync(endpoint, Json(queryJson)));
@@ -248,20 +267,23 @@ public sealed class DmartClient : IDisposable
             var err = await ParseAsync(resp);
             return err.ToString();
         }
+        outPath = ResolveOutPath(outPath, defaultName);
+        await using var outFile = File.Create(outPath);
+        await resp.Content.CopyToAsync(outFile);
+        return $"Exported to {outPath}";
+    }
+
+    private static string ResolveOutPath(string? outPath, string defaultName)
+    {
         if (outPath is null)
         {
             var downloads = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
             Directory.CreateDirectory(downloads);
-            outPath = Path.Combine(downloads, defaultName);
+            return Path.Combine(downloads, defaultName);
         }
-        else
-        {
-            var dir = Path.GetDirectoryName(outPath);
-            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-        }
-        await using var outFile = File.Create(outPath);
-        await resp.Content.CopyToAsync(outFile);
-        return $"Exported to {outPath}";
+        var dir = Path.GetDirectoryName(outPath);
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+        return outPath;
     }
 
     // ---- Query ----
