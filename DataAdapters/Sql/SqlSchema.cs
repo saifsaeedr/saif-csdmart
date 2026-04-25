@@ -350,6 +350,11 @@ public static class SqlSchema
         ON roles USING GIN (permissions jsonb_path_ops);
     CREATE INDEX IF NOT EXISTS idx_entries_schema_shortname
         ON entries ((payload->>'schema_shortname'));
+    -- Slug is the canonical short identifier for entries (used by
+    -- /public/query @slug:<value> and /entry/byslug). Without a btree
+    -- here, a public slug lookup degrades to a sequential scan over the
+    -- entries narrowed only by space_name+subpath+resource_type.
+    CREATE INDEX IF NOT EXISTS idx_entries_slug ON entries (slug);
 
     CREATE INDEX IF NOT EXISTS idx_entries_query_policies_gin       ON entries USING GIN (query_policies);
     CREATE INDEX IF NOT EXISTS idx_users_query_policies_gin         ON users USING GIN (query_policies);

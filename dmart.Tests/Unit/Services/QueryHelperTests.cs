@@ -588,8 +588,21 @@ public class QueryHelperTests
     [Fact]
     public void Search_Direct_Column_Exact_Match()
     {
-        // Non-boolean, non-array column → ILIKE by default
+        // Non-boolean, non-array column with a plain value → exact `=`,
+        // so the column's btree (e.g. the entries unique key on shortname,
+        // or idx_entries_slug) actually fires.
         var where = BuildSearch("@shortname:myentry");
+        where.ShouldContain("shortname::text =");
+        where.ShouldNotContain("ILIKE");
+    }
+
+    [Fact]
+    public void Search_Direct_Column_Wildcard_Falls_Back_To_ILIKE()
+    {
+        // Explicit `*` in the value → glob matching. `*` is translated to
+        // `%` so the user can do prefix/suffix searches the index can
+        // still partially serve (`abc%` is sargable on a btree).
+        var where = BuildSearch("@shortname:web*");
         where.ShouldContain("shortname::text ILIKE");
     }
 

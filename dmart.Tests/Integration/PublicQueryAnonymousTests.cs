@@ -122,6 +122,10 @@ public sealed class PublicQueryAnonymousTests : IClassFixture<DmartFactory>
                 SortType = SortType.Ascending,
                 Limit = 10,
                 RetrieveJsonPayload = true,
+                // /public/query defaults retrieve_total to false (skip the
+                // parallel COUNT for anon traffic). This test pins the
+                // total assertion below, so opt back in.
+                RetrieveTotal = true,
             };
             var resp = await client.PostAsJsonAsync("/public/query", reqBody, DmartJsonContext.Default.Query);
             resp.StatusCode.ShouldBe(HttpStatusCode.OK);

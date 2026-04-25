@@ -810,9 +810,20 @@ public static class QueryHelper
             }
             else
             {
-                // Default: exact match for non-payload text columns
-                args.Add(new() { Value = $"%{value}%" });
-                conditions.Add($"{fieldExpr} ILIKE ${args.Count}");
+                // Default: exact equality so a plain `@slug:abc123` can use
+                // a btree index. If the user puts `*` in the value, treat it
+                // as a glob: each `*` becomes `%` and we fall back to ILIKE
+                // (still index-friendly for prefix matches like `abc*`).
+                if (value.Contains('*'))
+                {
+                    args.Add(new() { Value = value.Replace('*', '%') });
+                    conditions.Add($"{fieldExpr} ILIKE ${args.Count}");
+                }
+                else
+                {
+                    args.Add(new() { Value = value });
+                    conditions.Add($"{fieldExpr} = ${args.Count}");
+                }
             }
         }
         return JoinConditions(conditions, data.Operation, data.Negative);

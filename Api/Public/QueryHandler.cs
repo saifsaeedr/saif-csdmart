@@ -29,6 +29,15 @@ public static class QueryHandler
                 // visible. We pass the identity explicitly so QueryService
                 // builds row-level query_policies for anonymous — null would
                 // skip the ACL filter entirely (internal-unrestricted path).
+                // Public traffic skews read-heavy and most callers don't
+                // use the `total` for pagination. The COUNT(*) runs in
+                // parallel with the page query (QueryService.cs:354) and
+                // doubles the DB load on every public request. Default to
+                // false here so the count only fires when the caller asks
+                // for it explicitly. Authenticated /managed/query keeps
+                // the original null→true default.
+                if (q is { RetrieveTotal: null })
+                    q = q with { RetrieveTotal = false };
                 resp = q is null
                     ? Response.Fail(InternalErrorCode.INVALID_DATA, "empty body", ErrorTypes.Request)
                     : await svc.ExecuteAsync(q, actor: "anonymous", ct);
@@ -59,6 +68,9 @@ public static class QueryHandler
                 Limit = limit ?? 10,
                 Offset = offset ?? 0,
                 Search = search,
+                // Same rationale as POST /public/query above — skip the
+                // parallel COUNT by default; URL params can't request it.
+                RetrieveTotal = false,
             };
             return await svc.ExecuteAsync(q, actor: null, ct);
         });
