@@ -6,8 +6,42 @@ namespace Dmart.Cli;
 // Mirrors Python cli.py's action() function — dispatches user commands.
 public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
 {
+    // True when the script driver wants the next non-2xx to abort the run.
+    public bool StrictMode { get; set; }
+    // True after a command saw a non-success response — surfaced to the script
+    // driver so a `--strict` run can exit with the right code.
+    public bool LastCommandFailed { get; private set; }
+
+    private static readonly Dictionary<string, (string Usage, string Summary)> CommandHelp = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["ls"]       = ("ls [path] [page]",                "List entries under current subpath."),
+        ["cd"]       = ("cd <folder | .. | @space[/sub]>", "Enter folder; .. goes up; @space switches space."),
+        ["pwd"]      = ("pwd",                             "Print current space:subpath."),
+        ["switch"]   = ("switch <space>",                  "Switch to space (prefix match)."),
+        ["mkdir"]    = ("mkdir <name>",                    "Create folder under current subpath."),
+        ["create"]   = ("create <type|space> <name>",      "Create entry of <type>; or 'create space <name>'."),
+        ["rm"]       = ("rm [--dry-run] [-f] <name|*>",    "Delete entry; --dry-run prints; -f skips confirm."),
+        ["move"]     = ("move <type> <src> <dst>",         "Move resource."),
+        ["mv"]       = ("mv <type> <src> <dst>",           "Alias for move."),
+        ["print"]    = ("print <name>",                    "Print entry metadata (alias: p)."),
+        ["cat"]      = ("cat <name | path/name | *>",      "Print entry data (alias: c)."),
+        ["find"]     = ("find <pattern> [--type <rt>]",    "Search current space for pattern."),
+        ["whoami"]   = ("whoami",                          "Show user, server, current space:subpath."),
+        ["version"]  = ("version",                         "Show CLI build + server manifest."),
+        ["attach"]   = ("attach <sn> <entry> <type> <file>", "Upload attachment."),
+        ["upload"]   = ("upload schema <name> <file> | upload csv <type> <sub> <schema> <file>",
+                                                            "Upload schema or CSV."),
+        ["request"]  = ("request <json_file>",             "POST raw managed/request JSON."),
+        ["progress"] = ("progress <sub> <sn> <action>",    "Progress a ticket."),
+        ["import"]   = ("import <zip_file>",               "Import a ZIP archive."),
+        ["export"]   = ("export <query_json>",             "Export to ZIP."),
+        ["help"]     = ("help [command]",                  "Show this help, or details for one command."),
+        ["exit"]     = ("exit | q | quit | Ctrl+D",        "Exit the CLI."),
+    };
+
     public async Task ExecuteAsync(string input)
     {
+        LastCommandFailed = false;
         var parts = input.Split(' ', StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length == 0) return;
 
@@ -17,11 +51,19 @@ public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
         switch (parts[0].ToLowerInvariant())
         {
             case "h" or "help" or "?":
-                PrintHelp();
+                PrintHelp(parts.Length >= 2 ? parts[1] : null);
                 break;
 
             case "pwd":
-                AnsiConsole.MarkupLine($"[yellow]{dmart.CurrentSpace}[/]:[blue]{dmart.CurrentSubpath}[/]");
+                CliTheme.Line($"{CliTheme.Wrap(CliTheme.Heading, dmart.CurrentSpace)}:{CliTheme.Wrap(CliTheme.Path, dmart.CurrentSubpath)}");
+                break;
+
+            case "whoami":
+                PrintWhoami();
+                break;
+
+            case "version":
+                await PrintVersionAsync();
                 break;
 
             case "ls":
@@ -59,6 +101,10 @@ public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
                 await HandleMoveAsync(parts);
                 break;
 
+            case "find" when parts.Length >= 2:
+                await HandleFindAsync(parts);
+                break;
+
             case "p" or "print" when parts.Length >= 2:
                 await HandlePrintAsync(parts[1]);
                 break;
@@ -91,11 +137,17 @@ public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
                 break;
 
             case "export" when parts.Length >= 2:
-                AnsiConsole.WriteLine(await dmart.ExportAsync(parts[1]));
+                CliTheme.Plain(await dmart.ExportAsync(parts[1]));
                 break;
 
             default:
-                AnsiConsole.MarkupLine($"[red]Unknown command:[/] {Markup.Escape(input)}");
+                LastCommandFailed = true;
+                CliTheme.Line($"{CliTheme.Wrap(CliTheme.Error, "Unknown command:")} {CliTheme.Escape(parts[0])}");
+                var suggestion = SuggestCommand(parts[0]);
+                if (suggestion is not null)
+                    CliTheme.Line($"  did you mean {CliTheme.Wrap(CliTheme.Cmd, suggestion)}?");
+                else
+                    CliTheme.Line($"  type {CliTheme.Wrap(CliTheme.Cmd, "help")} for the command list");
                 break;
         }
     }
@@ -120,38 +172,80 @@ public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
             await dmart.ListAsync();
         }
 
-        var path = dmart.CurrentSubpath == "/"
-            ? $"[yellow]{dmart.CurrentSpace}[/]:[blue]/[/]"
-            : $"[yellow]{dmart.CurrentSpace}[/]:[blue]{dmart.CurrentSubpath}[/]";
-        AnsiConsole.MarkupLine(path);
+        CliTheme.Line($"{CliTheme.Wrap(CliTheme.Heading, dmart.CurrentSpace)}:{CliTheme.Wrap(CliTheme.Path, dmart.CurrentSubpath)}");
+
+        if (CliTheme.JsonOnly)
+        {
+            // Machine-readable mode: emit the raw entries array verbatim.
+            foreach (var e in dmart.CurrentEntries) Console.WriteLine(e);
+            return;
+        }
+
+        if (dmart.CurrentEntries.Count == 0)
+        {
+            CliTheme.Line($"  {CliTheme.Wrap(CliTheme.Muted, "(empty)")}");
+            return;
+        }
 
         var page = (parts.Length >= 2 && int.TryParse(parts[^1], out var pg)) ? pg : settings.Pagination;
+
+        // Render in pages of `page` rows. A single large page would force the
+        // user to scroll; a single tiny page would fragment a small listing.
+        var pageEntries = new List<JsonElement>(page);
         var idx = 0;
-        foreach (var entry in dmart.CurrentEntries)
+        var total = dmart.CurrentEntries.Count;
+        foreach (var e in dmart.CurrentEntries)
+        {
+            pageEntries.Add(e);
+            idx++;
+            if (pageEntries.Count == page || idx == total)
+            {
+                RenderEntriesTable(pageEntries);
+                pageEntries.Clear();
+                if (idx < total)
+                {
+                    AnsiConsole.Write("q: quit, Enter: next page ");
+                    var key = Console.ReadKey(true);
+                    Console.WriteLine();
+                    if (key.KeyChar == 'q') return;
+                }
+            }
+        }
+    }
+
+    private static void RenderEntriesTable(List<JsonElement> entries)
+    {
+        var table = new Table().Border(TableBorder.Rounded);
+        table.AddColumn(new TableColumn("[grey]#[/]").Alignment(Justify.Right));
+        table.AddColumn("[grey]type[/]");
+        table.AddColumn("[grey]shortname[/]");
+        table.AddColumn("[grey]payload[/]");
+
+        var i = 1;
+        foreach (var entry in entries)
         {
             var sn = entry.GetProperty("shortname").GetString() ?? "";
             var rt = entry.GetProperty("resource_type").GetString() ?? "";
             var icon = rt == "folder" ? ":file_folder:" : ":page_facing_up:";
-            var extra = "";
+            var payloadInfo = "";
             if (entry.TryGetProperty("attributes", out var attrs) &&
                 attrs.ValueKind == JsonValueKind.Object &&
                 attrs.TryGetProperty("payload", out var payload) &&
                 payload.ValueKind == JsonValueKind.Object &&
                 payload.TryGetProperty("content_type", out var ct))
             {
-                var schema = payload.TryGetProperty("schema_shortname", out var ss) ? $",schema={ss}" : "";
-                extra = $" [yellow](payload:type={ct}{schema})[/]";
+                var schema = payload.TryGetProperty("schema_shortname", out var ss)
+                    ? $" / {Markup.Escape(ss.GetString() ?? "")}" : "";
+                payloadInfo = $"{Markup.Escape(ct.GetString() ?? "")}{schema}";
             }
-            AnsiConsole.MarkupLine($"{icon} [green]{Markup.Escape(sn)}[/]{extra}");
-            idx++;
-            if (idx >= page && idx < dmart.CurrentEntries.Count)
-            {
-                AnsiConsole.Write("q: quit, Enter: next page ");
-                var key = Console.ReadKey(true);
-                if (key.KeyChar == 'q') break;
-                idx = 0;
-            }
+            table.AddRow(
+                $"[grey]{i}[/]",
+                $"{icon} [grey]{Markup.Escape(rt)}[/]",
+                $"[{CliTheme.Success}]{Markup.Escape(sn)}[/]",
+                payloadInfo.Length > 0 ? $"[{CliTheme.Muted}]{payloadInfo}[/]" : "");
+            i++;
         }
+        AnsiConsole.Write(table);
     }
 
     // ---- cd ----
@@ -162,7 +256,7 @@ public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
         {
             dmart.CurrentSubpath = "/";
             await dmart.ListAsync();
-            AnsiConsole.MarkupLine($"[yellow]Switched subpath to:[/] [green]{dmart.CurrentSubpath}[/]");
+            AnnounceSubpath();
             return;
         }
 
@@ -176,7 +270,7 @@ public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
                 dmart.CurrentSubpath = idx <= 0 ? "/" : dmart.CurrentSubpath[..idx];
             }
             await dmart.ListAsync();
-            AnsiConsole.MarkupLine($"[yellow]Switched subpath to:[/] [green]{dmart.CurrentSubpath}[/]");
+            AnnounceSubpath();
             return;
         }
 
@@ -186,7 +280,7 @@ public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
             if (space is not null) await SwitchSpaceAsync(space);
             if (subpath is not null) dmart.CurrentSubpath = subpath;
             await dmart.ListAsync();
-            AnsiConsole.MarkupLine($"[yellow]Switched subpath to:[/] [green]{dmart.CurrentSubpath}[/]");
+            AnnounceSubpath();
             return;
         }
 
@@ -200,12 +294,16 @@ public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
                 dmart.CurrentSubpath = dmart.CurrentSubpath == "/"
                     ? sn : $"{dmart.CurrentSubpath}/{sn}";
                 await dmart.ListAsync();
-                AnsiConsole.MarkupLine($"[yellow]Switched subpath to:[/] [green]{dmart.CurrentSubpath}[/]");
+                AnnounceSubpath();
                 return;
             }
         }
-        AnsiConsole.MarkupLine($"[red]Folder not found:[/] {Markup.Escape(target)}");
+        LastCommandFailed = true;
+        CliTheme.Line($"{CliTheme.Wrap(CliTheme.Error, "Folder not found:")} {CliTheme.Escape(target)}");
     }
+
+    private void AnnounceSubpath()
+        => CliTheme.Line($"{CliTheme.Wrap(CliTheme.Heading, "Switched subpath to:")} {CliTheme.Wrap(CliTheme.Success, dmart.CurrentSubpath)}");
 
     // ---- switch space ----
 
@@ -223,7 +321,8 @@ public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
         }
         else
         {
-            AnsiConsole.MarkupLine($"[red]Space not found:[/] {Markup.Escape(parts[1])}");
+            LastCommandFailed = true;
+            CliTheme.Line($"{CliTheme.Wrap(CliTheme.Error, "Space not found:")} {CliTheme.Escape(parts[1])}");
         }
     }
 
@@ -231,37 +330,98 @@ public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
 
     private async Task HandleRmAsync(string[] parts)
     {
-        if (parts[1] == "*")
+        // Parse flags. The first non-flag arg is the target.
+        var dryRun = false;
+        var force = false;
+        var args = new List<string>();
+        foreach (var p in parts.Skip(1))
+        {
+            switch (p)
+            {
+                case "--dry-run": case "-n": dryRun = true; break;
+                case "-f": case "--force": force = true; break;
+                default: args.Add(p); break;
+            }
+        }
+        if (args.Count == 0)
+        {
+            CliTheme.Line($"{CliTheme.Wrap(CliTheme.Error, "Usage:")} rm [--dry-run] [-f] <name|*>");
+            LastCommandFailed = true;
+            return;
+        }
+
+        if (args[0] == "*")
         {
             await dmart.ListAsync();
-            foreach (var entry in dmart.CurrentEntries.ToList())
+            var targets = dmart.CurrentEntries.ToList();
+            if (dryRun)
+            {
+                CliTheme.Line($"{CliTheme.Wrap(CliTheme.Warning, $"Would delete {targets.Count} entries:")}");
+                foreach (var e in targets)
+                    CliTheme.Line($"  {CliTheme.Escape(e.GetProperty("shortname").GetString() ?? "")}");
+                return;
+            }
+            if (!force && !ConfirmDestructive($"Delete ALL {targets.Count} entries under {dmart.CurrentSpace}:{dmart.CurrentSubpath}?"))
+                return;
+            foreach (var entry in targets)
             {
                 var sn = entry.GetProperty("shortname").GetString()!;
                 var rt = entry.GetProperty("resource_type").GetString()!;
-                AnsiConsole.Write($"{sn} ");
+                AnsiConsole.Write($"{Markup.Escape(sn)} ");
                 PrintJson(await dmart.DeleteAsync(sn, rt));
             }
             return;
         }
-        if (parts[1] == "space" && parts.Length >= 3)
+        if (args[0] == "space" && args.Count >= 2)
         {
-            PrintJson(await dmart.ManageSpaceAsync(parts[2], "delete"));
+            if (dryRun)
+            {
+                CliTheme.Line($"{CliTheme.Wrap(CliTheme.Warning, "Would delete space:")} {CliTheme.Escape(args[1])}");
+                return;
+            }
+            if (!force && !ConfirmDestructive($"Delete entire SPACE '{args[1]}'? This is not reversible."))
+                return;
+            PrintJson(await dmart.ManageSpaceAsync(args[1], "delete"));
             return;
         }
         // Find by shortname
-        var target = parts[1];
+        var target = args[0];
         foreach (var entry in dmart.CurrentEntries)
         {
             var sn = entry.GetProperty("shortname").GetString()!;
             var rt = entry.GetProperty("resource_type").GetString()!;
             if (sn == target)
             {
+                if (dryRun)
+                {
+                    CliTheme.Line($"{CliTheme.Wrap(CliTheme.Warning, "Would delete:")} {CliTheme.Escape(sn)} ({CliTheme.Escape(rt)})");
+                    return;
+                }
+                if (rt == "folder" && !force && !ConfirmDestructive($"Delete folder '{sn}' (may contain children)?"))
+                    return;
                 PrintJson(await dmart.DeleteAsync(sn, rt));
                 await dmart.ListAsync();
                 return;
             }
         }
-        AnsiConsole.MarkupLine("[yellow]Item not found[/]");
+        LastCommandFailed = true;
+        CliTheme.Line($"{CliTheme.Wrap(CliTheme.Warning, "Item not found")}");
+    }
+
+    private bool ConfirmDestructive(string question)
+    {
+        // In script/JsonOnly mode there's no user to prompt — fail closed
+        // unless the caller passed -f. (Caller checks `force` first; if we
+        // got here, they didn't.)
+        if (CliTheme.JsonOnly || Console.IsInputRedirected)
+        {
+            CliTheme.Line($"{CliTheme.Wrap(CliTheme.Error, "refusing destructive op without -f in non-interactive mode")}");
+            LastCommandFailed = true;
+            return false;
+        }
+        AnsiConsole.Markup($"{CliTheme.Wrap(CliTheme.Warning, question)} [y/N] ");
+        var line = Console.ReadLine();
+        return string.Equals(line?.Trim(), "y", StringComparison.OrdinalIgnoreCase);
     }
 
     // ---- move ----
@@ -292,7 +452,8 @@ public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
                 return;
             }
         }
-        AnsiConsole.MarkupLine("[yellow]Item not found[/]");
+        LastCommandFailed = true;
+        CliTheme.Line($"{CliTheme.Wrap(CliTheme.Warning, "Item not found")}");
     }
 
     private async Task HandleCatAsync(string[] parts)
@@ -322,7 +483,55 @@ public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
                 return;
             }
         }
-        AnsiConsole.MarkupLine("[yellow]Item not found[/]");
+        LastCommandFailed = true;
+        CliTheme.Line($"{CliTheme.Wrap(CliTheme.Warning, "Item not found")}");
+    }
+
+    // ---- find ----
+
+    private async Task HandleFindAsync(string[] parts)
+    {
+        // find <pattern> [--type <rt>] [--limit N]
+        string? type = null;
+        var limit = 50;
+        var posArgs = new List<string>();
+        for (var i = 1; i < parts.Length; i++)
+        {
+            if (parts[i] == "--type" && i + 1 < parts.Length) { type = parts[++i]; }
+            else if (parts[i] == "--limit" && i + 1 < parts.Length && int.TryParse(parts[i + 1], out var l)) { limit = l; i++; }
+            else posArgs.Add(parts[i]);
+        }
+        if (posArgs.Count == 0)
+        {
+            CliTheme.Line($"{CliTheme.Wrap(CliTheme.Error, "Usage:")} find <pattern> [--type <rt>] [--limit N]");
+            return;
+        }
+        var pattern = string.Join(' ', posArgs);
+        var resp = await Spinner($"Searching {dmart.CurrentSpace} for '{pattern}'…",
+            () => dmart.FindAsync(pattern, dmart.CurrentSubpath == "/" ? "/" : dmart.CurrentSubpath, type, limit));
+
+        if (CliTheme.JsonOnly) { PrintJson(resp); return; }
+
+        if (!resp.TryGetProperty("records", out var recs) || recs.ValueKind != JsonValueKind.Array || recs.GetArrayLength() == 0)
+        {
+            CliTheme.Line($"  {CliTheme.Wrap(CliTheme.Muted, "(no matches)")}");
+            return;
+        }
+        var table = new Table().Border(TableBorder.Rounded);
+        table.AddColumn("[grey]subpath[/]");
+        table.AddColumn("[grey]type[/]");
+        table.AddColumn("[grey]shortname[/]");
+        foreach (var r in recs.EnumerateArray())
+        {
+            var sn  = r.TryGetProperty("shortname", out var snEl) ? snEl.GetString() ?? "" : "";
+            var rt  = r.TryGetProperty("resource_type", out var rtEl) ? rtEl.GetString() ?? "" : "";
+            var sub = r.TryGetProperty("subpath", out var spEl) ? spEl.GetString() ?? "" : "";
+            table.AddRow(
+                $"[{CliTheme.Path}]{Markup.Escape(sub)}[/]",
+                $"[grey]{Markup.Escape(rt)}[/]",
+                $"[{CliTheme.Success}]{Markup.Escape(sn)}[/]");
+        }
+        AnsiConsole.Write(table);
     }
 
     // ---- upload ----
@@ -332,16 +541,72 @@ public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
         switch (parts[1].ToLowerInvariant())
         {
             case "schema" when parts.Length >= 4:
-                PrintJson(await dmart.UploadSchemaAsync(parts[2], parts[3]));
+                PrintJson(await Spinner($"Uploading schema '{parts[2]}'…",
+                    () => dmart.UploadSchemaAsync(parts[2], parts[3])));
                 break;
             case "csv" when parts.Length >= 6:
-                PrintJson(await dmart.UploadCsvAsync(parts[2], parts[3], parts[4], parts[5]));
+                PrintJson(await Spinner($"Uploading CSV '{parts[5]}'…",
+                    () => dmart.UploadCsvAsync(parts[2], parts[3], parts[4], parts[5])));
                 break;
             default:
-                AnsiConsole.MarkupLine("[red]Usage: upload schema <name> <file> | upload csv <type> <subpath> <schema> <file>[/]");
+                LastCommandFailed = true;
+                CliTheme.Line($"{CliTheme.Wrap(CliTheme.Error, "Usage:")} upload schema <name> <file> | upload csv <type> <subpath> <schema> <file>");
                 break;
         }
     }
+
+    // ---- whoami / version ----
+
+    private void PrintWhoami()
+    {
+        if (CliTheme.JsonOnly)
+        {
+            // Hand-built JSON to keep this AOT-safe (no reflection serializer).
+            Console.WriteLine($"{{\"user\":\"{JsonStr(settings.Shortname)}\"," +
+                              $"\"server\":\"{JsonStr(settings.Url)}\"," +
+                              $"\"space\":\"{JsonStr(dmart.CurrentSpace)}\"," +
+                              $"\"subpath\":\"{JsonStr(dmart.CurrentSubpath)}\"}}");
+            return;
+        }
+        var t = new Table().Border(TableBorder.Minimal).HideHeaders();
+        t.AddColumn("k"); t.AddColumn("v");
+        t.AddRow($"[{CliTheme.Muted}]user[/]",    $"[{CliTheme.Heading}]{Markup.Escape(settings.Shortname)}[/]");
+        t.AddRow($"[{CliTheme.Muted}]server[/]",  $"[{CliTheme.Path}]{Markup.Escape(settings.Url)}[/]");
+        t.AddRow($"[{CliTheme.Muted}]space[/]",   $"[{CliTheme.Heading}]{Markup.Escape(dmart.CurrentSpace)}[/]");
+        t.AddRow($"[{CliTheme.Muted}]subpath[/]", $"[{CliTheme.Path}]{Markup.Escape(dmart.CurrentSubpath)}[/]");
+        AnsiConsole.Write(t);
+    }
+
+    private async Task PrintVersionAsync()
+    {
+        var info = typeof(Program).Assembly
+            .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+            .OfType<System.Reflection.AssemblyInformationalVersionAttribute>()
+            .FirstOrDefault()?.InformationalVersion ?? "dev";
+        var manifest = await Spinner("Fetching server manifest…", () => dmart.ManifestAsync());
+        string? sv = null, sb = null;
+        if (manifest is JsonElement m && m.ValueKind == JsonValueKind.Object)
+        {
+            if (m.TryGetProperty("version", out var v)) sv = v.GetString();
+            if (m.TryGetProperty("branch", out var b))  sb = b.GetString();
+        }
+        if (CliTheme.JsonOnly)
+        {
+            Console.WriteLine($"{{\"cli_build\":\"{JsonStr(info)}\"," +
+                              $"\"server_version\":\"{JsonStr(sv ?? "")}\"," +
+                              $"\"server_branch\":\"{JsonStr(sb ?? "")}\"}}");
+            return;
+        }
+        var t = new Table().Border(TableBorder.Minimal).HideHeaders();
+        t.AddColumn("k"); t.AddColumn("v");
+        t.AddRow($"[{CliTheme.Muted}]CLI build[/]", $"[{CliTheme.Success}]{Markup.Escape(info)}[/]");
+        if (sv is not null) t.AddRow($"[{CliTheme.Muted}]server version[/]", $"[{CliTheme.Success}]{Markup.Escape(sv)}[/]");
+        if (sb is not null) t.AddRow($"[{CliTheme.Muted}]server branch[/]",  $"[{CliTheme.Heading}]{Markup.Escape(sb)}[/]");
+        AnsiConsole.Write(t);
+    }
+
+    private static string JsonStr(string s)
+        => s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "\\r");
 
     // ---- helpers ----
 
@@ -351,7 +616,7 @@ public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
         {
             if (name.StartsWith(prefix))
             {
-                AnsiConsole.MarkupLine($"Switching space to [yellow]{name}[/]");
+                CliTheme.Line($"Switching space to {CliTheme.Wrap(CliTheme.Heading, name)}");
                 dmart.CurrentSpace = name;
                 dmart.CurrentSubpath = "/";
                 return true;
@@ -362,9 +627,11 @@ public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
 
     private void PrintSpaces()
     {
-        var parts = dmart.SpaceNames.Select(s =>
-            s == dmart.CurrentSpace ? $"[bold yellow]{s}[/]" : $"[blue]{s}[/]");
-        AnsiConsole.MarkupLine($"Available spaces: {string.Join("  ", parts)}");
+        var rendered = dmart.SpaceNames.Select(s =>
+            s == dmart.CurrentSpace
+                ? $"[bold {CliTheme.Heading}]{Markup.Escape(s)}[/]"
+                : $"[{CliTheme.Cmd}]{Markup.Escape(s)}[/]");
+        CliTheme.Line($"Available spaces: {string.Join("  ", rendered)}");
     }
 
     private static (string? Space, string? Subpath) ParseSpaceRef(string target)
@@ -376,8 +643,33 @@ public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
         return (clean[..slash], clean[(slash + 1)..]);
     }
 
+    // Run an async op under a Spectre Status spinner when interactive; fall
+    // through to a plain await otherwise (script mode, output-redirected).
+    private static async Task<T> Spinner<T>(string label, Func<Task<T>> op)
+    {
+        if (CliTheme.JsonOnly || Console.IsOutputRedirected) return await op();
+        T result = default!;
+        await AnsiConsole.Status()
+            .Spinner(Spectre.Console.Spinner.Known.Dots)
+            .StartAsync(label, async _ => { result = await op(); });
+        return result;
+    }
+
     private static void PrintJson(JsonElement json)
     {
+        if (CliTheme.JsonOnly || !CliTheme.ColorEnabled)
+        {
+            // Compact-then-pretty: System.Text.Json's `Indented` is enough.
+            // We round-trip via JsonSerializer using the AOT-safe overload.
+            using var ms = new MemoryStream();
+            using (var w = new System.Text.Json.Utf8JsonWriter(ms,
+                       new System.Text.Json.JsonWriterOptions { Indented = true }))
+            {
+                json.WriteTo(w);
+            }
+            Console.WriteLine(System.Text.Encoding.UTF8.GetString(ms.ToArray()));
+            return;
+        }
         ColorizeJson(json, indent: 0);
         Console.WriteLine();
     }
@@ -393,7 +685,7 @@ public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
                 for (var i = 0; i < props.Count; i++)
                 {
                     var p = props[i];
-                    Console.Write($"{pad}  \u001b[36m\"{p.Name}\"\u001b[0m: ");
+                    Console.Write($"{pad}  [36m\"{p.Name}\"[0m: ");
                     ColorizeJson(p.Value, indent + 1);
                     Console.WriteLine(i < props.Count - 1 ? "," : "");
                 }
@@ -413,22 +705,21 @@ public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
                 break;
             case JsonValueKind.String:
                 var s = el.GetString()!;
-                // Green for "success", red for "failed"/"error"
-                if (s is "success") Console.Write($"\u001b[32m\"{s}\"\u001b[0m");
-                else if (s is "failed" or "error") Console.Write($"\u001b[31m\"{s}\"\u001b[0m");
-                else Console.Write($"\u001b[33m\"{s}\"\u001b[0m");
+                if (s is "success") Console.Write($"[32m\"{s}\"[0m");
+                else if (s is "failed" or "error") Console.Write($"[31m\"{s}\"[0m");
+                else Console.Write($"[33m\"{s}\"[0m");
                 break;
             case JsonValueKind.Number:
-                Console.Write($"\u001b[35m{el}\u001b[0m");
+                Console.Write($"[35m{el}[0m");
                 break;
             case JsonValueKind.True:
-                Console.Write("\u001b[32mtrue\u001b[0m");
+                Console.Write("[32mtrue[0m");
                 break;
             case JsonValueKind.False:
-                Console.Write("\u001b[31mfalse\u001b[0m");
+                Console.Write("[31mfalse[0m");
                 break;
             case JsonValueKind.Null:
-                Console.Write("\u001b[90mnull\u001b[0m");
+                Console.Write("[90mnull[0m");
                 break;
             default:
                 Console.Write(el.ToString());
@@ -436,31 +727,67 @@ public sealed class CommandHandler(DmartClient dmart, CliSettings settings)
         }
     }
 
-    private static void PrintHelp()
+    // ---- help ----
+
+    private static void PrintHelp(string? specific)
     {
-        var table = new Table().Title("DMart CLI Help");
+        if (specific is not null)
+        {
+            if (CommandHelp.TryGetValue(specific, out var entry))
+            {
+                CliTheme.Line($"{CliTheme.Wrap(CliTheme.Cmd, specific)}: {Markup.Escape(entry.Summary)}");
+                CliTheme.Line($"  {CliTheme.Wrap(CliTheme.Muted, "usage:")} {Markup.Escape(entry.Usage)}");
+            }
+            else
+            {
+                CliTheme.Line($"{CliTheme.Wrap(CliTheme.Error, "Unknown command:")} {CliTheme.Escape(specific)}");
+                var s = SuggestCommand(specific);
+                if (s is not null)
+                    CliTheme.Line($"  did you mean {CliTheme.Wrap(CliTheme.Cmd, s)}?");
+            }
+            return;
+        }
+        var table = new Table().Border(TableBorder.Rounded).Title("DMart CLI Help");
         table.AddColumn("Command");
         table.AddColumn("Description");
-        table.AddRow("[blue]switch[/] [green]space[/]", "List spaces or switch to space");
-        table.AddRow("[blue]ls[/] [green]path[/]", "List entries under current subpath");
-        table.AddRow("[blue]pwd[/]", "Print current space:subpath");
-        table.AddRow("[blue]cd[/] [green]folder[/]", "Enter folder (cd .. to go up)");
-        table.AddRow("[blue]mkdir[/] [green]name[/]", "Create folder");
-        table.AddRow("[blue]create[/] [green]space name | type name[/]", "Create space or entry");
-        table.AddRow("[blue]rm[/] [green]name | *[/]", "Delete entry or all entries");
-        table.AddRow("[blue]rm space[/] [green]name[/]", "Delete a space");
-        table.AddRow("[blue]move[/] [green]type src dst[/]", "Move resource");
-        table.AddRow("[blue]print[/] [green]name[/]", "Print entry metadata");
-        table.AddRow("[blue]cat[/] [green]name[/]", "Print entry data");
-        table.AddRow("[blue]attach[/] [green]sn entry type file[/]", "Upload attachment");
-        table.AddRow("[blue]upload schema[/] [green]name file[/]", "Upload schema");
-        table.AddRow("[blue]upload csv[/] [green]type sub schema file[/]", "Upload CSV data");
-        table.AddRow("[blue]request[/] [green]json_file[/]", "Send raw request JSON");
-        table.AddRow("[blue]progress[/] [green]sub sn action[/]", "Progress ticket");
-        table.AddRow("[blue]import[/] [green]zip_file[/]", "Import ZIP archive");
-        table.AddRow("[blue]export[/] [green]query_json[/]", "Export to ZIP");
-        table.AddRow("[blue]exit | q | quit | Ctrl+D[/]", "Exit");
-        table.AddRow("[blue]help | h | ?[/]", "Show this help");
+        foreach (var (name, (usage, summary)) in CommandHelp)
+        {
+            table.AddRow($"[{CliTheme.Cmd}]{Markup.Escape(usage)}[/]", Markup.Escape(summary));
+        }
         AnsiConsole.Write(table);
+    }
+
+    // Damerau-Levenshtein distance ≤ 2 → suggestion. Cheap enough for the
+    // ~20 commands we register.
+    private static string? SuggestCommand(string typed)
+    {
+        string? best = null;
+        var bestDist = int.MaxValue;
+        foreach (var name in CommandHelp.Keys)
+        {
+            var d = LevenshteinDistance(typed.ToLowerInvariant(), name.ToLowerInvariant());
+            if (d < bestDist) { bestDist = d; best = name; }
+        }
+        return bestDist <= 2 ? best : null;
+    }
+
+    private static int LevenshteinDistance(string a, string b)
+    {
+        if (a.Length == 0) return b.Length;
+        if (b.Length == 0) return a.Length;
+        var prev = new int[b.Length + 1];
+        var curr = new int[b.Length + 1];
+        for (var j = 0; j <= b.Length; j++) prev[j] = j;
+        for (var i = 1; i <= a.Length; i++)
+        {
+            curr[0] = i;
+            for (var j = 1; j <= b.Length; j++)
+            {
+                var cost = a[i - 1] == b[j - 1] ? 0 : 1;
+                curr[j] = Math.Min(Math.Min(curr[j - 1] + 1, prev[j] + 1), prev[j - 1] + cost);
+            }
+            (prev, curr) = (curr, prev);
+        }
+        return prev[b.Length];
     }
 }

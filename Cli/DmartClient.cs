@@ -18,11 +18,22 @@ public sealed class DmartClient : IDisposable
     public string CurrentSubpath { get; set; } = "/";
     public List<JsonElement> CurrentEntries { get; private set; } = new();
 
+    // Wall-clock millis the last LoginAsync took — surfaced in the banner so
+    // operators see the round-trip latency to the configured server up front.
+    public long LastLoginLatencyMs { get; private set; }
+
     public DmartClient(CliSettings settings)
     {
         _settings = settings;
         CurrentSpace = settings.DefaultSpace;
-        _http = new HttpClient { BaseAddress = new Uri(settings.Url.TrimEnd('/')) };
+        // Default HttpClient.Timeout is 100s — too long for an interactive
+        // REPL where a hung server should surface within seconds, not after
+        // the user has wandered off.
+        _http = new HttpClient
+        {
+            BaseAddress = new Uri(settings.Url.TrimEnd('/')),
+            Timeout = TimeSpan.FromSeconds(30),
+        };
         _http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
     }
 
@@ -31,6 +42,7 @@ public sealed class DmartClient : IDisposable
     public async Task<(bool Ok, string? Error)> LoginAsync()
     {
         HttpResponseMessage resp;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             var body = Json($"{{\"shortname\":\"{Esc(_settings.Shortname)}\",\"password\":\"{Esc(_settings.Password)}\"}}");
@@ -40,6 +52,11 @@ public sealed class DmartClient : IDisposable
         {
             return (false, $"Cannot connect to {_settings.Url}: {ex.InnerException?.Message ?? ex.Message}");
         }
+        catch (TaskCanceledException)
+        {
+            return (false, $"Timeout connecting to {_settings.Url} after {_http.Timeout.TotalSeconds:0}s");
+        }
+        finally { sw.Stop(); LastLoginLatencyMs = sw.ElapsedMilliseconds; }
         var json = await ParseAsync(resp);
         if (json.TryGetProperty("status", out var st) && st.GetString() == "success")
         {
@@ -50,6 +67,21 @@ public sealed class DmartClient : IDisposable
         }
         var msg = json.TryGetProperty("error", out var err) ? err.GetProperty("message").GetString() : "login failed";
         return (false, msg);
+    }
+
+    // Wrap an HTTP send so a 401 transparently re-LoginAsync's and retries
+    // once. Mid-session JWT expiry would otherwise turn every command into a
+    // silent failure with no remediation other than restarting the REPL.
+    private async Task<HttpResponseMessage> SendWithRefreshAsync(Func<Task<HttpResponseMessage>> send)
+    {
+        var resp = await send();
+        if (resp.StatusCode != System.Net.HttpStatusCode.Unauthorized || _token is null)
+            return resp;
+        // Drop the response body so the connection returns to the pool.
+        resp.Dispose();
+        var (ok, _) = await LoginAsync();
+        if (!ok) return await send(); // best-effort — caller will see the 401
+        return await send();
     }
 
     // ---- Spaces ----
@@ -104,7 +136,7 @@ public sealed class DmartClient : IDisposable
     public async Task<JsonElement> ManageSpaceAsync(string spaceName, string requestType)
     {
         var json = $"{{\"space_name\":\"{Esc(spaceName)}\",\"request_type\":\"{Esc(requestType)}\",\"records\":[{{\"resource_type\":\"space\",\"subpath\":\"/\",\"shortname\":\"{Esc(spaceName)}\",\"attributes\":{{}}}}]}}";
-        var resp = await _http.PostAsync("/managed/request", Json(json));
+        var resp = await SendWithRefreshAsync(() => _http.PostAsync("/managed/request", Json(json)));
         var result = await ParseAsync(resp);
         await FetchSpacesAsync(force: true);
         return result;
@@ -112,8 +144,33 @@ public sealed class DmartClient : IDisposable
 
     public async Task<JsonElement> ProgressTicketAsync(string subpath, string shortname, string action)
     {
-        var resp = await _http.PutAsync($"/managed/progress-ticket/{CurrentSpace}/{subpath}/{shortname}/{action}", null);
+        var resp = await SendWithRefreshAsync(() =>
+            _http.PutAsync($"/managed/progress-ticket/{CurrentSpace}/{subpath}/{shortname}/{action}", null));
         return await ParseAsync(resp);
+    }
+
+    // Lightweight server probe — used by `version` to show server-side info.
+    public async Task<JsonElement?> ManifestAsync()
+    {
+        try
+        {
+            var resp = await SendWithRefreshAsync(() => _http.GetAsync("/info/manifest"));
+            if (!resp.IsSuccessStatusCode) return null;
+            return await ParseAsync(resp);
+        }
+        catch { return null; }
+    }
+
+    // Recursive search across the current space — wraps /managed/query with
+    // type=search. Pattern is forwarded verbatim (server uses Postgres FTS).
+    public async Task<JsonElement> FindAsync(string pattern, string? subpath = null,
+        string? resourceType = null, int limit = 50)
+    {
+        var sub = subpath ?? "/";
+        var rtFilter = resourceType is null ? ""
+            : $",\"filter_types\":[\"{Esc(resourceType)}\"]";
+        var query = $"{{\"type\":\"search\",\"space_name\":\"{Esc(CurrentSpace)}\",\"subpath\":\"{Esc(sub)}\",\"search\":\"{Esc(pattern)}\",\"retrieve_json_payload\":true,\"limit\":{limit}{rtFilter}}}";
+        return await PostQueryAsync(query);
     }
 
     // ---- Upload ----
@@ -129,8 +186,8 @@ public sealed class DmartClient : IDisposable
         using var form = new MultipartFormDataContent();
         await using var fs = File.OpenRead(filePath);
         form.Add(new StreamContent(fs), "resources_file", Path.GetFileName(filePath));
-        var resp = await _http.PostAsync(
-            $"/managed/resources_from_csv/{resourceType}/{CurrentSpace}/{subpath}/{schemaShortname}", form);
+        var resp = await SendWithRefreshAsync(() => _http.PostAsync(
+            $"/managed/resources_from_csv/{resourceType}/{CurrentSpace}/{subpath}/{schemaShortname}", form));
         return await ParseAsync(resp);
     }
 
@@ -148,14 +205,14 @@ public sealed class DmartClient : IDisposable
         using var form = new MultipartFormDataContent();
         await using var fs = File.OpenRead(filePath);
         form.Add(new StreamContent(fs), "zip_file", Path.GetFileName(filePath));
-        var resp = await _http.PostAsync("/managed/import", form);
+        var resp = await SendWithRefreshAsync(() => _http.PostAsync("/managed/import", form));
         return await ParseAsync(resp);
     }
 
     public async Task<string> ExportAsync(string queryJsonPath)
     {
         var queryJson = await File.ReadAllTextAsync(queryJsonPath);
-        var resp = await _http.PostAsync("/managed/export", Json(queryJson));
+        var resp = await SendWithRefreshAsync(() => _http.PostAsync("/managed/export", Json(queryJson)));
         if (!resp.IsSuccessStatusCode)
         {
             var err = await ParseAsync(resp);
@@ -178,13 +235,15 @@ public sealed class DmartClient : IDisposable
 
     public async Task<JsonElement> MetaAsync(string resourceType, string shortname)
     {
-        var resp = await _http.GetAsync($"/managed/meta/{resourceType}/{CurrentSpace}/{CurrentSubpath}/{shortname}");
+        var resp = await SendWithRefreshAsync(() =>
+            _http.GetAsync($"/managed/meta/{resourceType}/{CurrentSpace}/{CurrentSubpath}/{shortname}"));
         return await ParseAsync(resp);
     }
 
     public async Task<JsonElement> PayloadAsync(string resourceType, string shortname)
     {
-        var resp = await _http.GetAsync($"/managed/payload/{resourceType}/{CurrentSpace}/{CurrentSubpath}/{shortname}.json");
+        var resp = await SendWithRefreshAsync(() =>
+            _http.GetAsync($"/managed/payload/{resourceType}/{CurrentSpace}/{CurrentSubpath}/{shortname}.json"));
         return await ParseAsync(resp);
     }
 
@@ -193,7 +252,7 @@ public sealed class DmartClient : IDisposable
     public async Task<JsonElement> RequestFromFileAsync(string filePath)
     {
         var json = await File.ReadAllTextAsync(filePath);
-        var resp = await _http.PostAsync("/managed/request", Json(json));
+        var resp = await SendWithRefreshAsync(() => _http.PostAsync("/managed/request", Json(json)));
         return await ParseAsync(resp);
     }
 
@@ -202,13 +261,13 @@ public sealed class DmartClient : IDisposable
     private async Task<JsonElement> ManagedRequestAsync(string requestType, string recordJson)
     {
         var json = $"{{\"space_name\":\"{Esc(CurrentSpace)}\",\"request_type\":\"{Esc(requestType)}\",\"records\":[{recordJson}]}}";
-        var resp = await _http.PostAsync("/managed/request", Json(json));
+        var resp = await SendWithRefreshAsync(() => _http.PostAsync("/managed/request", Json(json)));
         return await ParseAsync(resp);
     }
 
     private async Task<JsonElement> PostQueryAsync(string queryJson)
     {
-        var resp = await _http.PostAsync("/managed/query", Json(queryJson));
+        var resp = await SendWithRefreshAsync(() => _http.PostAsync("/managed/query", Json(queryJson)));
         return await ParseAsync(resp);
     }
 
@@ -219,7 +278,7 @@ public sealed class DmartClient : IDisposable
         form.Add(new StringContent(CurrentSpace), "space_name");
         await using var fs = File.OpenRead(filePath);
         form.Add(new StreamContent(fs), "payload_file", Path.GetFileName(filePath));
-        var resp = await _http.PostAsync("/managed/resource_with_payload", form);
+        var resp = await SendWithRefreshAsync(() => _http.PostAsync("/managed/resource_with_payload", form));
         return await ParseAsync(resp);
     }
 
