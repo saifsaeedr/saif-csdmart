@@ -135,7 +135,11 @@ public sealed class UserService(
             Uuid = string.IsNullOrEmpty(rec.Uuid) ? Guid.NewGuid().ToString() : rec.Uuid,
             Shortname = rec.Shortname,
             SpaceName = MgmtSpace,
-            Subpath = "users",
+            // Canonical persisted form is the leading-slash variant so a
+            // query like `Subpath = "/users"` matches both bootstrap admin
+            // (AdminBootstrap.cs:74) and self-registered users. Without the
+            // slash, /managed/query for /users returned only the admin.
+            Subpath = "/users",
             OwnerShortname = "dmart",
             Email = email,
             Msisdn = msisdn,

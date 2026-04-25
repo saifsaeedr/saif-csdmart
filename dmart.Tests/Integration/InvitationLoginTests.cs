@@ -195,7 +195,7 @@ public sealed class InvitationLoginTests : IClassFixture<DmartFactory>, IAsyncLi
             Uuid = Guid.NewGuid().ToString(),
             Shortname = shortname,
             SpaceName = "management",
-            Subpath = "users",
+            Subpath = "/users",
             OwnerShortname = shortname,
             IsActive = true,
             Email = email ? address : null,

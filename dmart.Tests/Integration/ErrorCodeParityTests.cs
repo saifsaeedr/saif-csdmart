@@ -181,7 +181,7 @@ public sealed class ErrorCodeParityTests : IClassFixture<DmartFactory>
             Uuid = Guid.NewGuid().ToString(),
             Shortname = shortname,
             SpaceName = "management",
-            Subpath = "users",
+            Subpath = "/users",
             OwnerShortname = shortname,
             IsActive = isActive,
             Password = hasher.Hash(password),

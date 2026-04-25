@@ -2,7 +2,10 @@ using System.Text.Json;
 using Dmart.Api.Managed;
 using Dmart.Config;
 using Dmart.Models.Api;
+using Dmart.Models.Core;
+using Dmart.Models.Enums;
 using Dmart.Models.Json;
+using Dmart.Plugins;
 using Dmart.Services;
 using Microsoft.Extensions.Options;
 
@@ -19,7 +22,7 @@ public static class RegistrationHandler
         // and returns a Record with session attributes (access_token, type,
         // displayname?) after auto-logging the user in.
         g.MapPost("/create", async Task<IResult> (HttpContext http, UserService svc,
-            IOptions<DmartSettings> settings, CancellationToken ct) =>
+            PluginManager plugins, IOptions<DmartSettings> settings, CancellationToken ct) =>
         {
             Record? record;
             try
@@ -63,6 +66,25 @@ public static class RegistrationHandler
 
             var (user, access, _) = result.Value;
 
+            // Notify plugin hooks of the new user, same as the managed
+            // CRUD path (RequestHandler.cs:174-192) and EntryService
+            // (EntryService.cs:133). Following the EntryService pattern:
+            // call AfterActionAsync directly so plugin authors' Concurrent
+            // flag is honored — synchronous hooks block, Concurrent hooks
+            // run fire-and-forget. PluginManager logs failures itself
+            // (Plugins/PluginManager.cs:252,264) and after-hook errors
+            // never fail the originating action.
+            await plugins.AfterActionAsync(new Event
+            {
+                SpaceName = settings.Value.ManagementSpace,
+                Subpath = "/users",
+                Shortname = user.Shortname,
+                ActionType = ActionType.Create,
+                ResourceType = ResourceType.User,
+                // Self-registration: the actor is the user being created.
+                UserShortname = user.Shortname,
+            }, ct);
+
             // Set auth_token cookie — mirrors the login flow so browser
             // clients are authenticated immediately after create.
             var maxAgeSeconds = settings.Value.JwtAccessExpires;
@@ -79,7 +101,7 @@ public static class RegistrationHandler
             {
                 ResourceType = Dmart.Models.Enums.ResourceType.User,
                 Shortname = user.Shortname,
-                Subpath = "users",
+                Subpath = "/users",
                 Attributes = new()
                 {
                     ["access_token"] = access,

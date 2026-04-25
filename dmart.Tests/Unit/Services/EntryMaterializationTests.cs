@@ -67,7 +67,7 @@ public class EntryMaterializationTests
             Uuid = Guid.NewGuid().ToString(),
             Shortname = "alice",
             SpaceName = "management",
-            Subpath = "users",
+            Subpath = "/users",
             OwnerShortname = "alice",
             Email = "a@b.c",
             Roles = new() { "super_admin" },

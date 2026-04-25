@@ -102,7 +102,7 @@ public class PermissionServiceIntegrationTests : IClassFixture<DmartFactory>
         Uuid = Guid.NewGuid().ToString(),
         Shortname = shortname,
         SpaceName = "management",
-        Subpath = "users",
+        Subpath = "/users",
         OwnerShortname = shortname,
         IsActive = true,
         Roles = new(roles),

@@ -68,7 +68,7 @@ public static class AuthHandler
             {
                 ResourceType = Dmart.Models.Enums.ResourceType.User,
                 Shortname = user.Shortname,
-                Subpath = "users",
+                Subpath = "/users",
                 Attributes = new()
                 {
                     ["access_token"] = access,

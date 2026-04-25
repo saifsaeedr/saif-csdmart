@@ -50,7 +50,7 @@ public static class ProfileHandler
             {
                 ResourceType = Dmart.Models.Enums.ResourceType.User,
                 Shortname = user.Shortname,
-                Subpath = "users",
+                Subpath = "/users",
                 Attributes = AttrHelper.StripNulls(attrs),
             };
             return Response.Ok(new[] { profileRecord });

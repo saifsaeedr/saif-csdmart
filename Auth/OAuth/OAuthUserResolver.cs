@@ -40,7 +40,11 @@ public sealed class OAuthUserResolver(UserRepository users, ILogger<OAuthUserRes
             Uuid = Guid.NewGuid().ToString(),
             Shortname = shortname,
             SpaceName = "management",
-            Subpath = "users",
+            // Match UserService.CreateAsync — leading-slash is the canonical
+            // persisted form (see AdminBootstrap.cs:74). Without it, OAuth
+            // first-login users wouldn't show up in /management/users
+            // queries that filter on Subpath="/users".
+            Subpath = "/users",
             OwnerShortname = "dmart",
             IsActive = true,
             Email = info.Email,

@@ -171,7 +171,7 @@ public sealed class LoginErrorCodesTests : IClassFixture<DmartFactory>
             Uuid = Guid.NewGuid().ToString(),
             Shortname = shortname,
             SpaceName = "management",
-            Subpath = "users",
+            Subpath = "/users",
             OwnerShortname = shortname,
             IsActive = true,
             Password = password is null ? null : hasher.Hash(password),

@@ -104,7 +104,7 @@ public class FullParityTests : IClassFixture<DmartFactory>
             Uuid = Guid.NewGuid().ToString(),
             Shortname = shortname,
             SpaceName = "management",
-            Subpath = "users",
+            Subpath = "/users",
             OwnerShortname = shortname,
             IsActive = true,
             Password = hasher.Hash(password),
@@ -525,7 +525,7 @@ public class FullParityTests : IClassFixture<DmartFactory>
         {
             Shortname = shortname,
             SpaceName = "management",
-            Subpath = "users",
+            Subpath = "/users",
             Uuid = Guid.NewGuid().ToString("n"),
             OwnerShortname = "dmart",
             CreatedAt = DateTime.UtcNow,
