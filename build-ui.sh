@@ -44,7 +44,23 @@ build_one() {
     fi
 }
 
-build_one "CXB" "cxb" "dist/client"
-build_one "catalog" "catalog" "dist/client"
+# Run cxb and catalog builds in parallel — they're independent projects
+# with their own package.json / yarn.lock / dist. yarn 1.22+ serializes
+# writes to the shared cache (~/.cache/yarn) internally, so this is safe.
+build_one "CXB"     "cxb"     "dist/client" &
+pid_cxb=$!
+build_one "catalog" "catalog" "dist/client" &
+pid_catalog=$!
+
+# Collect both exit codes — if either failed, fail the script.
+set +e
+wait "$pid_cxb";     status_cxb=$?
+wait "$pid_catalog"; status_catalog=$?
+set -e
+
+if [ "$status_cxb" -ne 0 ] || [ "$status_catalog" -ne 0 ]; then
+    echo "UI build failed (cxb=$status_cxb catalog=$status_catalog)" >&2
+    exit 1
+fi
 
 echo "Run './build.sh' to embed the UI outputs into the binary."
