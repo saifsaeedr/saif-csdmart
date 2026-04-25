@@ -17,11 +17,13 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Copy host config
+        # Absolute paths throughout — the runner's $HOME is per-instance
+        # (/home/githubrunner/runners/rXX/home) under the systemd override
+        # that isolates per-runner podman/NuGet state. The host config and
+        # the PostgreSQL .pgpass both live in the real githubrunner home.
+        env:
+          PGPASSFILE: /home/githubrunner/.pgpass
         run: |
-          # Absolute path — the runner's $HOME is per-instance
-          # (/home/githubrunner/runners/rXX/home) under the systemd
-          # override that isolates per-runner podman/NuGet state. The
-          # host config lives in the real githubrunner home.
           cp /home/githubrunner/config.env ./
           # Ensure the test/smoke phases have everything the settings
           # validator requires. Append-if-missing so we don't clobber
@@ -32,8 +34,9 @@ jobs:
           grep -q '^DATABASE_USERNAME' config.env || echo 'DATABASE_USERNAME="dmart"' >> config.env
           grep -q '^DATABASE_PASSWORD' config.env || echo 'DATABASE_PASSWORD="dmart"' >> config.env
           grep -q '^DATABASE_NAME' config.env || echo 'DATABASE_NAME="dmart"' >> config.env
-          dropdb --if-exists -h 127.0.0.1 -U dmart dmart
-          createdb -h 127.0.0.1 -U dmart dmart
+          # -w makes these fail fast (no password prompt) if PGPASSFILE miss.
+          dropdb   -w --if-exists -h 127.0.0.1 -U dmart dmart
+          createdb -w             -h 127.0.0.1 -U dmart dmart
 
       - name: Build
         run: dotnet build dmart.slnx -c Release --nologo
