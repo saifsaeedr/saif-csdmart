@@ -8,6 +8,7 @@ using Dmart.Models.Api;
 using Dmart.Models.Enums;
 using Dmart.Models.Json;
 using Dmart.Services;
+using Dmart.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
 using Xunit;
@@ -439,8 +440,10 @@ public class FullParityTests : IClassFixture<DmartFactory>
         result.Records.ShouldNotBeNull();
         result.Records![0].Attributes!.ShouldContainKey("access_token");
 
-        var users = _factory.Services.GetRequiredService<UserRepository>();
-        await users.DeleteAsync(shortname);
+        // /user/create fires resource_folders_creation, which materializes
+        // personal/people/{shortname}/* folders owned by the new user. The
+        // helper purges those before deleting the user so the FK holds.
+        await TestUserCleanup.DeleteUserAndOwnedAsync(_factory.Services, shortname);
     }
 
     // ==================== session_inactivity_ttl enforcement ====================
@@ -494,8 +497,7 @@ public class FullParityTests : IClassFixture<DmartFactory>
         var result = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
         result!.Status.ShouldBe(Status.Success);
 
-        var users = factory.Services.GetRequiredService<UserRepository>();
-        await users.DeleteAsync(shortname);
+        await TestUserCleanup.DeleteUserAndOwnedAsync(factory.Services, shortname);
     }
 
     // ==================== bot session-inactivity exemption ====================

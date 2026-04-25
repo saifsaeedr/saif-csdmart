@@ -4,6 +4,7 @@ using System.Text.Json;
 using Dmart.DataAdapters.Sql;
 using Dmart.Models.Api;
 using Dmart.Models.Json;
+using Dmart.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
 using Xunit;
@@ -88,8 +89,10 @@ public class UserCreateErrorCodesTests : IClassFixture<DmartFactory>
         result.Error!.Code.ShouldBe(InternalErrorCode.SHORTNAME_ALREADY_EXIST);  // 400
         result.Error.Type.ShouldBe(ErrorTypes.Create);
 
-        var users = factory.Services.GetRequiredService<UserRepository>();
-        await users.DeleteAsync(shortname);
+        // The first /user/create succeeded → resource_folders_creation
+        // materialized people/{shortname}/* under "personal" owned by this
+        // user. Purge those entries before deleting the user so the FK holds.
+        await TestUserCleanup.DeleteUserAndOwnedAsync(factory.Services, shortname);
     }
 
     [FactIfPg]
@@ -116,7 +119,9 @@ public class UserCreateErrorCodesTests : IClassFixture<DmartFactory>
         result.Error.Type.ShouldBe(ErrorTypes.Request);
         result.Error.Message.ShouldContain("@email:");
 
-        var users = factory.Services.GetRequiredService<UserRepository>();
-        await users.DeleteAsync(JsonSerializer.Deserialize(first, DmartJsonContext.Default.Record)!.Shortname);
+        // First create succeeded → cleanup must purge user-owned folders
+        // before the user row, see TestUserCleanup.
+        var firstShortname = JsonSerializer.Deserialize(first, DmartJsonContext.Default.Record)!.Shortname;
+        await TestUserCleanup.DeleteUserAndOwnedAsync(factory.Services, firstShortname);
     }
 }
