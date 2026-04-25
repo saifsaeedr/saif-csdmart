@@ -593,6 +593,11 @@ public sealed class QueryService(
                     Limit = 1000,
                     JqFilter = null,
                     Join = null,
+                    // The join code only consumes Records (line 602-603); the
+                    // page-and-count run in parallel inside ExecuteAsync, so a
+                    // null/true RetrieveTotal here doubles the SQL work for a
+                    // total nobody reads. Pin to false.
+                    RetrieveTotal = false,
                 };
                 var subResponse = await ExecuteAsync(widened, actor, ct);
                 if (subResponse.Status == Status.Success && subResponse.Records is not null)

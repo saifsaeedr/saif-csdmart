@@ -232,6 +232,20 @@ public class QueryHelperTests
         where.ShouldContain("'array'");
     }
 
+    [Fact]
+    public void Search_Payload_Path_Match_Includes_Root_Containment_For_Gin_Index()
+    {
+        // For a value lookup like @payload.body.brand_shortname:abc, we MUST
+        // emit a `payload @> '{"body":{"brand_shortname":"..."}}'::jsonb`
+        // branch alongside the existing typeof/string/jsonb predicates.
+        // Without it, the OR chain has no index-eligible expression and the
+        // planner falls through to a seq scan — fatal under client-side
+        // joins that explode into 100-OR'd values against /products etc.
+        // (see QueryService.ApplyClientJoinsAsync widening).
+        var where = BuildSearch("@payload.body.brand_shortname:abc");
+        where.ShouldContain("payload::jsonb @>");
+    }
+
     // ==================== ACL filtering ====================
 
     [Fact]

@@ -496,8 +496,28 @@ public static class QueryHelper
         }
 
         // Type-aware value matching (mirrors Python's jsonb_typeof checks)
-        return BuildPayloadValueSql(arrowPath, textExtract, data, args);
+        return BuildPayloadValueSql(arrowPath, textExtract, parts, data, args);
     }
+
+    // Builds a JSON containment literal that wraps `value` at the given
+    // dotted path. e.g. parts = ["body", "brand_shortname"], jsonValue
+    // = "\"abc\""  →  '{"body":{"brand_shortname":"abc"}}'.
+    // Used to emit `payload @> $literal::jsonb` predicates that the
+    // idx_entries_payload_gin (jsonb_path_ops) GIN can serve.
+    private static string BuildPayloadContainmentJson(string[] parts, string jsonValueLiteral)
+    {
+        var sb = new System.Text.StringBuilder();
+        for (int i = 0; i < parts.Length; i++)
+        {
+            sb.Append('{').Append('"').Append(EscapeJsonStringLiteral(parts[i])).Append('"').Append(':');
+        }
+        sb.Append(jsonValueLiteral);
+        for (int i = 0; i < parts.Length; i++) sb.Append('}');
+        return sb.ToString();
+    }
+
+    private static string EscapeJsonStringLiteral(string s) =>
+        s.Replace("\\", "\\\\").Replace("\"", "\\\"");
 
     // Handles `@payload.a.b[].c:value` and `@payload.a.b[]:value` forms.
     //   * arrayIdx = index into `parts` of the element ending in `[]`
@@ -623,7 +643,7 @@ public static class QueryHelper
     }
 
     private static string? BuildPayloadValueSql(
-        string arrowPath, string textExtract, SearchField data, List<NpgsqlParameter> args)
+        string arrowPath, string textExtract, string[] parts, SearchField data, List<NpgsqlParameter> args)
     {
         var conditions = new List<string>();
         var compOp = data.ComparisonOperator;
@@ -680,23 +700,40 @@ public static class QueryHelper
             }
             else
             {
-                // Positive match: in array OR == string OR direct jsonb match
+                // Positive match: in array OR == string OR direct jsonb match.
                 var arrayCond = $"(jsonb_typeof(payload::jsonb->{arrowPath}) = 'array' AND payload::jsonb->{arrowPath} @> CAST(${pJsonArr} AS jsonb))";
                 var stringCond = $"(jsonb_typeof(payload::jsonb->{arrowPath}) = 'string' AND {textExtract} = ${pVal})";
                 args.Add(new() { Value = ToJsonString(value) });
                 var pJsonDirect = args.Count;
                 var directCond = $"(payload::jsonb->{arrowPath} = CAST(${pJsonDirect} AS jsonb))";
 
+                // Index-eligible fallback: emit a `payload @> '{<path>:<value>}'`
+                // predicate that the idx_entries_payload_gin (jsonb_path_ops)
+                // GIN can serve. Without this, `@payload.body.brand_shortname:v`
+                // expands only to `payload->'body'->>'brand_shortname' = v` and
+                // `payload->arrow = "v"::jsonb`, neither of which uses the GIN —
+                // a 100-OR'd filter (a typical client-side join) becomes a full
+                // seq scan on the subpath. The two branches below cover the
+                // string-form and array-form cases respectively, matching the
+                // existing stringCond / arrayCond branches but in a shape the
+                // planner can route through the index.
+                args.Add(new() { Value = BuildPayloadContainmentJson(parts, ToJsonString(value)), NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Jsonb });
+                var pContainStr = args.Count;
+                var containStringCond = $"(payload::jsonb @> ${pContainStr})";
+                args.Add(new() { Value = BuildPayloadContainmentJson(parts, ToJsonArray(value)), NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Jsonb });
+                var pContainArr = args.Count;
+                var containArrayCond = $"(payload::jsonb @> ${pContainArr})";
+
                 if (isNum)
                 {
                     args.Add(new() { Value = double.Parse(value, CultureInfo.InvariantCulture) });
                     var pNum = args.Count;
                     var numCond = $"(jsonb_typeof(payload::jsonb->{arrowPath}) = 'number' AND ({textExtract})::float = CAST(${pNum} AS float))";
-                    conditions.Add($"({arrayCond} OR {stringCond} OR {directCond} OR {numCond})");
+                    conditions.Add($"({containStringCond} OR {containArrayCond} OR {arrayCond} OR {stringCond} OR {directCond} OR {numCond})");
                 }
                 else
                 {
-                    conditions.Add($"({arrayCond} OR {stringCond} OR {directCond})");
+                    conditions.Add($"({containStringCond} OR {containArrayCond} OR {arrayCond} OR {stringCond} OR {directCond})");
                 }
             }
         }
