@@ -119,7 +119,7 @@ public sealed class AttachmentRepository(Db db)
                 displayname = EXCLUDED.displayname,
                 description = EXCLUDED.description,
                 tags = EXCLUDED.tags,
-                updated_at = NOW(),
+                updated_at = EXCLUDED.updated_at,
                 owner_group_shortname = EXCLUDED.owner_group_shortname,
                 acl = EXCLUDED.acl,
                 payload = EXCLUDED.payload,
@@ -141,7 +141,9 @@ public sealed class AttachmentRepository(Db db)
         AddJsonb(cmd, JsonbHelpers.ToJsonb(a.Description));
         AddJsonbNotNull(cmd, JsonbHelpers.ToJsonbList(a.Tags));   // tags is NOT NULL
         cmd.Parameters.Add(new() { Value = a.CreatedAt == default ? DateTime.UtcNow : a.CreatedAt });
-        cmd.Parameters.Add(new() { Value = DateTime.UtcNow });
+        // Honor the caller's UpdatedAt — see EntryRepository.UpsertAsync for
+        // the full reasoning; same pattern keeps round-trip verbatim.
+        cmd.Parameters.Add(new() { Value = a.UpdatedAt == default ? DateTime.UtcNow : a.UpdatedAt });
         cmd.Parameters.Add(new() { Value = a.OwnerShortname });
         cmd.Parameters.Add(new() { Value = (object?)a.OwnerGroupShortname ?? DBNull.Value });
         AddJsonb(cmd, JsonbHelpers.ToJsonb(a.Acl));
