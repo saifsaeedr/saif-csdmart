@@ -357,40 +357,36 @@ public sealed class QueryService(
             .Select(e => EntryMapper.ToRecord(e, q.SpaceName, q.RetrieveJsonPayload))
             .ToList();
 
-        // If retrieve_attachments, fetch and attach for each record.
-        // Process in fixed-size batches rather than creating all N tasks upfront
-        // so large result sets (e.g. 10k records at MaxQueryLimit) don't allocate
-        // N pending Task objects — each batch of 5 runs concurrently then the
-        // next batch starts. This also keeps DB connection-pool pressure bounded.
+        // If retrieve_attachments, fetch every parent's attachments in a SINGLE
+        // round trip. Previously this was a fan-out (1 query per record, in
+        // batches of 5 to bound concurrency) which, for a 100-record page,
+        // meant 100 DB round trips. With DatabasePoolSize defaulting to 10+10
+        // overflow, even a few concurrent retrieve_attachments=true callers
+        // saturated the pool and serialized behind it.
         if (q.RetrieveAttachments && records.Count > 0)
         {
-            const int BatchSize = 5;
-            for (var offset = 0; offset < records.Count; offset += BatchSize)
+            var parents = new (string Subpath, string Shortname)[records.Count];
+            for (var i = 0; i < records.Count; i++)
+                parents[i] = (records[i].Subpath, records[i].Shortname);
+
+            var grouped = await attachments.ListForParentsAsync(q.SpaceName, parents, ct);
+
+            for (var i = 0; i < records.Count; i++)
             {
-                var end = Math.Min(offset + BatchSize, records.Count);
-                var batchTasks = new Task<List<Models.Core.Attachment>>[end - offset];
-                for (var j = offset; j < end; j++)
+                var rec = records[i];
+                var normalized = Models.Core.Locator.NormalizeSubpath(rec.Subpath);
+                var key = $"{normalized.TrimEnd('/')}/{rec.Shortname}";
+                if (!grouped.TryGetValue(key, out var attList) || attList.Count == 0)
+                    continue;
+
+                records[i] = rec with
                 {
-                    var rec = records[j];
-                    batchTasks[j - offset] = attachments.ListForParentAsync(
-                        q.SpaceName, rec.Subpath, rec.Shortname, ct);
-                }
-                var batchResults = await Task.WhenAll(batchTasks);
-                for (var j = offset; j < end; j++)
-                {
-                    var result = batchResults[j - offset];
-                    if (result.Count > 0)
-                    {
-                        records[j] = records[j] with
-                        {
-                            Attachments = result
-                                .GroupBy(a => DataAdapters.Sql.JsonbHelpers.EnumMember(a.ResourceType))
-                                .ToDictionary(
-                                    g => g.Key,
-                                    g => g.Select(a => AttachmentMapper.ToEntryRecord(a)).ToList())
-                        };
-                    }
-                }
+                    Attachments = attList
+                        .GroupBy(a => DataAdapters.Sql.JsonbHelpers.EnumMember(a.ResourceType))
+                        .ToDictionary(
+                            g => g.Key,
+                            g => g.Select(a => AttachmentMapper.ToEntryRecord(a)).ToList())
+                };
             }
         }
 

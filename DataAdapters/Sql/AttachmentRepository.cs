@@ -33,6 +33,54 @@ public sealed class AttachmentRepository(Db db)
         return results;
     }
 
+    // Batched lookup — fetches every parent's attachments in a single round
+    // trip. Replaces the N-query fan-out QueryService used to do for
+    // retrieve_attachments=true (one query per record). For a 100-record page
+    // that's 100 queries → 1, with a corresponding drop in connection-pool
+    // pressure (the default DatabasePoolSize is 10+10 overflow, so a few
+    // concurrent /public/query calls with retrieve_attachments would saturate
+    // it and serialize behind the pool).
+    //
+    // Returned dictionary is keyed by the attachment's `subpath` (the
+    // `<parentSubpath>/<parentShortname>` form Hydrate writes back). Callers
+    // recompute that key per record to look up.
+    public async Task<Dictionary<string, List<Attachment>>> ListForParentsAsync(
+        string spaceName,
+        IReadOnlyList<(string ParentSubpath, string ParentShortname)> parents,
+        CancellationToken ct = default)
+    {
+        var result = new Dictionary<string, List<Attachment>>(StringComparer.Ordinal);
+        if (parents.Count == 0) return result;
+
+        var keys = new string[parents.Count];
+        for (var i = 0; i < parents.Count; i++)
+        {
+            var normalized = Locator.NormalizeSubpath(parents[i].ParentSubpath);
+            keys[i] = $"{normalized.TrimEnd('/')}/{parents[i].ParentShortname}";
+        }
+
+        await using var conn = await db.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(
+            $"{SelectAllColumns} WHERE space_name = $1 AND subpath = ANY($2::text[]) " +
+             "ORDER BY subpath, created_at DESC", conn);
+        cmd.Parameters.Add(new() { Value = spaceName });
+        cmd.Parameters.Add(new()
+        {
+            Value = keys,
+            NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text,
+        });
+
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        while (await r.ReadAsync(ct))
+        {
+            var att = Hydrate(r);
+            if (!result.TryGetValue(att.Subpath, out var list))
+                result[att.Subpath] = list = new List<Attachment>();
+            list.Add(att);
+        }
+        return result;
+    }
+
     // Direct lookup by (space, subpath, shortname) — used by /managed/payload/... when
     // the URL already points at the attachment row itself.
     public async Task<Attachment?> GetAsync(string spaceName, string subpath, string shortname, CancellationToken ct = default)
