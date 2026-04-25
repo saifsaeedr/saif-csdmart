@@ -12,6 +12,23 @@
 
 set -eu
 
+install_one() {
+    local name="$1"
+    local dir="$2"
+
+    [ -f "$dir/package.json" ] || return 0
+
+    echo "Installing deps for $name..."
+    (
+        cd "$dir"
+        if command -v yarn > /dev/null 2>&1; then
+            yarn install
+        else
+            npm install
+        fi
+    )
+}
+
 build_one() {
     local name="$1"
     local dir="$2"
@@ -26,10 +43,8 @@ build_one() {
     (
         cd "$dir"
         if command -v yarn > /dev/null 2>&1; then
-            yarn install
             yarn build
         else
-            npm install
             npm run build
         fi
     )
@@ -44,15 +59,22 @@ build_one() {
     fi
 }
 
-# Run cxb and catalog builds in parallel — they're independent projects
-# with their own package.json / yarn.lock / dist. yarn 1.22+ serializes
-# writes to the shared cache (~/.cache/yarn) internally, so this is safe.
+# Install sequentially — yarn 1's shared ~/.cache/yarn isn't safe for fully
+# concurrent extraction under a cold cache (we hit EEXIST/ENOENT races on
+# shared transitive deps). The second install benefits from the first's
+# cache anyway, so the time cost is small and total wall-clock is dominated
+# by the parallelizable build phase below.
+install_one "CXB"     "cxb"
+install_one "catalog" "catalog"
+
+# Build in parallel — `yarn build` only writes to its own project's dist,
+# never to the shared yarn cache, so true parallelism is safe and shaves
+# roughly the build duration of one project off the wall clock.
 build_one "CXB"     "cxb"     "dist/client" &
 pid_cxb=$!
 build_one "catalog" "catalog" "dist/client" &
 pid_catalog=$!
 
-# Collect both exit codes — if either failed, fail the script.
 set +e
 wait "$pid_cxb";     status_cxb=$?
 wait "$pid_catalog"; status_catalog=$?
