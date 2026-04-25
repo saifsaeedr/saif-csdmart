@@ -173,22 +173,23 @@ public static class RequestHandler
                         };
                         if (actionType is not null)
                         {
-                            _ = Task.Run(async () =>
+                            // Match the EntryService pattern (EntryService.cs:133):
+                            // call AfterActionAsync directly so plugin authors'
+                            // Concurrent flag decides whether to block. The default
+                            // Concurrent=true means PluginManager runs the hook
+                            // fire-and-forget internally; only opt-out plugins
+                            // block on the call. PluginManager catches and logs
+                            // hook exceptions itself (PluginManager.cs:252,264);
+                            // after-hook failures never fail the originating action.
+                            await plugins.AfterActionAsync(new Models.Core.Event
                             {
-                                try
-                                {
-                                    await plugins.AfterActionAsync(new Models.Core.Event
-                                    {
-                                        SpaceName = req.SpaceName,
-                                        Subpath = rec.Subpath,
-                                        Shortname = rec.Shortname,
-                                        ActionType = actionType.Value,
-                                        ResourceType = rec.ResourceType,
-                                        UserShortname = actor,
-                                    });
-                                }
-                                catch (Exception ex) { Console.Error.WriteLine($"WARN: after-action plugin error: {ex.Message}"); }
-                            }, CancellationToken.None);
+                                SpaceName = req.SpaceName,
+                                Subpath = rec.Subpath,
+                                Shortname = rec.Shortname,
+                                ActionType = actionType.Value,
+                                ResourceType = rec.ResourceType,
+                                UserShortname = actor,
+                            }, ct);
                         }
                     }
                 }
