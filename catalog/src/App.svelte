@@ -103,14 +103,6 @@
   setupI18n();
 </script>
 
-<svelte:head>
-  <link
-    rel="stylesheet"
-    media="screen"
-    href={new URL("./app.css", import.meta.url).href}
-  />
-</svelte:head>
-
 <div id="routify-app">
   <SvelteToast />
   <Router {router} />

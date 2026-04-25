@@ -1,10 +1,12 @@
+/* Relative font URLs so the .woff2 files resolve under whatever base
+   path the catalog is mounted at (currently /cat/). Absolute paths
+   would 404 because they ignore <base href>. */
 @font-face {
 	font-family: 'uthmantn';
-	src: url('/assets/uthman/uthmantn1_v10.woff2') format('woff2');
+	src: url('uthmantn1_v10.woff2') format('woff2');
 }
 
 @font-face {
 	font-family:'uthmantn-bold';
-	src: url('/assets/uthman/uthmantn1b_v10.woff2') format('woff2');
+	src: url('uthmantn1b_v10.woff2') format('woff2');
 }
-

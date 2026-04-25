@@ -1,6 +1,7 @@
 @import "tailwindcss";
-@import "../public/assets/uthman/uthman.css";
-@import "flowbite";
+@plugin "flowbite/plugin";
+@source "../node_modules/flowbite-svelte/dist";
+@source "../node_modules/flowbite-svelte-icons/dist";
 
 /* ─── Design Tokens ─── */
 /* Default theme is light. `[data-theme="light"]` is an explicit alias so
