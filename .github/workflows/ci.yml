@@ -18,7 +18,11 @@ jobs:
 
       - name: Copy host config
         run: |
-          cp ~/config.env ./
+          # Absolute path — the runner's $HOME is per-instance
+          # (/home/githubrunner/runners/rXX/home) under the systemd
+          # override that isolates per-runner podman/NuGet state. The
+          # host config lives in the real githubrunner home.
+          cp /home/githubrunner/config.env ./
           # Ensure the test/smoke phases have everything the settings
           # validator requires. Append-if-missing so we don't clobber
           # a host config that already has stricter values.
