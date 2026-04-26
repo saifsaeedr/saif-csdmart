@@ -22,11 +22,18 @@ public class InfoTests : IClassFixture<DmartFactory>
     }
 
     [Fact]
-    public async Task Me_Without_Auth_Returns_401()
+    public async Task Me_Without_Auth_Returns_Anonymous()
     {
+        // /info/me is anonymous-allowed so the SPA can use it as a session
+        // probe without painting a 401 on every cold load. Unauthed callers
+        // get 200 with authenticated:false and shortname=anonymous.
         var client = _factory.CreateClient();
         var resp = await client.GetAsync("/info/me");
-        resp.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+        resp.StatusCode.ShouldBe(HttpStatusCode.OK);
+        var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        var attrs = doc.RootElement.GetProperty("attributes");
+        attrs.GetProperty("authenticated").GetBoolean().ShouldBeFalse();
+        attrs.GetProperty("shortname").GetString().ShouldBe("anonymous");
     }
 
     [Fact]

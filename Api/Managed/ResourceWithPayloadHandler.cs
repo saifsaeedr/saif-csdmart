@@ -137,6 +137,11 @@ public static class ResourceWithPayloadHandler
         AttachmentRepository attachments, ILogger log, CancellationToken ct)
     {
         var bodyRef = $"{record.Shortname}.{ext}";
+        // Pull meta-level fields out of attributes — same shape entries get via
+        // RequestHandler.MaterializeEntry. Without this displayname / description
+        // / tags / slug land in the response (echoed back from the request) but
+        // never reach the attachments table.
+        var attrs = record.Attributes ?? new Dictionary<string, object>();
         var attachment = new Attachment
         {
             Uuid = string.IsNullOrEmpty(record.Uuid) ? Guid.NewGuid().ToString() : record.Uuid,
@@ -146,6 +151,10 @@ public static class ResourceWithPayloadHandler
             ResourceType = record.ResourceType,
             OwnerShortname = actor,
             IsActive = true,
+            Slug = attrs.TryGetValue("slug", out var slug) ? slug?.ToString() : null,
+            Displayname = attrs.TryGetValue("displayname", out var dn) ? RequestHandler.ParseTranslation(dn) : null,
+            Description = attrs.TryGetValue("description", out var de) ? RequestHandler.ParseTranslation(de) : null,
+            Tags = ExtractTags(attrs),
             Media = fileBytes,
             // dmart sets payload.body to the filename string for attachment-typed
             // resources; the actual bytes go into the media column.
@@ -232,6 +241,25 @@ public static class ResourceWithPayloadHandler
     // the context so we don't trip IL2026/IL3050.
     private static JsonElement StringJsonElement(string value)
         => JsonSerializer.SerializeToElement(value, DmartJsonContext.Default.String);
+
+    // Pull `tags` out of a record's attributes dict. Accepts a JSON array, a
+    // List<string>, or an IEnumerable<object>; returns an empty list otherwise
+    // so the Attachment record's `Tags` (non-nullable) is always populated.
+    private static List<string> ExtractTags(Dictionary<string, object> attrs)
+    {
+        if (!attrs.TryGetValue("tags", out var raw) || raw is null) return new List<string>();
+        if (raw is JsonElement el && el.ValueKind == JsonValueKind.Array)
+        {
+            var list = new List<string>();
+            foreach (var item in el.EnumerateArray())
+                if (item.ValueKind == JsonValueKind.String) list.Add(item.GetString()!);
+            return list;
+        }
+        if (raw is List<string> stringList) return stringList;
+        if (raw is IEnumerable<object> objs)
+            return objs.Select(o => o?.ToString() ?? "").Where(s => s.Length > 0).ToList();
+        return new List<string>();
+    }
 
     // dmart's set of attachment-flavor resource types (anything stored in the
     // attachments table). All other types live in the entries table.

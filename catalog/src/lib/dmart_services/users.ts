@@ -38,8 +38,10 @@ export async function getAllUsers(
             retrieve_json_payload: true,
             exact_subpath: false,
         }))!;
-    } catch (error) {
-        log.error("Error fetching users:", error);
+    } catch (error: any) {
+        if (error?.response?.status !== 401 && error?.status !== 401) {
+            log.error("Error fetching users:", error);
+        }
         return { status: "failed", records: [], attributes: { total: 0, returned: 0 } } as ApiQueryResponse;
     }
 }

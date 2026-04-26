@@ -73,8 +73,8 @@
           const tags = await getSpaceTags(space.shortname);
 
           if (tags.status === "success" && tags.records.length > 0) {
-            const tagData = tags.records[0].attributes;
-            if (tagData.tag_counts) {
+            const tagData = tags.records[0]?.attributes;
+            if (tagData?.tag_counts) {
               const sortedTags = Object.entries(tagData.tag_counts)
                 .map(([name, count]: any) => ({ name, count }))
                 .sort((a: any, b: any) => Number(b.count) - Number(a.count));

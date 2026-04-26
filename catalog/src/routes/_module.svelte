@@ -2,7 +2,6 @@
   import DashboardHeader from "@/components/DashboardHeader.svelte";
   import { signout, user } from "@/stores/user";
   import { onMount } from "svelte";
-  import { getProfile } from "@/lib/dmart_services";
   import { Dmart } from "@edraj/tsdmart";
   import { website } from "@/config";
   import axios from "axios";
@@ -67,43 +66,35 @@
       return;
     }
 
+    // /info/me is anonymous-allowed and returns 200 with
+    // {authenticated: bool} regardless of auth state, so we don't pollute
+    // the console with a 401 on cold loads. Mid-session expiration is
+    // still detected by the response interceptor above on real API calls.
     try {
-      const p: any = await getProfile();
-      const isAuthError =
-        !p ||
-        p === null ||
-        p?.error?.type === "jwtauth" ||
-        p?.response?.data?.error?.type === "jwtauth" ||
-        p?.data?.error?.type === "jwtauth";
+      const r = await dmartAxios.get("info/me");
+      const authed = r.data?.attributes?.authenticated === true;
 
-      if (isAuthError) {
-        console.log("Authentication failed, redirecting to login");
+      if (!authed) {
         await signout();
         redirectTo("/login");
-      } else {
-        // Connect global WebSocket for real-time notifications and chat
-        const token = localStorage.getItem("authToken");
-        const shortname = get(user).shortname;
-        if (token) {
-          initGlobalWebSocket(token, shortname);
-        }
+        return;
+      }
 
-        if (currentPath === "/" || currentPath === "/login") {
-          redirectTo("/dashboard/admin");
-        }
+      // Connect global WebSocket for real-time notifications and chat
+      const token = localStorage.getItem("authToken");
+      const shortname = get(user).shortname;
+      if (token) {
+        initGlobalWebSocket(token, shortname);
+      }
+
+      if (currentPath === "/" || currentPath === "/login") {
+        redirectTo("/dashboard/admin");
       }
     } catch (error: any) {
-      console.error("Authentication check failed:", error);
-
-      if (error.response?.status === 401 || error.status === 401) {
-        console.log("401 error - redirecting to login");
-        await signout();
-        redirectTo("/login");
-      } else {
-        console.warn("Non-auth error during profile check:", error);
-        await signout();
-        redirectTo("/login");
-      }
+      // /info/me itself failed (network, server down). Treat as signed-out.
+      console.warn("Session probe failed:", error?.message ?? error);
+      await signout();
+      redirectTo("/login");
     }
   });
 </script>

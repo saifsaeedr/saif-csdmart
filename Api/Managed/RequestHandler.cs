@@ -1068,7 +1068,7 @@ public static class RequestHandler
         _ => null,
     };
 
-    private static Translation? ParseTranslation(object? value)
+    internal static Translation? ParseTranslation(object? value)
     {
         if (value is null) return null;
         if (value is JsonElement el)

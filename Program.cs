@@ -95,9 +95,10 @@ switch (subcommand)
     {
         // Version info is baked into the binary via InformationalVersion at build time.
         // Format: "describe branch=X date=Y" — set by build.sh -p:InformationalVersion=...
-        // `describe` is the raw `git describe --tags --always` output: an exact
-        // tag like "v0.8.11" on a clean release, or "v0.8.11-1-gdc7f250" past it
-        // (the short SHA is already embedded, so there's no separate commit field).
+        // `describe` is the raw `git describe --tags --always --long` output:
+        // always "<tag>-<n>-g<sha>" (e.g. "v0.8.22-0-g6c220d2" on the tag,
+        // "v0.8.22-3-g1a2b3c4" three commits past). The short SHA is always
+        // embedded, so there's no separate commit field.
         string json;
         var asmVersion = typeof(Program).Assembly
             .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
@@ -742,15 +743,19 @@ builder.Services.AddOpenApi(options =>
     // Suppress noisy ASP.NET framework logs.
     builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
     builder.Logging.AddFilter("Microsoft.Hosting.Lifetime", LogLevel.Information);
+    // Pin the dmart startup banner to Information so it survives even when
+    // the global default is raised to Warning.
+    builder.Logging.AddFilter("Dmart.Startup", LogLevel.Information);
 
     if (string.Equals(logFormat, "json", StringComparison.OrdinalIgnoreCase))
     {
-        builder.Logging.AddJsonConsole(o =>
-        {
-            o.JsonWriterOptions = new System.Text.Json.JsonWriterOptions { Indented = false };
-            o.TimestampFormat = "yyyy-MM-ddTHH:mm:ss.fffZ";
-            o.UseUtcTimestamp = true;
-        });
+        // Register the custom formatter directly in DI rather than via the
+        // AOT-incompatible generic AddConsoleFormatter<TFormatter, TOptions>
+        // overload (its TOptions binding goes through reflection).
+        builder.Logging.Services.AddSingleton<
+            Microsoft.Extensions.Logging.Console.ConsoleFormatter,
+            Dmart.DmartJsonConsoleFormatter>();
+        builder.Logging.AddConsole(o => o.FormatterName = Dmart.DmartJsonConsoleFormatter.FormatterName);
     }
 
     // LogSink is always registered so RequestLoggingMiddleware can resolve
@@ -943,16 +948,16 @@ Dmart.Plugins.Native.NativePluginLoader.WireSubprocessShutdown(
     app.Services.GetRequiredService<IHostApplicationLifetime>());
 
 // Log the baked-in build version as the first line of the startup banner.
-// Uses Microsoft.Hosting.Lifetime so it appears alongside Kestrel's
-// "Now listening on" in the standard info stream and is captured by the
-// JSONL sink (LOG_FILE) as a structured {Version, Runtime} record.
+// Uses the Dmart.Startup category (pinned to Information by the AddFilter
+// above) so it always survives, and is captured by the JSONL sink (LOG_FILE)
+// as a structured {Version, Runtime} record.
 {
     var v = typeof(Program).Assembly
         .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
         .OfType<System.Reflection.AssemblyInformationalVersionAttribute>()
         .FirstOrDefault()?.InformationalVersion ?? "dev";
     app.Services.GetRequiredService<ILoggerFactory>()
-        .CreateLogger("Microsoft.Hosting.Lifetime")
+        .CreateLogger("Dmart.Startup")
         .LogInformation("dmart {Version} on .NET {Runtime}", v, Environment.Version);
 }
 

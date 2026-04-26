@@ -56,8 +56,13 @@ const gitHash = (() => {
   }
 })();
 
-export default defineConfig({
-  base: "./",
+export default defineConfig(({command}) => ({
+  // dev: absolute base so vite serves public/ files (config.json, favicon) at
+  // /cxb/<file>, matching <base href="/cxb/"> in index.html. Without this the
+  // browser fetches /cxb/config.json and gets the SPA fallback HTML.
+  // build: relative base so the bundle is portable and works when mounted
+  // at any path by the embedding server.
+  base: command === "serve" ? "/cxb/" : "./",
   clearScreen: false,
   define: {
     'import.meta.env.VITE_GIT_HASH': JSON.stringify(gitHash),
@@ -152,5 +157,20 @@ export default defineConfig({
       },
     }
   },
-  server: {port: 1337},
-});
+  // dev-only proxy: with backend="" in config.json (the default), the SPA's
+  // tsdmart calls become /cxb/{managed,user,info}/... via document.baseURI
+  // resolution. Forward those to dmart on :8282 with the /cxb prefix
+  // stripped, since dmart only exposes the API at the bare paths. Sidesteps
+  // SameSite=Lax cookie loss across ports. Production embeds the SPA inside
+  // dmart so same-origin is automatic and this section is ignored.
+  server: {
+    port: 1337,
+    proxy: {
+      "^/cxb/(managed|user|info)(/.*)?": {
+        target: "http://localhost:8282",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/cxb/, ""),
+      },
+    },
+  },
+}));

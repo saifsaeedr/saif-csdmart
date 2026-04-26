@@ -1,5 +1,5 @@
 <script lang="ts">
-    import {Engine, functionCreateDatatable, Pagination, RowsPerPage, Sort,} from "svelte-datatables-net";
+    import {functionCreateDatatable, Pagination, RowsPerPage, Sort,} from "@/components/management/datatable";
     import {Dmart, DmartScope, type ApiResponseRecord, type QueryRequest, QueryType, SortyType,} from "@edraj/tsdmart";
     import cols from "@/utils/jsons/list_cols.json";
     import {searchListView} from "@/stores/management/triggers";
@@ -432,31 +432,6 @@
         }
     }
 
-    function handleSortRendered(node) {
-        const timer = setTimeout(() => {
-            const spanButton = node.querySelector(
-                'span[role="button"][style*="cursor:pointer"][style*="white-space: nowrap"]',
-            );
-            if (spanButton) {
-                spanButton.style.cssText =
-                    "cursor:pointer;display:inline-flex;align-items:center;gap:0.375rem;white-space:nowrap;";
-
-                const svgs = spanButton.querySelectorAll("svg");
-                svgs.forEach((svg: SVGElement) => {
-                    svg.classList.add("text-[color:var(--color-text-muted)]");
-                    svg.setAttribute("width", "14");
-                    svg.setAttribute("height", "14");
-                });
-            }
-        }, 0);
-
-        return {
-            destroy() {
-                clearTimeout(timer);
-            },
-        };
-    }
-
     function cellText(row: any, col: string): string {
         const raw = getValueByPath(
             columns?.[col]?.path?.split(".") ?? [],
@@ -519,9 +494,6 @@
         {#if total === null}
             <ListPlaceholder class="m-5" size="lg" style="width: 100vw"/>
         {:else}
-            {#if objectDatatable}
-                <Engine bind:propDatatable={objectDatatable}/>
-            {/if}
             <div class="mx-3" transition:fade={{ delay: 25 }}>
                 {#if objectDatatable?.arraySearched.length === 0}
                     <div class="py-6">
@@ -546,11 +518,9 @@
                             {/if}
                             {#each Object.keys(columns ?? {}) as col}
                                 <TableHeadCell class="p-2 border-b border-[color:var(--color-border)] font-semibold text-xs uppercase tracking-wide">
-                                    <div use:handleSortRendered>
-                                        <Sort bind:propDatatable={objectDatatable} propColumn={col}>
-                                            {columns?.[col]?.title}
-                                        </Sort>
-                                    </div>
+                                    <Sort bind:propDatatable={objectDatatable} propColumn={col}>
+                                        {columns?.[col]?.title}
+                                    </Sort>
                                 </TableHeadCell>
                             {/each}
                         </TableHead>

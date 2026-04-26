@@ -26,8 +26,12 @@ export async function getProfile() {
         }
 
         return null;
-    } catch (e) {
-        log.error("Error fetching profile:", e);
+    } catch (e: any) {
+        // 401 is the expected signal for "not signed in" during the boot
+        // probe; don't surface it as a console error.
+        if (e?.response?.status !== 401 && e?.status !== 401) {
+            log.error("Error fetching profile:", e);
+        }
         return null;
     }
 }

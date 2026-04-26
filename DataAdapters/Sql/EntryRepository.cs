@@ -107,7 +107,7 @@ public sealed class EntryRepository(Db db)
                 displayname = EXCLUDED.displayname,
                 description = EXCLUDED.description,
                 tags = EXCLUDED.tags,
-                updated_at = NOW(),
+                updated_at = EXCLUDED.updated_at,
                 owner_group_shortname = EXCLUDED.owner_group_shortname,
                 acl = EXCLUDED.acl,
                 payload = EXCLUDED.payload,
@@ -133,7 +133,11 @@ public sealed class EntryRepository(Db db)
         AddJsonb(cmd, JsonbHelpers.ToJsonb(e.Description));
         AddJsonbNotNull(cmd, JsonbHelpers.ToJsonbList(e.Tags));   // tags is NOT NULL
         cmd.Parameters.Add(new() { Value = e.CreatedAt == default ? DateTime.UtcNow : e.CreatedAt });
-        cmd.Parameters.Add(new() { Value = DateTime.UtcNow });
+        // Honor the caller's UpdatedAt — normal create/update flows set it to
+        // DateTime.UtcNow themselves, so behavior there is unchanged. The
+        // import path needs to preserve the imported value so a round-trip
+        // (export → delete → import) reproduces the row verbatim.
+        cmd.Parameters.Add(new() { Value = e.UpdatedAt == default ? DateTime.UtcNow : e.UpdatedAt });
         cmd.Parameters.Add(new() { Value = e.OwnerShortname });
         cmd.Parameters.Add(new() { Value = (object?)e.OwnerGroupShortname ?? DBNull.Value });
         AddJsonb(cmd, JsonbHelpers.ToJsonb(e.Acl));

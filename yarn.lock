@@ -1182,10 +1182,6 @@ chokidar@^4.0.0, chokidar@^4.0.1:
   dependencies:
     readdirp "^4.0.1"
 
-cl-editor@edraj/cl-editor:
-  version "2.3.1"
-  resolved "https://codeload.github.com/edraj/cl-editor/tar.gz/c7c608c4893f4888c761af92211857ef6168eaba"
-
 cli-color@^2.0.3:
   version "2.0.4"
   resolved "https://registry.yarnpkg.com/cli-color/-/cli-color-2.0.4.tgz#d658080290968816b322248b7306fad2346fb2c8"
@@ -2630,10 +2626,6 @@ p-map@^7.0.4:
   resolved "https://registry.yarnpkg.com/p-map/-/p-map-7.0.4.tgz#b81814255f542e252d5729dca4d66e5ec14935b8"
   integrity sha512-tkAQEw8ysMzmkhgw8k+1U/iPhWNhykKnSk4Rd5zLoPJCuJaGRPo6YposrZgaxHKzDHdDWWZvE/Sk7hsL2X/CpQ==
 
-"pagination-svelte@https://github.com/edraj/pagination-svelte":
-  version "0.1.4"
-  resolved "https://github.com/edraj/pagination-svelte#bddf5979128b7039c2c057a7b8ca66a3852108f6"
-
 parse5-htmlparser2-tree-adapter@^7.1.0:
   version "7.1.0"
   resolved "https://registry.yarnpkg.com/parse5-htmlparser2-tree-adapter/-/parse5-htmlparser2-tree-adapter-7.1.0.tgz#b5a806548ed893a43e24ccb42fbb78069311e81b"
@@ -2937,12 +2929,6 @@ svelte-check@^4.4.6:
     fdir "^6.2.0"
     picocolors "^1.0.0"
     sade "^1.7.4"
-
-svelte-datatables-net@edraj/svelte-datatables-net:
-  version "0.0.11"
-  resolved "https://codeload.github.com/edraj/svelte-datatables-net/tar.gz/299e54a3ea9b347f10624a8f7fbe31ae4e666352"
-  dependencies:
-    pagination-svelte "https://github.com/edraj/pagination-svelte"
 
 svelte-floating-ui@1.5.8:
   version "1.5.8"

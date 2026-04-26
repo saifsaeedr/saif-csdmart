@@ -47,9 +47,25 @@
         Dmart.setToken(storedToken);
     }
 
-    getSpaces();
-
-    const profilePromise = Dmart.getProfile();
+    // Boot session probe: /info/me returns 200 with {authenticated: bool}
+    // for both signed-in and anonymous callers (no 401 noise on cold loads).
+    // Mid-session expiration is still detected by the response interceptor
+    // above when a regular API call returns 401.
+    const profilePromise = dmartAxios.get("info/me").then((r) => {
+        const authed = r.data?.attributes?.authenticated === true;
+        if (!authed) {
+            // Clean up any stale local state so the Login form shows.
+            if (typeof localStorage !== "undefined") {
+                localStorage.removeItem("authToken");
+                localStorage.removeItem("user");
+            }
+            user.set({signedin: false, locale: $user?.locale});
+            throw new Error("not signed in");
+        }
+        // Authed — fire the spaces fetch (best-effort) and resolve.
+        getSpaces().catch(() => {});
+        return r.data;
+    });
 </script>
 
 {#await profilePromise}

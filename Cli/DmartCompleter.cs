@@ -9,8 +9,8 @@ public sealed class DmartCompleter(DmartClient dmart) : IAutoCompleteHandler
     private static readonly string[] Commands =
     {
         "ls", "cd", "pwd", "switch", "mkdir", "create", "rm", "move",
-        "cat", "print", "help", "attach", "upload", "request",
-        "progress", "import", "export", "exit", "quit",
+        "cat", "print", "find", "whoami", "version", "help", "attach",
+        "upload", "request", "progress", "import", "export", "exit", "quit",
     };
 
     public char[] Separators { get; set; } = { ' ' };

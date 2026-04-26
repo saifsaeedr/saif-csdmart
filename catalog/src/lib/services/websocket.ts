@@ -123,7 +123,17 @@ export class WebSocketService {
         // Derive WS URL from backend: http(s)://host[/base] → ws(s)://host[/base]/ws.
         // The `websocket` field was removed from config; backend is the single
         // source of truth since the WS endpoint always lives at /ws beside the API.
-        const parsed = new URL(website.backend.replace(/\/+$/, ""));
+        // When backend is empty (same-origin deployment, e.g. SPA embedded in
+        // dmart), fall back to the page's origin instead of crashing on `new
+        // URL("")`.
+        const backendBase =
+          (website.backend?.trim() || (typeof window !== "undefined" ? window.location.origin : "")).replace(/\/+$/, "");
+        if (!backendBase) {
+          this.updateStatus("disconnected");
+          resolve(false);
+          return;
+        }
+        const parsed = new URL(backendBase);
         const wsProtocol = parsed.protocol === "https:" ? "wss:" : "ws:";
         const path = parsed.pathname.replace(/\/+$/, "");
         const wsPath = path.endsWith("/ws") ? path : `${path}/ws`;

@@ -38,7 +38,7 @@
   </PropertyGroup>
   <Target Name="SetGitVersion" BeforeTargets="GetAssemblyVersion"
           Condition="'$(InformationalVersion)' == ''">
-    <Exec Command="git describe --tags --always 2>/dev/null || echo dev"
+    <Exec Command="git describe --tags --always --long 2>/dev/null || echo dev"
           ConsoleToMSBuild="true" StandardOutputImportance="low" IgnoreExitCode="true">
       <Output TaskParameter="ConsoleOutput" PropertyName="GitDescribe" />
     </Exec>
