@@ -40,7 +40,7 @@
     import MetaRoleForm from "@/components/management/forms/MetaRoleForm.svelte";
     import MetaPermissionForm from "@/components/management/forms/MetaPermissionForm.svelte";
     import SpaceForm from "@/components/management/forms/SpaceForm.svelte";
-    import { untrack, onDestroy } from "svelte";
+    import { untrack, onDestroy, tick } from "svelte";
     import { goto } from "@roxi/routify";
     import HistoryListView from "@/components/management/HistoryListView.svelte";
     import MetaTicketForm from "@/components/management/forms/MetaTicketForm.svelte";
@@ -89,6 +89,8 @@
         subpath: string;
         resource_type: ResourceType;
     } = $props();
+
+    $goto;
 
     $searchListView = "";
 
@@ -304,7 +306,11 @@
         );
 
         if (result.success) {
+            openDeleteModal = false;
+            isActionLoading = false;
+            await tick();
             navigateAfterEntryAction();
+            return;
         } else {
             errorMessage = result.errorMessage;
         }
