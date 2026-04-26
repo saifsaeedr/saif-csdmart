@@ -195,7 +195,18 @@ public static class RequestHandler
                     }
                 }
 
-                if (failedRecords.Count == 0) return Response.Ok(responses);
+                if (failedRecords.Count == 0)
+                {
+                    // Update/Patch/Delete don't return records at all — clients
+                    // only need success confirmation, and echoing the request
+                    // payload (or, on Delete, a row that no longer exists) is
+                    // noise. Create/Move/Assign/UpdateAcl still emit `records`
+                    // so callers can read back the freshly assigned uuid /
+                    // created_at / updated_at via WithCreatedMetaAttributes.
+                    var omitRecords = req.RequestType is RequestType.Update
+                        or RequestType.Patch or RequestType.Delete;
+                    return Response.Ok(omitRecords ? null : responses);
+                }
 
                 // Python aggregate failure: HTTP 400 with info=[{successfull, failed}].
                 // The "successfull" typo is preserved — clients branch on that key.
