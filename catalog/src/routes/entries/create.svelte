@@ -53,7 +53,11 @@
       prefix: "my-prefix-",
     }),
   );
+  // Touch both Routify helpers at root level so Svelte 5 binds the
+  // routify context before any async work (onMount, $effect) reads them.
+  // Without this Routify logs "Unable to access context" on navigation.
   $goto;
+  $params;
 
   let isLoading = $state(false);
   let content = "";
@@ -255,7 +259,7 @@
     try {
       const response = await getSpaces(false, DmartScope.managed, ["management"]);
 
-      spaces = response?.records.map((space: any) => ({
+      spaces = (response?.records ?? []).map((space: any) => ({
         value: space?.shortname,
         name: space?.attributes?.displayname?.en || space?.shortname,
       }));
@@ -288,16 +292,20 @@
         DmartScope.managed,
       );
 
-      const folders = response.records.filter(
+      // The server returns records: null when the queried subpath has no
+      // children — coerce to [] so the .filter/.some calls below don't blow
+      // up on a freshly created (or genuinely empty) folder.
+      const records: any[] = response?.records ?? [];
+      const folders = records.filter(
         (item: any) => item.resource_type === "folder",
       );
-      const hasNonFolderContent = response.records.some(
+      const hasNonFolderContent = records.some(
         (item: any) => item.resource_type !== "folder",
       );
       if (parentPath === "") {
         itemResourceType =
-          response?.records[0]?.attributes?.payload?.body
-            .content_resource_types[0];
+          records[0]?.attributes?.payload?.body
+            ?.content_resource_types?.[0];
       }
 
       const levelData = {
@@ -312,12 +320,12 @@
         })),
         resource_type: itemResourceType,
         workflow_shortname:
-          response.records[0]?.attributes?.payload?.body
-            ?.workflow_shortnames[0] || "",
+          records[0]?.attributes?.payload?.body
+            ?.workflow_shortnames?.[0] || "",
         schema_shortname:
-          response.records[0]?.attributes?.payload?.schema_shortname ||
-          response.records[0]?.attributes?.payload?.body
-            ?.content_schema_shortnames[0] ||
+          records[0]?.attributes?.payload?.schema_shortname ||
+          records[0]?.attributes?.payload?.body
+            ?.content_schema_shortnames?.[0] ||
           "",
         canCreateEntry:
           level > 0 || hasNonFolderContent || folders.length === 0,
