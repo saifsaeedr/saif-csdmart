@@ -309,6 +309,24 @@ printf '%-45s' "Get profile:" >&2
 RESP=$(curl -s -H "$AUTH_HEADER" -H "$CT" "$API_URL/user/profile")
 expect_success "" "$RESP"
 
+# Bearer-only logout must delete the matching session row; otherwise a token
+# remains usable until JWT expiry when the auth_token cookie is absent.
+printf '%-45s' "Bearer logout revokes token:" >&2
+LOGOUT_LOGIN=$(curl -s -H "$CT" -d "{\"shortname\":\"$ADMIN_SHORTNAME\",\"password\":\"$ADMIN_PASSWORD\"}" "$API_URL/user/login")
+LOGOUT_TOKEN=$(echo "$LOGOUT_LOGIN" | jq -r '.records[0].attributes.access_token // empty')
+if [[ -n "$LOGOUT_TOKEN" ]]; then
+    LOGOUT_AUTH="Authorization: Bearer $LOGOUT_TOKEN"
+    LOGOUT_RESP=$(curl -s -X POST -H "$LOGOUT_AUTH" "$API_URL/user/logout")
+    LOGOUT_AFTER=$(curl -s -o /dev/null -w '%{http_code}' -H "$LOGOUT_AUTH" "$API_URL/info/manifest")
+    if echo "$LOGOUT_RESP" | jq -e '.status == "success"' > /dev/null 2>&1 && [[ "$LOGOUT_AFTER" == "401" ]]; then
+        ok
+    else
+        nope "logout=$LOGOUT_RESP after=$LOGOUT_AFTER"
+    fi
+else
+    nope "second login failed: $LOGOUT_LOGIN"
+fi
+
 # ============================================================================
 # 3. Bootstrap: delete the test space if it lingers from a previous run
 # ============================================================================
@@ -1127,7 +1145,8 @@ fi
 # 65. Limited-user permission: create user with restricted role
 # ============================================================================
 # Create a permission, role, and user that can only access "test" space content.
-# Then verify spaces listing, root query, folder entry, and counters all work.
+# Then verify spaces listing, root query, folder entry, counters, and row-level
+# ACL on tags/aggregation all work.
 LPERM="curltest_perm_$(date +%s)"
 LROLE="curltest_role_$(date +%s)"
 LUSER="curltest_user_$(date +%s)"
@@ -1142,7 +1161,7 @@ SETUP1=$(curl -s -H "$CT" -H "$AUTH_HEADER" "$API_URL/managed/request" -d "{
       \"subpaths\":{\"management\":[\"users\",\"schema\"],\"$SPACE\":[\"__all_subpaths__\"]},
       \"resource_types\":[\"content\",\"folder\",\"user\",\"schema\"],
       \"actions\":[\"view\",\"query\"],
-      \"conditions\":[]
+      \"conditions\":[\"is_active\"]
     }
   }]
 }")
@@ -1252,7 +1271,70 @@ else
     nope "limited user login failed"
 fi
 
+# Seed active + inactive rows under an allowed subpath. The limited permission
+# requires is_active, so tags and aggregation must not leak the inactive row.
+ACL_SUB="acl_probe_$(date +%s)"
+ACL_VISIBLE="acl_visible_$(date +%s)"
+ACL_HIDDEN="acl_hidden_$(date +%s)"
+ACL_VISIBLE_TAG="acl_visible_tag_$(date +%s)"
+ACL_HIDDEN_TAG="acl_hidden_tag_$(date +%s)"
+curl -s -H "$CT" -H "$AUTH_HEADER" "$API_URL/managed/request" -d "{
+  \"space_name\":\"$SPACE\",\"request_type\":\"create\",\"records\":[
+    {\"resource_type\":\"space\",\"subpath\":\"/\",\"shortname\":\"$SPACE\",\"attributes\":{\"is_active\":true}}
+  ]
+}" > /dev/null 2>&1
+ACL_SETUP=$(curl -s -H "$CT" -H "$AUTH_HEADER" "$API_URL/managed/request" -d "{
+  \"space_name\":\"$SPACE\",\"request_type\":\"create\",\"records\":[
+    {\"resource_type\":\"folder\",\"subpath\":\"/\",\"shortname\":\"$ACL_SUB\",\"attributes\":{\"is_active\":true}},
+    {\"resource_type\":\"content\",\"subpath\":\"/$ACL_SUB\",\"shortname\":\"$ACL_VISIBLE\",
+     \"attributes\":{\"is_active\":true,\"tags\":[\"$ACL_VISIBLE_TAG\"],
+                    \"payload\":{\"content_type\":\"json\",\"body\":{\"bucket\":\"visible\"}}}},
+    {\"resource_type\":\"content\",\"subpath\":\"/$ACL_SUB\",\"shortname\":\"$ACL_HIDDEN\",
+     \"attributes\":{\"is_active\":false,\"tags\":[\"$ACL_HIDDEN_TAG\"],
+                    \"payload\":{\"content_type\":\"json\",\"body\":{\"bucket\":\"hidden\"}}}}
+  ]
+}")
+
+printf '%-45s' "Limited user: tags respect ACL:" >&2
+if [ -n "$LTOKEN" ]; then
+    LTAGS=$(curl -s -H "$CT" -H "$LAUTH" "$API_URL/managed/query" -d "{
+      \"type\":\"tags\",\"space_name\":\"$SPACE\",\"subpath\":\"$ACL_SUB\",
+      \"filter_schema_names\":[],\"limit\":20
+    }")
+    if echo "$LTAGS" | jq -e ".status == \"success\" and ((.records[0].attributes.tags // []) | index(\"$ACL_VISIBLE_TAG\") != null) and ((.records[0].attributes.tags // []) | index(\"$ACL_HIDDEN_TAG\") == null)" > /dev/null 2>&1; then
+        ok
+    else
+        nope "setup=$ACL_SETUP tags=$LTAGS"
+    fi
+else
+    nope "limited user login failed"
+fi
+
+printf '%-45s' "Limited user: aggregation respects ACL:" >&2
+if [ -n "$LTOKEN" ]; then
+    LAGG=$(curl -s -H "$CT" -H "$LAUTH" "$API_URL/managed/query" -d "{
+      \"type\":\"aggregation\",\"space_name\":\"$SPACE\",\"subpath\":\"$ACL_SUB\",
+      \"filter_schema_names\":[],\"sort_by\":\"@payload.body.bucket\",\"sort_type\":\"ascending\",\"limit\":20,
+      \"aggregation_data\":{\"group_by\":[\"@payload.body.bucket\"],
+        \"reducers\":[{\"reducer_name\":\"count\",\"alias\":\"count\"}]}
+    }")
+    if echo "$LAGG" | jq -e '.status == "success" and ([.records[]?.attributes.payload_body_bucket] | index("visible") != null and index("hidden") == null)' > /dev/null 2>&1; then
+        ok
+    else
+        nope "aggregation=$LAGG"
+    fi
+else
+    nope "limited user login failed"
+fi
+
 # Cleanup limited user, role, permission
+curl -s -H "$CT" -H "$AUTH_HEADER" "$API_URL/managed/request" -d "{
+  \"space_name\":\"$SPACE\",\"request_type\":\"delete\",\"records\":[
+    {\"resource_type\":\"content\",\"subpath\":\"/$ACL_SUB\",\"shortname\":\"$ACL_VISIBLE\"},
+    {\"resource_type\":\"content\",\"subpath\":\"/$ACL_SUB\",\"shortname\":\"$ACL_HIDDEN\"},
+    {\"resource_type\":\"folder\",\"subpath\":\"/\",\"shortname\":\"$ACL_SUB\"}
+  ]
+}" > /dev/null 2>&1
 curl -s -H "$CT" -H "$AUTH_HEADER" "$API_URL/managed/request" -d "{
   \"space_name\":\"management\",\"request_type\":\"delete\",\"records\":[
     {\"resource_type\":\"user\",\"subpath\":\"/users\",\"shortname\":\"$LUSER\"},
@@ -1262,7 +1344,7 @@ curl -s -H "$CT" -H "$AUTH_HEADER" "$API_URL/managed/request" -d "{
 }" > /dev/null 2>&1
 
 # ============================================================================
-# 71–73. Anonymous /public/query via world permission
+# 71–74. Anonymous /public/query via world permission
 # ============================================================================
 # End-to-end: bootstrap anonymous + role + world permission (leading-slash
 # subpath + is_active condition — the field-reported shape) against an
@@ -1318,7 +1400,15 @@ else
     nope "$PUB_RESP"
 fi
 
-# 73. Unlisted subpath stays denied — the fix must not be a blanket grant.
+printf '%-45s' "Anonymous /public/query GET sees entry:" >&2
+PUB_GET_RESP=$(curl -s "$API_URL/public/query/search/$SPACE/public_items?limit=10")
+if echo "$PUB_GET_RESP" | jq -e ".status == \"success\" and (.records | map(.shortname) | contains([\"$WSHORT\"]))" > /dev/null 2>&1; then
+    ok
+else
+    nope "$PUB_GET_RESP"
+fi
+
+# 74. Unlisted subpath stays denied — the fix must not be a blanket grant.
 printf '%-45s' "Anonymous /public/query denied elsewhere:" >&2
 DENIED_RESP=$(curl -s -H "$CT" \
     -d "{\"type\":\"search\",\"space_name\":\"$SPACE\",\"subpath\":\"not_permitted\",\"limit\":10}" \

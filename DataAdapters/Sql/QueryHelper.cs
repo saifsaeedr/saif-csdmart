@@ -1279,11 +1279,14 @@ public static class QueryHelper
         var args = new List<NpgsqlParameter>();
         var where = BuildWhereClause(q, args);
 
+        var groupBy = q.AggregationData.GroupBy ?? new();
+        var reducers = q.AggregationData.Reducers ?? new();
+
         // Build SELECT clause: group_by columns + aggregate functions
         var selectParts = new List<string>();
 
         // Group-by columns
-        foreach (var gb in q.AggregationData.GroupBy)
+        foreach (var gb in groupBy)
         {
             var raw = gb.StartsWith('@') ? gb[1..] : gb;
             var expr = ResolveFieldExpr(raw);
@@ -1292,17 +1295,18 @@ public static class QueryHelper
         }
 
         // Aggregate functions (reducers)
-        foreach (var reducer in q.AggregationData.Reducers)
+        foreach (var reducer in reducers)
         {
             var funcName = MapReducerToSql(reducer.ReducerName);
             if (funcName is null) continue;
 
             string fieldExpr;
-            if (reducer.Args.Count == 0)
+            var reducerArgs = reducer.Args ?? new();
+            if (reducerArgs.Count == 0)
                 fieldExpr = "*";
             else
             {
-                var arg0 = reducer.Args[0];
+                var arg0 = reducerArgs[0];
                 if (arg0.StartsWith('@')) arg0 = arg0[1..];
                 var resolved = ResolveFieldExpr(arg0);
                 if (resolved is null) continue;
@@ -1326,9 +1330,9 @@ public static class QueryHelper
             AppendAclFilter(sql, args, userShortname, tableName, queryPolicies);
 
         // GROUP BY
-        if (q.AggregationData.GroupBy.Count > 0)
+        if (groupBy.Count > 0)
         {
-            var gbExprs = q.AggregationData.GroupBy
+            var gbExprs = groupBy
                 .Select(gb => gb.StartsWith('@') ? gb[1..] : gb)
                 .Select(ResolveFieldExpr)
                 .Where(e => e is not null)
