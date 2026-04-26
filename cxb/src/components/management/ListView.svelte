@@ -420,8 +420,11 @@
         }
 
         if (isAllBulkChecked) {
-            // Select all — build the full list in one pass
-            $bulkBucket = objectDatatable.arrayRawData.map((row: any) => ({
+            // Select all — build the full list in one pass.
+            // Guard against the auto-call from the rowsPerPage $effect
+            // landing while objectDatatable is mid-rebuild (arrayRawData
+            // momentarily undefined despite the factory's setter coercion).
+            $bulkBucket = (objectDatatable.arrayRawData ?? []).map((row: any) => ({
                 shortname: row.shortname,
                 resource_type: row.resource_type,
                 ...row,
