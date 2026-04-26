@@ -146,7 +146,12 @@ public sealed class EntryService(
         return "payload failed schema validation: " + string.Join("; ", errors);
     }
 
-    public async Task<Result<Entry>> UpdateAsync(Locator locator, Dictionary<string, object> patch, string? actor, CancellationToken ct = default)
+    public async Task<Result<Entry>> UpdateAsync(
+        Locator locator,
+        Dictionary<string, object> patch,
+        string? actor,
+        CancellationToken ct = default,
+        bool allowRestrictedFields = false)
     {
         // Load existing first so the permission check has the resource context for
         // "own"/"is_active" conditions and the patch dict for field-restriction gating.
@@ -156,7 +161,7 @@ public sealed class EntryService(
         if (!await perms.CanUpdateAsync(actor, locator, PermissionService.FromEntry(existing), patch, ct))
             return Result<Entry>.Fail(InternalErrorCode.NOT_ALLOWED, "no update access", ErrorTypes.Auth);
 
-        var merged = ApplyPatch(existing, patch);
+        var merged = ApplyPatch(existing, patch, allowRestrictedFields);
 
         // Validate the MERGED entry (not the old one) so patches can't bypass schema rules.
         var validationError = await ValidatePayloadAsync(merged, ct);
@@ -490,7 +495,7 @@ public sealed class EntryService(
         return d;
     }
 
-    private static Entry ApplyPatch(Entry existing, Dictionary<string, object> patch)
+    private static Entry ApplyPatch(Entry existing, Dictionary<string, object> patch, bool allowRestrictedFields)
     {
         string? Str(string key, string? fallback)
             => patch.TryGetValue(key, out var v) && v is not null ? v.ToString() : fallback;
@@ -560,9 +565,48 @@ public sealed class EntryService(
             Tags = patch.TryGetValue("tags", out var tagsRaw) && tagsRaw is IEnumerable<object> tags
                 ? tags.Select(t => t?.ToString() ?? "").ToList() : existing.Tags,
             IsActive = patch.TryGetValue("is_active", out var ia) && ia is bool b ? b : existing.IsActive,
+            // Python parity: `acl` lives in Meta.restricted_fields and is only
+            // writable through the dedicated update_acl path. Regular update
+            // ignores it; DispatchUpdateAclAsync opts in via
+            // allowRestrictedFields=true.
+            Acl = allowRestrictedFields && patch.ContainsKey("acl")
+                ? ParsePatchAcl(patch)
+                : existing.Acl,
             Payload = payload,
             UpdatedAt = DateTime.UtcNow,
         };
+    }
+
+    // Mirrors RequestHandler.ParseAcl; kept local so EntryService doesn't
+    // reach across into the API layer.
+    private static List<AclEntry>? ParsePatchAcl(Dictionary<string, object> patch)
+    {
+        if (!patch.TryGetValue("acl", out var raw) || raw is null) return null;
+        if (raw is not JsonElement arr || arr.ValueKind != JsonValueKind.Array) return null;
+        var list = new List<AclEntry>();
+        foreach (var item in arr.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object) continue;
+            var user = item.TryGetProperty("user_shortname", out var us) && us.ValueKind == JsonValueKind.String
+                ? us.GetString() : null;
+            if (string.IsNullOrEmpty(user)) continue;
+            List<string>? allowed = null;
+            if (item.TryGetProperty("allowed_actions", out var aa) && aa.ValueKind == JsonValueKind.Array)
+            {
+                allowed = new List<string>();
+                foreach (var a in aa.EnumerateArray())
+                    if (a.ValueKind == JsonValueKind.String && a.GetString() is { } s) allowed.Add(s);
+            }
+            List<string>? denied = null;
+            if (item.TryGetProperty("denied", out var dd) && dd.ValueKind == JsonValueKind.Array)
+            {
+                denied = new List<string>();
+                foreach (var d in dd.EnumerateArray())
+                    if (d.ValueKind == JsonValueKind.String && d.GetString() is { } s) denied.Add(s);
+            }
+            list.Add(new AclEntry { UserShortname = user, AllowedActions = allowed, Denied = denied });
+        }
+        return list;
     }
 
 }

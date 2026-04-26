@@ -100,6 +100,118 @@ public class ManagedCrudDbTests : IClassFixture<DmartFactory>
         afterDelete.StatusCode.ShouldBe(HttpStatusCode.NotFound);
     }
 
+    // Python parity: RequestType.update_acl writes record.attributes["acl"]
+    // through to the persisted entry; regular RequestType.update keeps acl in
+    // Meta.restricted_fields and silently ignores it. The C# port previously
+    // dropped acl on both paths because EntryService.ApplyPatch never read
+    // the "acl" key. This test pins both halves of the parity.
+    [FactIfPg]
+    public async Task UpdateAcl_Writes_Acl_RegularUpdate_Ignores_It()
+    {
+        var client = _factory.CreateClient();
+        var token = await GetTokenAsync(client);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var shortname = $"acltest-{Guid.NewGuid():N}".Substring(0, 16);
+        var space = "test";
+        var subpath = "/itest";
+
+        var createReq = new Request
+        {
+            RequestType = RequestType.Create,
+            SpaceName = space,
+            Records = new()
+            {
+                new Record
+                {
+                    ResourceType = ResourceType.Content,
+                    Subpath = subpath,
+                    Shortname = shortname,
+                    Attributes = new() { ["displayname"] = "ACL parity probe" },
+                },
+            },
+        };
+        (await client.PostAsJsonAsync("/managed/request", createReq, DmartJsonContext.Default.Request))
+            .StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        try
+        {
+            // 1. Regular update with an acl attribute → must NOT persist (Python's
+            //    update_from_record skips restricted_fields).
+            var sneakyAcl = new Request
+            {
+                RequestType = RequestType.Update,
+                SpaceName = space,
+                Records = new()
+                {
+                    new Record
+                    {
+                        ResourceType = ResourceType.Content,
+                        Subpath = subpath,
+                        Shortname = shortname,
+                        Attributes = new()
+                        {
+                            ["displayname"] = "still updating",
+                            ["acl"] = JsonSerializer.SerializeToElement(new[]
+                            {
+                                new { user_shortname = "intruder", allowed_actions = new[] { "view", "update" } },
+                            }),
+                        },
+                    },
+                },
+            };
+            (await client.PostAsJsonAsync("/managed/request", sneakyAcl, DmartJsonContext.Default.Request))
+                .StatusCode.ShouldBe(HttpStatusCode.OK);
+
+            var afterRegular = await client.GetAsync($"/managed/entry/content/{space}/{subpath.TrimStart('/')}/{shortname}");
+            afterRegular.StatusCode.ShouldBe(HttpStatusCode.OK);
+            var regularBody = await afterRegular.Content.ReadAsStringAsync();
+            // Python restricted_fields parity: regular update must not write acl.
+            regularBody.ShouldNotContain("\"intruder\"");
+
+            // 2. update_acl request → MUST persist the new acl.
+            var setAcl = new Request
+            {
+                RequestType = RequestType.UpdateAcl,
+                SpaceName = space,
+                Records = new()
+                {
+                    new Record
+                    {
+                        ResourceType = ResourceType.Content,
+                        Subpath = subpath,
+                        Shortname = shortname,
+                        Attributes = new()
+                        {
+                            ["acl"] = JsonSerializer.SerializeToElement(new[]
+                            {
+                                new { user_shortname = "alice", allowed_actions = new[] { "view" } },
+                            }),
+                        },
+                    },
+                },
+            };
+            (await client.PostAsJsonAsync("/managed/request", setAcl, DmartJsonContext.Default.Request))
+                .StatusCode.ShouldBe(HttpStatusCode.OK);
+
+            var afterUpdateAcl = await client.GetAsync($"/managed/entry/content/{space}/{subpath.TrimStart('/')}/{shortname}");
+            afterUpdateAcl.StatusCode.ShouldBe(HttpStatusCode.OK);
+            var aclBody = await afterUpdateAcl.Content.ReadAsStringAsync();
+            // update_acl must persist record.attributes["acl"] onto the entry.
+            aclBody.ShouldContain("\"alice\"");
+        }
+        finally
+        {
+            var cleanup = new Request
+            {
+                RequestType = RequestType.Delete,
+                SpaceName = space,
+                Records = new() { new Record { ResourceType = ResourceType.Content, Subpath = subpath, Shortname = shortname } },
+            };
+            await client.PostAsJsonAsync("/managed/request", cleanup, DmartJsonContext.Default.Request);
+        }
+    }
+
     [FactIfPg]
     public async Task Query_Returns_Success_With_Records_List()
     {

@@ -825,7 +825,10 @@ public static class RequestHandler
         var patch = new Dictionary<string, object>(StringComparer.Ordinal);
         if (attrs.TryGetValue("acl", out var aclRaw)) patch["acl"] = aclRaw;
         var locator = new Locator(rec.ResourceType, space, rec.Subpath, rec.Shortname);
-        var result = await entries.UpdateAsync(locator, patch, actor, ct);
+        // allowRestrictedFields opts this caller into ApplyPatch's `acl`
+        // branch — the gate matches Python's Meta.restricted_fields, which
+        // only the dedicated update_acl handler bypasses.
+        var result = await entries.UpdateAsync(locator, patch, actor, ct, allowRestrictedFields: true);
         return result.IsOk
             ? (Response.Ok(), rec with { Uuid = result.Value!.Uuid })
             : (Response.Fail(result.ErrorCode!, result.ErrorMessage!, ErrorTypes.Request), rec);
