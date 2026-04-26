@@ -56,7 +56,10 @@ export async function getAvatar(shortname: string) {
     };
     const results = await Dmart.query(query, getCurrentScope());
 
-    if (results?.records.length === 0) {
+    // The server returns records: null (not []) when nothing matches, so
+    // the optional chain has to extend through .records too — otherwise
+    // .length throws "Cannot read properties of undefined".
+    if (!results?.records?.length) {
         return null;
     }
 
@@ -66,7 +69,7 @@ export async function getAvatar(shortname: string) {
         space_name: PERSONAL_SPACE,
         subpath: `people/${shortname}/protected/`,
         parent_shortname: "avatar",
-        shortname: results?.records[0].attributes.payload.body
+        shortname: results.records[0].attributes.payload.body
     });
 }
 
