@@ -343,6 +343,15 @@ public static class RequestHandler
             SpaceName = space,
             Subpath = "/" + rec.Subpath.TrimStart('/'),
             OwnerShortname = actor,
+            OwnerGroupShortname = attrs.TryGetValue("owner_group_shortname", out var ogs) ? ConvertToString(ogs) : null,
+            // Python parity: Meta.from_record passes every Metas-base attribute
+            // (slug/displayname/description/tags/payload) onto the user object.
+            // The C# port previously dropped these on user create.
+            Slug = attrs.TryGetValue("slug", out var sl) ? ConvertToString(sl) : null,
+            Displayname = attrs.TryGetValue("displayname", out var dn) ? ParseTranslation(dn) : null,
+            Description = attrs.TryGetValue("description", out var desc) ? ParseTranslation(desc) : null,
+            Tags = ExtractStringList(attrs, "tags") ?? new(),
+            Payload = ParsePayloadFromAttrs(attrs),
             Email = attrs.TryGetValue("email", out var e) ? ConvertToString(e) : null,
             Msisdn = attrs.TryGetValue("msisdn", out var m) ? ConvertToString(m) : null,
             Password = string.IsNullOrEmpty(passwordRaw) ? null : hasher.Hash(passwordRaw),
@@ -380,6 +389,12 @@ public static class RequestHandler
             SpaceName = space,
             Subpath = "/" + rec.Subpath.TrimStart('/'),
             OwnerShortname = actor,
+            // Python parity: Metas-base attributes flow through role create too.
+            Slug = attrs.TryGetValue("slug", out var sl) ? ConvertToString(sl) : null,
+            Displayname = attrs.TryGetValue("displayname", out var dn) ? ParseTranslation(dn) : null,
+            Description = attrs.TryGetValue("description", out var desc) ? ParseTranslation(desc) : null,
+            Tags = ExtractStringList(attrs, "tags") ?? new(),
+            Payload = ParsePayloadFromAttrs(attrs),
             Permissions = ExtractStringList(attrs, "permissions") ?? new(),
             IsActive = !attrs.TryGetValue("is_active", out var ia) || !IsExplicitlyFalse(ia),
             CreatedAt = TimeUtils.Now(),
@@ -401,6 +416,12 @@ public static class RequestHandler
             SpaceName = space,
             Subpath = "/" + rec.Subpath.TrimStart('/'),
             OwnerShortname = actor,
+            // Python parity: Metas-base attributes flow through permission create.
+            Slug = attrs.TryGetValue("slug", out var sl) ? ConvertToString(sl) : null,
+            Displayname = attrs.TryGetValue("displayname", out var dn) ? ParseTranslation(dn) : null,
+            Description = attrs.TryGetValue("description", out var desc) ? ParseTranslation(desc) : null,
+            Tags = ExtractStringList(attrs, "tags") ?? new(),
+            Payload = ParsePayloadFromAttrs(attrs),
             Subpaths = ExtractSubpathsDict(attrs),
             ResourceTypes = ExtractStringList(attrs, "resource_types") ?? new(),
             Actions = ExtractStringList(attrs, "actions") ?? new(),
@@ -437,6 +458,12 @@ public static class RequestHandler
             SpaceName = rec.Shortname,    // self-referential — every space row's space_name = shortname
             Subpath = "/",
             OwnerShortname = actor,
+            // Python parity: Metas-base attributes flow through space create.
+            Slug = attrs.TryGetValue("slug", out var sl) ? ConvertToString(sl) : null,
+            Displayname = attrs.TryGetValue("displayname", out var dn) ? ParseTranslation(dn) : null,
+            Description = attrs.TryGetValue("description", out var desc) ? ParseTranslation(desc) : null,
+            Tags = ExtractStringList(attrs, "tags") ?? new(),
+            Payload = ParsePayloadFromAttrs(attrs),
             IsActive = !attrs.TryGetValue("is_active", out var ia) || !IsExplicitlyFalse(ia),
             HideSpace = attrs.TryGetValue("hide_space", out var hs) ? IsTruthy(hs) : null,
             IndexingEnabled = attrs.TryGetValue("indexing_enabled", out var ie) && IsTruthy(ie),
