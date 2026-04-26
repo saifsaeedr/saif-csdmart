@@ -8,8 +8,11 @@ import svelteMd from "vite-plugin-svelte-md";
 
 const production = process.env.NODE_ENV === "production";
 
-export default defineConfig({
-  base: "./",
+export default defineConfig(({ command }) => ({
+  // dev: absolute base so vite serves public/ (config.json, favicon) at
+  // /cat/<file>, matching <base href="/cat/"> in index.html.
+  // build: relative base for portability when embedded under any path.
+  base: command === "serve" ? "/cat/" : "./",
   clearScreen: false,
   resolve: {
     alias: {
@@ -100,5 +103,19 @@ export default defineConfig({
       // minify: true, // This is handled by cssMinify above
     },
   },
-  server: { port: 1337 },
-});
+  // dev-only proxy: with backend="" in config.json, the SPA's tsdmart calls
+  // become /cat/{managed,user,info}/... via document.baseURI. Forward those
+  // to dmart on :8282 with the /cat prefix stripped (dmart only mounts the
+  // API at bare paths). Keeps requests same-origin so SameSite=Lax cookies
+  // work. Production embeds the SPA inside dmart so this section is ignored.
+  server: {
+    port: 1337,
+    proxy: {
+      "^/cat/(managed|user|info)(/.*)?": {
+        target: "http://localhost:8282",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/cat/, ""),
+      },
+    },
+  },
+}));
