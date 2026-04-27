@@ -158,13 +158,6 @@ switch (subcommand)
                              Backfill entries.query_policies for rows written
                              before write-time population landed. Idempotent.
                              Args: [<space>] [--dry-run]
-<<<<<<< HEAD
-              create-users-folders
-                             Backfill personal/people/<shortname>/{notifications,
-                             private,protected,public,inbox} for every user.
-                             Idempotent — existing folders are left untouched.
-||||||| 73d0630
-=======
               update_query_policies
                              Recompute query_policies for every entry and
                              update rows whose stored value drifted (e.g.
@@ -172,7 +165,10 @@ switch (subcommand)
                              the write path). Mirrors Python's
                              update_query_policies.py.
                              Args: [--batch-size <N>] (default 1000)
->>>>>>> 4e0ad44aa20b7bcf7ecc5dea0ed928e7311f98b1
+              create-users-folders
+                             Backfill personal/people/<shortname>/{notifications,
+                             private,protected,public,inbox} for every user.
+                             Idempotent — existing folders are left untouched.
               cli            Interactive CLI client (REPL/command/script)
               help           Print this help
 
