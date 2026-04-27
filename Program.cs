@@ -142,8 +142,15 @@ switch (subcommand)
               settings       Print effective settings as JSON
               set_password   Set password for a user interactively
               check          Run health checks on a space
-              export         Export space data to a zip file
+              export         Export a space to a zip in the dmart on-disk layout
+                             Usage: dmart export <space_name> [--output <path|dir|.>]
+                             --output unset      → ./<space>.zip
+                             --output .          → ./<space>.zip
+                             --output some/dir/  → some/dir/<space>.zip
+                             --output snap.zip   → snap.zip
               import         Import data from a zip file or folder
+                             By default existing rows are skipped (idempotent).
+                             Pass `-r` (or `--replace`) to overwrite them.
               init           Initialize ~/.dmart with config files
               fix_query_policies
                              Backfill entries.query_policies for rows written
@@ -276,12 +283,40 @@ switch (subcommand)
 
     case "export":
     {
-        // Export space data to zip — mirrors Python's export subcommand.
+        // Mirrors POST /managed/export: one Query → one zip in the standard
+        // dmart on-disk layout. The previous CLI shape (zip-of-zips with
+        // `.json` extensions) was a port artifact; the API path always
+        // produced one flat archive and tooling expects that.
         var spaceName = serverArgs.FirstOrDefault(a => !a.StartsWith('-'));
         var outputIdx = Array.IndexOf(serverArgs, "--output");
         var output = outputIdx >= 0 && outputIdx + 1 < serverArgs.Length ? serverArgs[outputIdx + 1] : null;
-        if (string.IsNullOrEmpty(output)) { Console.Error.WriteLine("Usage: dmart export [space_name] --output file.zip"); Environment.ExitCode = 1; return; }
-        if (!output.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) output += ".zip";
+        if (string.IsNullOrEmpty(spaceName))
+        {
+            Console.Error.WriteLine("Usage: dmart export <space_name> [--output <path|dir|.>]");
+            Environment.ExitCode = 1;
+            return;
+        }
+
+        // Resolve --output:
+        //   * unset            → ./<space>.zip
+        //   * "." / existing dir / trailing slash → <dir>/<space>.zip
+        //   * anything else    → use as-is, append .zip if missing
+        string outputPath;
+        if (string.IsNullOrEmpty(output))
+        {
+            outputPath = Path.GetFullPath($"{spaceName}.zip");
+        }
+        else if (output == "." || output == ".."
+                 || output.EndsWith('/') || output.EndsWith(Path.DirectorySeparatorChar)
+                 || Directory.Exists(output))
+        {
+            outputPath = Path.GetFullPath(Path.Combine(output, $"{spaceName}.zip"));
+        }
+        else
+        {
+            outputPath = output.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) ? output : output + ".zip";
+            outputPath = Path.GetFullPath(outputPath);
+        }
 
         var (s, dbInst) = CliBootstrap.BuildOrExit(dotenvPath, dotenvValues);
 
@@ -290,15 +325,6 @@ switch (subcommand)
         var entryRepo = new EntryRepository(dbInst);
         var userRepo = new UserRepository(dbInst, refresher);
         var accessRepo = new AccessRepository(dbInst, refresher, userRepo);
-        var entryService = new EntryService(entryRepo,
-            new AttachmentRepository(dbInst),
-            new HistoryRepository(dbInst),
-            new PermissionService(userRepo, accessRepo, refresher),
-            new PluginManager(Array.Empty<IHookPlugin>(), Array.Empty<IApiPlugin>(),
-                new SpaceRepository(dbInst), nlog.CreateLogger<PluginManager>()),
-            new SchemaValidator(entryRepo, nlog.CreateLogger<SchemaValidator>()),
-            new WorkflowEngine(entryRepo, nlog.CreateLogger<WorkflowEngine>()),
-            nlog.CreateLogger<EntryService>());
         var exportService = new ImportExportService(entryRepo,
             new AttachmentRepository(dbInst),
             userRepo,
@@ -309,31 +335,27 @@ switch (subcommand)
             Microsoft.Extensions.Options.Options.Create(s),
             nlog.CreateLogger<ImportExportService>());
 
-        var spaceRepo = new SpaceRepository(dbInst);
-        var spaces = string.IsNullOrEmpty(spaceName)
-            ? (await spaceRepo.ListAsync()).Select(sp => sp.Shortname).ToList()
-            : new List<string> { spaceName };
-
-        using var zipStream = File.Create(output);
-        using var zip = new System.IO.Compression.ZipArchive(zipStream, System.IO.Compression.ZipArchiveMode.Create);
-        foreach (var sp in spaces)
-        {
-            var stream = await exportService.ExportAsync(sp, "/", "dmart");
-            stream.Position = 0;
-            var entry = zip.CreateEntry($"{sp}.json");
-            await using var es = entry.Open();
-            await stream.CopyToAsync(es);
-        }
-        Console.WriteLine($"Exported {spaces.Count} space(s) to {output}");
+        // Same call path as the HTTP /managed/export handler: run the Query
+        // overload (via the (space, subpath, actor) shortcut) and stream
+        // the resulting zip to disk byte-for-byte. No re-archiving.
+        await using var exportStream = await exportService.ExportAsync(spaceName, "/", "dmart");
+        await using var fileStream = File.Create(outputPath);
+        await exportStream.CopyToAsync(fileStream);
+        Console.WriteLine($"Exported space '{spaceName}' to {outputPath}");
         return;
     }
 
     case "import":
     {
         var zipPath = serverArgs.FirstOrDefault(a => !a.StartsWith('-'));
+        // -r / --replace flips the default patch behavior: existing rows
+        // get their non-key columns rewritten from the zip's meta. Without
+        // -r the import is idempotent — pre-existing rows are skipped and
+        // the operator sees them counted as `skipped` in the summary.
+        var replace = serverArgs.Any(a => a is "-r" or "--replace");
         if (string.IsNullOrEmpty(zipPath))
         {
-            Console.Error.WriteLine("Usage: dmart import <zip-file>");
+            Console.Error.WriteLine("Usage: dmart import [-r|--replace] <zip-file>");
             Environment.ExitCode = 1;
             return;
         }
@@ -374,11 +396,59 @@ switch (subcommand)
         // The actor argument is accepted for API stability but unused — every
         // imported record's owner comes from its meta's owner_shortname, with
         // a literal "dmart" backstop when missing (set inside the service).
-        var resp = await importService.ImportZipAsync(zipStream, "dmart");
-        var inserted = resp.Attributes?.GetValueOrDefault("inserted") ?? 0;
-        var failedCount = resp.Attributes?.GetValueOrDefault("failed_count") ?? 0;
-        Console.WriteLine($"Imported {inserted} entries from {zipPath} ({failedCount} failed)");
-        Environment.ExitCode = (failedCount is int fc && fc > 0) ? 2 : 0;
+        // CLI default: preserveExisting=true (skip rows that already exist).
+        // With -r/--replace the caller opts back into upsert-everything,
+        // matching the HTTP /managed/import handler.
+        var resp = await importService.ImportZipAsync(zipStream, "dmart", preserveExisting: !replace);
+
+        if (resp.Status != Status.Success)
+        {
+            Console.Error.WriteLine($"Import failed: {resp.Error?.Message ?? "unknown error"}");
+            Environment.ExitCode = 1;
+            return;
+        }
+
+        // Sum the per-kind insert counts the service returns. The previous
+        // CLI only read a non-existent `inserted` key, so it always printed
+        // "Imported 0 entries" even when thousands of rows landed.
+        static int Read(Response r, string key)
+            => r.Attributes is { } a && a.TryGetValue(key, out var v) && v is int i ? i : 0;
+        var entries_inserted = Read(resp, "entries_inserted");
+        var attachments_inserted = Read(resp, "attachments_inserted");
+        var spaces_inserted = Read(resp, "spaces_inserted");
+        var users_inserted = Read(resp, "users_inserted");
+        var roles_inserted = Read(resp, "roles_inserted");
+        var permissions_inserted = Read(resp, "permissions_inserted");
+        var histories_inserted = Read(resp, "histories_inserted");
+        var skipped = Read(resp, "skipped");
+        var failed_count = Read(resp, "failed_count");
+        var totalInserted = entries_inserted + attachments_inserted + spaces_inserted
+                          + users_inserted + roles_inserted + permissions_inserted + histories_inserted;
+
+        Console.WriteLine($"Imported {totalInserted} rows from {zipPath} (skipped {skipped} existing, {failed_count} failed)");
+        Console.WriteLine($"  entries={entries_inserted} attachments={attachments_inserted} spaces={spaces_inserted}"
+            + $" users={users_inserted} roles={roles_inserted} permissions={permissions_inserted}"
+            + $" histories={histories_inserted}");
+
+        // When any entries failed, dump the per-record details next to the
+        // source zip as JSON Lines. One {"path":..., "kind":..., "error":...}
+        // record per failure so it pipes cleanly through `jq` /
+        // `grep -E '"kind":"entry"'` for triage.
+        if (failed_count > 0
+            && resp.Attributes?.GetValueOrDefault("failed") is List<Dictionary<string, object>> failedList)
+        {
+            var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", System.Globalization.CultureInfo.InvariantCulture);
+            var logPath = Path.GetFullPath(
+                Path.Combine(Path.GetDirectoryName(zipPath) ?? ".",
+                    $"{Path.GetFileNameWithoutExtension(zipPath)}.import-failures-{stamp}.jsonl"));
+            await using var sw = new StreamWriter(logPath, append: false);
+            foreach (var f in failedList)
+                await sw.WriteLineAsync(System.Text.Json.JsonSerializer.Serialize(f,
+                    Dmart.Models.Json.DmartJsonContext.Default.DictionaryStringObject));
+            Console.WriteLine($"Failure details: {logPath}");
+        }
+
+        Environment.ExitCode = failed_count > 0 ? 2 : 0;
         return;
     }
 

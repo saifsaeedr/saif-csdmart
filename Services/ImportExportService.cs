@@ -392,7 +392,22 @@ public sealed class ImportExportService(
     // IMPORT
     // ========================================================================
 
-    public async Task<Response> ImportZipAsync(Stream zip, string? actor, CancellationToken ct = default)
+    public Task<Response> ImportZipAsync(Stream zip, string? actor, CancellationToken ct = default)
+        => ImportZipAsync(zip, actor, preserveExisting: false, ct);
+
+    /// <summary>
+    /// Import a dmart zip into the database.
+    /// </summary>
+    /// <param name="preserveExisting">
+    /// When true, rows that already exist (matched by the same key the
+    /// repository's UpsertAsync would conflict on) are skipped — the in-DB
+    /// values are left untouched. The CLI <c>dmart import</c> uses this so
+    /// re-running an import doesn't blow away local edits. When false (the
+    /// default and the HTTP <c>/managed/import</c> contract), every row is
+    /// upserted: existing rows get their non-key columns replaced from the
+    /// zip's meta.
+    /// </param>
+    public async Task<Response> ImportZipAsync(Stream zip, string? actor, bool preserveExisting, CancellationToken ct = default)
     {
         // `actor` is accepted for API stability but no longer threaded through —
         // every imported record's owner comes from its meta's owner_shortname,
@@ -428,13 +443,13 @@ public sealed class ImportExportService(
         //              owner_shortname references users.shortname). Anything
         //              with a non-admin owner in its meta needs the user row
         //              to exist before its own insert. ----
-        foreach (var ze in zes.Where(IsUserMeta))        await TryImportUserAsync(ze, results, ct);
+        foreach (var ze in zes.Where(IsUserMeta))        await TryImportUserAsync(ze, results, preserveExisting, ct);
 
         // ---- Pass 2: Spaces, Roles, Permissions ----
         foreach (var ze in zes.Where(z => z.FullName.EndsWith("/.dm/meta.space.json", StringComparison.Ordinal)))
-            await TryImportSpaceAsync(ze, results, ct);
-        foreach (var ze in zes.Where(IsRoleMeta))        await TryImportRoleAsync(ze, results, ct);
-        foreach (var ze in zes.Where(IsPermissionMeta))  await TryImportPermissionAsync(ze, results, ct);
+            await TryImportSpaceAsync(ze, results, preserveExisting, ct);
+        foreach (var ze in zes.Where(IsRoleMeta))        await TryImportRoleAsync(ze, results, preserveExisting, ct);
+        foreach (var ze in zes.Where(IsPermissionMeta))  await TryImportPermissionAsync(ze, results, preserveExisting, ct);
 
         // ---- Pass 3: Entries (including folders). Index bodies first so we
         //              can re-inline them while reading the meta. ----
@@ -444,7 +459,7 @@ public sealed class ImportExportService(
                 bodyLookup[ze.FullName] = ze;
 
         foreach (var ze in zes.Where(IsEntryMeta))
-            await TryImportEntryAsync(ze, bodyLookup, results, ct);
+            await TryImportEntryAsync(ze, bodyLookup, results, preserveExisting, ct);
 
         // ---- Pass 4: Attachments. Lookup binary/json bodies from the same
         //              attachments dir. ----
@@ -454,7 +469,7 @@ public sealed class ImportExportService(
                 attachmentBodies[ze.FullName] = ze;
 
         foreach (var ze in zes.Where(IsAttachmentMeta))
-            await TryImportAttachmentAsync(ze, attachmentBodies, results, ct);
+            await TryImportAttachmentAsync(ze, attachmentBodies, results, preserveExisting, ct);
 
         // ---- Pass 5: Histories ----
         foreach (var ze in zes.Where(z => z.Name == "history.jsonl"))
@@ -469,6 +484,7 @@ public sealed class ImportExportService(
             ["roles_inserted"] = results.RolesInserted,
             ["permissions_inserted"] = results.PermissionsInserted,
             ["histories_inserted"] = results.HistoriesInserted,
+            ["skipped"] = results.Skipped,
             ["failed_count"] = results.Failed.Count,
             ["failed"] = results.Failed,
         });
@@ -513,7 +529,7 @@ public sealed class ImportExportService(
             node["owner_shortname"] = "dmart";
     }
 
-    private async Task TryImportSpaceAsync(ZipArchiveEntry ze, ImportStats st, CancellationToken ct)
+    private async Task TryImportSpaceAsync(ZipArchiveEntry ze, ImportStats st, bool preserveExisting, CancellationToken ct)
     {
         try
         {
@@ -525,6 +541,11 @@ public sealed class ImportExportService(
             EnsureOwner(node);
             var space = node.Deserialize(DmartJsonContext.Default.Space);
             if (space is null) { st.Failed.Add(new() { ["path"] = ze.FullName, ["error"] = "empty space meta" }); return; }
+            if (preserveExisting && await spaces.GetAsync(space.Shortname, ct) is not null)
+            {
+                st.Skipped++;
+                return;
+            }
             await spaces.UpsertAsync(space, ct);
             st.SpacesInserted++;
         }
@@ -535,7 +556,7 @@ public sealed class ImportExportService(
         }
     }
 
-    private async Task TryImportUserAsync(ZipArchiveEntry ze, ImportStats st, CancellationToken ct)
+    private async Task TryImportUserAsync(ZipArchiveEntry ze, ImportStats st, bool preserveExisting, CancellationToken ct)
     {
         try
         {
@@ -547,6 +568,11 @@ public sealed class ImportExportService(
             await InlinePayloadBodyAsync(ze, node, $"{spaceName}/users", ct);
             var user = node.Deserialize(DmartJsonContext.Default.User);
             if (user is null) { st.Failed.Add(new() { ["path"] = ze.FullName, ["error"] = "empty user meta" }); return; }
+            if (preserveExisting && await users.GetByShortnameAsync(user.Shortname, ct) is not null)
+            {
+                st.Skipped++;
+                return;
+            }
             await users.UpsertAsync(user, ct);
             st.UsersInserted++;
         }
@@ -557,7 +583,7 @@ public sealed class ImportExportService(
         }
     }
 
-    private async Task TryImportRoleAsync(ZipArchiveEntry ze, ImportStats st, CancellationToken ct)
+    private async Task TryImportRoleAsync(ZipArchiveEntry ze, ImportStats st, bool preserveExisting, CancellationToken ct)
     {
         try
         {
@@ -568,6 +594,11 @@ public sealed class ImportExportService(
             EnsureOwner(node);
             var role = node.Deserialize(DmartJsonContext.Default.Role);
             if (role is null) { st.Failed.Add(new() { ["path"] = ze.FullName, ["error"] = "empty role meta" }); return; }
+            if (preserveExisting && await access.GetRoleAsync(role.Shortname, ct) is not null)
+            {
+                st.Skipped++;
+                return;
+            }
             await access.UpsertRoleAsync(role, ct);
             st.RolesInserted++;
         }
@@ -578,7 +609,7 @@ public sealed class ImportExportService(
         }
     }
 
-    private async Task TryImportPermissionAsync(ZipArchiveEntry ze, ImportStats st, CancellationToken ct)
+    private async Task TryImportPermissionAsync(ZipArchiveEntry ze, ImportStats st, bool preserveExisting, CancellationToken ct)
     {
         try
         {
@@ -589,6 +620,11 @@ public sealed class ImportExportService(
             EnsureOwner(node);
             var perm = node.Deserialize(DmartJsonContext.Default.Permission);
             if (perm is null) { st.Failed.Add(new() { ["path"] = ze.FullName, ["error"] = "empty permission meta" }); return; }
+            if (preserveExisting && await access.GetPermissionAsync(perm.Shortname, ct) is not null)
+            {
+                st.Skipped++;
+                return;
+            }
             await access.UpsertPermissionAsync(perm, ct);
             st.PermissionsInserted++;
         }
@@ -601,7 +637,7 @@ public sealed class ImportExportService(
 
     private async Task TryImportEntryAsync(
         ZipArchiveEntry ze, Dictionary<string, ZipArchiveEntry> bodyLookup,
-        ImportStats st, CancellationToken ct)
+        ImportStats st, bool preserveExisting, CancellationToken ct)
     {
         try
         {
@@ -669,6 +705,11 @@ public sealed class ImportExportService(
             // Import goes through the repo (not EntryService.CreateAsync) so
             // plugin hooks don't fire per-row and perm checks don't block a
             // bulk restore. This mirrors Python's bulk_insert_in_batches path.
+            if (preserveExisting && await entries.GetAsync(entry.SpaceName, entry.Subpath, entry.Shortname, entry.ResourceType, ct) is not null)
+            {
+                st.Skipped++;
+                return;
+            }
             await entries.UpsertAsync(entry, ct);
             st.EntriesInserted++;
         }
@@ -681,7 +722,7 @@ public sealed class ImportExportService(
 
     private async Task TryImportAttachmentAsync(
         ZipArchiveEntry ze, Dictionary<string, ZipArchiveEntry> bodies,
-        ImportStats st, CancellationToken ct)
+        ImportStats st, bool preserveExisting, CancellationToken ct)
     {
         try
         {
@@ -740,6 +781,11 @@ public sealed class ImportExportService(
             EnsureOwner(node);
             var att = node.Deserialize(DmartJsonContext.Default.Attachment);
             if (att is null) { st.Failed.Add(new() { ["path"] = ze.FullName, ["error"] = "empty attachment meta" }); return; }
+            if (preserveExisting && await attachments.GetAsync(att.SpaceName, att.Subpath, att.Shortname, ct) is not null)
+            {
+                st.Skipped++;
+                return;
+            }
             await attachments.UpsertAsync(att, ct);
             st.AttachmentsInserted++;
         }
@@ -825,6 +871,10 @@ public sealed class ImportExportService(
         public int RolesInserted;
         public int PermissionsInserted;
         public int HistoriesInserted;
+        // Rows skipped under preserveExisting because a matching row already
+        // existed in the DB. Reported back to the caller so they can tell
+        // "no-op" runs apart from "everything failed" runs.
+        public int Skipped;
         public readonly List<Dictionary<string, object>> Failed = new();
     }
 
