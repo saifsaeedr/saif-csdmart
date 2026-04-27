@@ -391,7 +391,39 @@ public sealed class EntryService(
             return Result<bool>.Fail(InternalErrorCode.INVALID_DATA, "plugin rejected delete", ErrorTypes.Request);
         }
 
-        var ok = await entries.DeleteAsync(locator.SpaceName, locator.Subpath, locator.Shortname, locator.Type, ct);
+        // Python parity: deleting a folder cascades — every descendant entry
+        // (direct child OR deeper subfolder/file) and every attachment whose
+        // subpath sits inside the folder gets removed in the same call.
+        // Mirrors adapter.py:2749-2768.
+        bool ok;
+        if (locator.Type == ResourceType.Folder)
+        {
+            var folderPath = locator.Subpath == "/"
+                ? "/" + locator.Shortname
+                : locator.Subpath + "/" + locator.Shortname;
+            // Wipe attachments first so a partial failure doesn't leave
+            // attachment rows pointing at a deleted entry tree (the entries
+            // table is the FK target via owner_shortname, but cascade drops
+            // are surgical so we order them defensively).
+            await attachments.DeleteUnderSubpathAsync(locator.SpaceName, folderPath, ct);
+            var deletedRows = await entries.DeleteFolderTreeAsync(
+                locator.SpaceName, locator.Subpath, locator.Shortname, ct);
+            ok = deletedRows > 0;
+        }
+        else
+        {
+            ok = await entries.DeleteAsync(locator.SpaceName, locator.Subpath, locator.Shortname, locator.Type, ct);
+            if (ok)
+            {
+                // A non-folder entry's attachments live at "{entry.subpath}/{entry.shortname}".
+                // Match Python adapter.py:2769-2775.
+                var entryPath = locator.Subpath == "/"
+                    ? "/" + locator.Shortname
+                    : locator.Subpath + "/" + locator.Shortname;
+                await attachments.DeleteUnderSubpathAsync(locator.SpaceName, entryPath, ct);
+            }
+        }
+
         if (ok)
         {
             // Schema entry removed → drop any compiled instance from the in-memory cache.

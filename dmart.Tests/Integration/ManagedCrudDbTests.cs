@@ -299,6 +299,85 @@ public class ManagedCrudDbTests : IClassFixture<DmartFactory>
         }
     }
 
+    // Python parity: deleting a folder removes the folder, every direct
+    // child entry, every nested subfolder, and every attachment whose subpath
+    // sits inside the tree. The C# port previously deleted only the folder
+    // row, leaving descendants orphaned (and invisible — their parent was
+    // gone but the rows kept living in `entries`/`attachments`). Mirrors
+    // adapter.py:2749-2768.
+    [FactIfPg]
+    public async Task Delete_Folder_Cascades_To_Subfolders_And_Children()
+    {
+        var (client, _, _, _) = await _factory.CreateLoggedInUserAsync();
+
+        var space = "test";
+        var rootFolder = $"f{Guid.NewGuid():N}".Substring(0, 12);
+
+        // Build:
+        //   /<rootFolder>/                    ← folder
+        //     /<rootFolder>/c1                ← content
+        //     /<rootFolder>/sub/              ← subfolder
+        //       /<rootFolder>/sub/c2          ← content
+        //       /<rootFolder>/sub/deeper/     ← deeper subfolder
+        //         /<rootFolder>/sub/deeper/c3 ← content
+        async Task<HttpResponseMessage> CreateAsync(ResourceType rt, string subpath, string shortname)
+            => await client.PostAsJsonAsync("/managed/request",
+                new Request
+                {
+                    RequestType = RequestType.Create,
+                    SpaceName = space,
+                    Records = new() { new Record { ResourceType = rt, Subpath = subpath, Shortname = shortname } },
+                }, DmartJsonContext.Default.Request);
+
+        try
+        {
+            (await CreateAsync(ResourceType.Folder,  "/",                                rootFolder)).StatusCode.ShouldBe(HttpStatusCode.OK);
+            (await CreateAsync(ResourceType.Content, $"/{rootFolder}",                   "c1")).StatusCode.ShouldBe(HttpStatusCode.OK);
+            (await CreateAsync(ResourceType.Folder,  $"/{rootFolder}",                   "sub")).StatusCode.ShouldBe(HttpStatusCode.OK);
+            (await CreateAsync(ResourceType.Content, $"/{rootFolder}/sub",               "c2")).StatusCode.ShouldBe(HttpStatusCode.OK);
+            (await CreateAsync(ResourceType.Folder,  $"/{rootFolder}/sub",               "deeper")).StatusCode.ShouldBe(HttpStatusCode.OK);
+            (await CreateAsync(ResourceType.Content, $"/{rootFolder}/sub/deeper",        "c3")).StatusCode.ShouldBe(HttpStatusCode.OK);
+
+            // Sanity: every node is fetchable before the delete.
+            (await client.GetAsync($"/managed/entry/folder/{space}/{rootFolder}")).StatusCode.ShouldBe(HttpStatusCode.OK);
+            (await client.GetAsync($"/managed/entry/content/{space}/{rootFolder}/c1")).StatusCode.ShouldBe(HttpStatusCode.OK);
+            (await client.GetAsync($"/managed/entry/folder/{space}/{rootFolder}/sub")).StatusCode.ShouldBe(HttpStatusCode.OK);
+            (await client.GetAsync($"/managed/entry/content/{space}/{rootFolder}/sub/c2")).StatusCode.ShouldBe(HttpStatusCode.OK);
+            (await client.GetAsync($"/managed/entry/folder/{space}/{rootFolder}/sub/deeper")).StatusCode.ShouldBe(HttpStatusCode.OK);
+            (await client.GetAsync($"/managed/entry/content/{space}/{rootFolder}/sub/deeper/c3")).StatusCode.ShouldBe(HttpStatusCode.OK);
+
+            // Delete the root folder.
+            var del = await client.PostAsJsonAsync("/managed/request",
+                new Request
+                {
+                    RequestType = RequestType.Delete,
+                    SpaceName = space,
+                    Records = new() { new Record { ResourceType = ResourceType.Folder, Subpath = "/", Shortname = rootFolder } },
+                }, DmartJsonContext.Default.Request);
+            del.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+            // Every descendant is gone.
+            (await client.GetAsync($"/managed/entry/folder/{space}/{rootFolder}")).StatusCode.ShouldBe(HttpStatusCode.NotFound);
+            (await client.GetAsync($"/managed/entry/content/{space}/{rootFolder}/c1")).StatusCode.ShouldBe(HttpStatusCode.NotFound);
+            (await client.GetAsync($"/managed/entry/folder/{space}/{rootFolder}/sub")).StatusCode.ShouldBe(HttpStatusCode.NotFound);
+            (await client.GetAsync($"/managed/entry/content/{space}/{rootFolder}/sub/c2")).StatusCode.ShouldBe(HttpStatusCode.NotFound);
+            (await client.GetAsync($"/managed/entry/folder/{space}/{rootFolder}/sub/deeper")).StatusCode.ShouldBe(HttpStatusCode.NotFound);
+            (await client.GetAsync($"/managed/entry/content/{space}/{rootFolder}/sub/deeper/c3")).StatusCode.ShouldBe(HttpStatusCode.NotFound);
+        }
+        finally
+        {
+            // Best-effort cleanup if the test bailed mid-way.
+            await CreateAsync(ResourceType.Folder, "/", rootFolder); // ignore result
+            await client.PostAsJsonAsync("/managed/request",
+                new Request
+                {
+                    RequestType = RequestType.Delete,
+                    SpaceName = space,
+                    Records = new() { new Record { ResourceType = ResourceType.Folder, Subpath = "/", Shortname = rootFolder } },
+                }, DmartJsonContext.Default.Request);
+        }
+    }
+
     [FactIfPg]
     public async Task Query_Returns_Success_With_Records_List()
     {

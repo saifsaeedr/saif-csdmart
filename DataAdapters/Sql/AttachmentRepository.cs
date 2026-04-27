@@ -181,6 +181,26 @@ public sealed class AttachmentRepository(Db db)
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    // Bulk-delete every attachment whose subpath sits at or under `prefix`.
+    // Used during recursive folder/entry deletes — an attachment's subpath
+    // is its parent's subpath + "/" + parent shortname, so callers pass the
+    // parent's full path here. Matches Python adapter.py:2752-2757 +
+    // 2770-2775 — same intent, but we use the precise prefix-with-slash
+    // check instead of a raw `startswith` to avoid matching unrelated
+    // siblings (`/products` vs `/products_old`).
+    public async Task<int> DeleteUnderSubpathAsync(string spaceName, string prefix, CancellationToken ct = default)
+    {
+        await using var conn = await db.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand("""
+            DELETE FROM attachments
+            WHERE space_name = $1
+              AND (subpath = $2 OR subpath LIKE $2 || '/%')
+            """, conn);
+        cmd.Parameters.Add(new() { Value = spaceName });
+        cmd.Parameters.Add(new() { Value = prefix });
+        return await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     // ----- query support (used by QueryService for type=attachments) -----
 
     public Task<List<Attachment>> QueryAsync(Models.Api.Query q, CancellationToken ct = default)

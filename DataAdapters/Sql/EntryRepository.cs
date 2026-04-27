@@ -176,6 +176,31 @@ public sealed class EntryRepository(Db db)
         return await cmd.ExecuteNonQueryAsync(ct) > 0;
     }
 
+    // Cascading delete for a folder's descendants. `folderPath` is the
+    // folder's full identity ("{parent_subpath}/{folder_shortname}", with
+    // leading slash, e.g. "/products/widgets"). Removes:
+    //   * the folder row itself (subpath == parent, shortname == folder_sn)
+    //   * direct children at subpath == folderPath
+    //   * deeper descendants at subpath LIKE folderPath || '/%'
+    // Mirrors Python adapter.py:2749-2768. Returns the row count.
+    public async Task<int> DeleteFolderTreeAsync(string spaceName, string parentSubpath, string folderShortname, CancellationToken ct = default)
+    {
+        var folderPath = parentSubpath == "/" ? "/" + folderShortname : parentSubpath + "/" + folderShortname;
+        await using var conn = await db.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand("""
+            DELETE FROM entries
+            WHERE space_name = $1
+              AND ((subpath = $2 AND shortname = $3 AND resource_type = 'folder')
+                OR  subpath = $4
+                OR  subpath LIKE $4 || '/%')
+            """, conn);
+        cmd.Parameters.Add(new() { Value = spaceName });
+        cmd.Parameters.Add(new() { Value = parentSubpath });
+        cmd.Parameters.Add(new() { Value = folderShortname });
+        cmd.Parameters.Add(new() { Value = folderPath });
+        return await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     public async Task MoveAsync(Locator from, Locator to, CancellationToken ct = default)
     {
         await using var conn = await db.OpenAsync(ct);
