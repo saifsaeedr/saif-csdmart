@@ -8,9 +8,10 @@ using Xunit;
 namespace Dmart.Tests.Unit.Json;
 
 // Pins the Python-parity DateTime wire shape: server-local wall clock, NO
-// offset (no `Z`, no `+03:00`). The DB stores correct UTC instants — Npgsql
-// returns DateTime with Kind=Utc — and this converter rewrites that to the
-// local-zone wall clock on the way out, matching pydantic naive isoformat().
+// offset (no `Z`, no `+03:00`). The DB columns are TIMESTAMP (without time
+// zone); the converter never transforms — whatever DateTime it receives is
+// emitted verbatim, regardless of Kind, and parsed strings come back as
+// Kind=Unspecified with the exact value the wire carried.
 public sealed class LocalNaiveDateTimeConverterTests
 {
     private static JsonSerializerOptions Options() => new()
@@ -18,52 +19,40 @@ public sealed class LocalNaiveDateTimeConverterTests
         Converters = { new LocalNaiveDateTimeConverter() },
     };
 
-    [Fact]
-    public void Serializes_Utc_As_Local_Wall_Clock_No_Offset()
+    private const string Format = "yyyy-MM-ddTHH:mm:ss.FFFFFFF";
+
+    [Theory]
+    [InlineData(DateTimeKind.Utc)]
+    [InlineData(DateTimeKind.Local)]
+    [InlineData(DateTimeKind.Unspecified)]
+    public void Serializes_Verbatim_Regardless_Of_Kind(DateTimeKind kind)
     {
-        // Pick a known UTC instant and verify the JSON is the same instant
-        // expressed in the system's local wall clock, with no offset suffix.
-        var utc = new DateTime(2026, 4, 26, 4, 13, 14, 123, DateTimeKind.Utc).AddTicks(4560);
-        var expectedLocal = utc.ToLocalTime();
+        // The same wall-clock value, labeled with each Kind, must produce
+        // the same JSON output. No timezone projection anywhere.
+        var value = new DateTime(2026, 4, 28, 2, 0, 0, kind).AddTicks(1234567);
+        var expected = "\"" + value.ToString(Format, CultureInfo.InvariantCulture) + "\"";
 
-        var json = JsonSerializer.Serialize(utc, Options());
+        var json = JsonSerializer.Serialize(value, Options());
 
-        // Strip the JSON quotes for the format check.
-        var s = json.Trim('"');
-        s.ShouldNotContain("Z");
-        s.ShouldNotMatch(@"[+-]\d{2}:\d{2}$");
-        // The string round-trips to the same instant when re-parsed as local.
-        var parsed = DateTime.Parse(s, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal);
-        parsed.ShouldBe(expectedLocal, TimeSpan.FromMilliseconds(1));
+        json.ShouldBe(expected);
+        // Belt-and-suspenders: never emit an offset suffix.
+        json.ShouldNotContain("Z");
+        json.ShouldNotMatch(@"[+-]\d{2}:\d{2}""$");
     }
 
     [Fact]
-    public void Roundtrips_Naive_String_To_Utc()
+    public void Roundtrips_Naive_String_To_Unspecified()
     {
-        // Python emits naive ISO strings; on read we parse them as local
-        // wall clock and adjust to UTC for in-process arithmetic.
-        var local = new DateTime(2026, 4, 26, 7, 13, 14, 123, DateTimeKind.Local);
-        var pythonStyle = local.ToString("yyyy-MM-ddTHH:mm:ss.FFFFFFF", CultureInfo.InvariantCulture);
+        // Python emits naive ISO strings; we parse them as wall-clock,
+        // preserve the value byte-for-byte, and label Kind as Unspecified
+        // so downstream code doesn't accidentally reapply a Local↔Utc shift.
+        var pythonStyle = "2026-04-28T02:00:00.1234567";
         var json = "\"" + pythonStyle + "\"";
 
         var parsed = JsonSerializer.Deserialize<DateTime>(json, Options());
 
-        parsed.Kind.ShouldBe(DateTimeKind.Utc);
-        parsed.ShouldBe(local.ToUniversalTime(), TimeSpan.FromMilliseconds(1));
-    }
-
-    [Fact]
-    public void Serializes_Local_Kind_Verbatim_No_Offset()
-    {
-        // A Kind=Local DateTime — what TimeUtils.Now() returns — emits the
-        // same wall clock with no offset.
-        var local = new DateTime(2026, 4, 26, 7, 13, 14, DateTimeKind.Local);
-
-        var s = JsonSerializer.Serialize(local, Options()).Trim('"');
-
-        s.ShouldStartWith("2026-04-26T07:13:14");
-        s.ShouldNotContain("Z");
-        s.ShouldNotMatch(@"[+-]\d{2}:\d{2}$");
+        parsed.Kind.ShouldBe(DateTimeKind.Unspecified);
+        parsed.ShouldBe(new DateTime(2026, 4, 28, 2, 0, 0, DateTimeKind.Unspecified).AddTicks(1234567));
     }
 
     // The source-generated DmartJsonContext picks up the converter via
@@ -80,8 +69,8 @@ public sealed class LocalNaiveDateTimeConverterTests
             Subpath = "/",
             ResourceType = Dmart.Models.Enums.ResourceType.Content,
             OwnerShortname = "dmart",
-            CreatedAt = new DateTime(2026, 4, 26, 4, 13, 14, DateTimeKind.Utc),
-            UpdatedAt = new DateTime(2026, 4, 26, 4, 13, 14, DateTimeKind.Utc),
+            CreatedAt = new DateTime(2026, 4, 28, 2, 0, 0, DateTimeKind.Unspecified),
+            UpdatedAt = new DateTime(2026, 4, 28, 2, 0, 0, DateTimeKind.Unspecified),
         };
 
         var json = JsonSerializer.Serialize(entry, DmartJsonContext.Default.Entry);
@@ -93,5 +82,7 @@ public sealed class LocalNaiveDateTimeConverterTests
         var created = doc.RootElement.GetProperty("created_at").GetString()!;
         created.ShouldNotContain("Z");
         created.ShouldNotMatch(@"[+-]\d{2}:\d{2}$");
+        // Wall-clock value emitted verbatim — no projection of any kind.
+        created.ShouldStartWith("2026-04-28T02:00:00");
     }
 }

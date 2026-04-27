@@ -9,11 +9,12 @@ namespace Dmart.Models.Json;
 // server-local wall clock, NO `Z`, NO `+03:00` offset. Matches Python
 // `datetime.now().isoformat()` on a naive datetime byte-for-byte.
 //
-// Storage stays correct UTC: Npgsql returns DateTime with Kind=Utc, this
-// converter converts that to Local on write. The DB still holds true UTC
-// instants; only the wire shape changes. On parse, an offsetless string
-// is interpreted as local-zone wall clock and adjusted to UTC for in-process
-// arithmetic.
+// Wall-clock-only contract (Python parity): the DB columns are TIMESTAMP
+// (no time zone), the application thinks in local wall clock end-to-end,
+// and there is NO conversion anywhere — not on the wire, not on read,
+// not on write. Whatever value Npgsql hands us, we emit verbatim; whatever
+// string the client sends, we parse verbatim. DateTimeKind is irrelevant
+// to the wire shape and we preserve it as Unspecified on parse.
 public sealed class LocalNaiveDateTimeConverter : JsonConverter<DateTime>
 {
     // Matches Python's isoformat() output. `FFFFFFF` trims trailing zeros
@@ -27,23 +28,13 @@ public sealed class LocalNaiveDateTimeConverter : JsonConverter<DateTime>
         var s = reader.GetString();
         if (string.IsNullOrEmpty(s))
             throw new JsonException("Expected a non-empty datetime string");
-        // AssumeLocal handles Python-style naive strings (no offset);
-        // AdjustToUniversal normalizes any tz-aware input to UTC so the
-        // in-process value is comparable across the codebase.
-        return DateTime.Parse(s, CultureInfo.InvariantCulture,
-            DateTimeStyles.AssumeLocal | DateTimeStyles.AdjustToUniversal);
+        // No tz adjustment: parse the wall-clock value as-is and stamp Kind
+        // as Unspecified so downstream code doesn't accidentally retrigger
+        // a Local↔Utc conversion.
+        var parsed = DateTime.Parse(s, CultureInfo.InvariantCulture, DateTimeStyles.None);
+        return DateTime.SpecifyKind(parsed, DateTimeKind.Unspecified);
     }
 
-    public override void Write(Utf8JsonWriter writer, DateTime value, JsonSerializerOptions options)
-    {
-        var local = value.Kind switch
-        {
-            DateTimeKind.Utc => value.ToLocalTime(),
-            DateTimeKind.Local => value,
-            // Unspecified is ambiguous; treat as already-local to match
-            // Python's "naive == local" convention.
-            _ => DateTime.SpecifyKind(value, DateTimeKind.Local),
-        };
-        writer.WriteStringValue(local.ToString(Format, CultureInfo.InvariantCulture));
-    }
+    public override void Write(Utf8JsonWriter writer, DateTime value, JsonSerializerOptions options) =>
+        writer.WriteStringValue(value.ToString(Format, CultureInfo.InvariantCulture));
 }

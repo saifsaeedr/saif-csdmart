@@ -32,7 +32,7 @@ internal sealed class DmartJsonConsoleFormatter : ConsoleFormatter
         using (var json = new Utf8JsonWriter(stream, WriterOptions))
         {
             json.WriteStartObject();
-            json.WriteString("Timestamp", TimeUtils.Now().ToString("yyyy-MM-ddTHH:mm:ss.fffZ"));
+            json.WriteString("Timestamp", TimeUtils.Now().ToString("yyyy-MM-ddTHH:mm:ss.fff"));
             json.WriteString("LogLevel", entry.LogLevel.ToString());
             json.WriteString("Category", entry.Category);
             if (entry.EventId.Id != 0) json.WriteNumber("EventId", entry.EventId.Id);

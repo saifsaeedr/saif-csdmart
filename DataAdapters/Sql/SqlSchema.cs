@@ -41,8 +41,8 @@ public static class SqlSchema
         displayname             JSONB,
         description             JSONB,
         tags                    JSONB,
-        created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        created_at              TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at              TIMESTAMP NOT NULL DEFAULT NOW(),
         owner_shortname         TEXT NOT NULL,
         owner_group_shortname   TEXT,
         payload                 JSONB,
@@ -87,8 +87,8 @@ public static class SqlSchema
         displayname             JSONB,
         description             JSONB,
         tags                    JSONB,
-        created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        created_at              TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at              TIMESTAMP NOT NULL DEFAULT NOW(),
         owner_shortname         TEXT NOT NULL REFERENCES users(shortname) DEFERRABLE INITIALLY DEFERRED,
         owner_group_shortname   TEXT,
         acl                     JSONB,
@@ -116,8 +116,8 @@ public static class SqlSchema
         displayname             JSONB,
         description             JSONB,
         tags                    JSONB,
-        created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        created_at              TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at              TIMESTAMP NOT NULL DEFAULT NOW(),
         owner_shortname         TEXT NOT NULL REFERENCES users(shortname) DEFERRABLE INITIALLY DEFERRED,
         owner_group_shortname   TEXT,
         acl                     JSONB,
@@ -151,8 +151,8 @@ public static class SqlSchema
         displayname             JSONB,
         description             JSONB,
         tags                    JSONB,
-        created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        created_at              TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at              TIMESTAMP NOT NULL DEFAULT NOW(),
         owner_shortname         TEXT NOT NULL REFERENCES users(shortname) DEFERRABLE INITIALLY DEFERRED,
         owner_group_shortname   TEXT,
         acl                     JSONB,
@@ -185,8 +185,8 @@ public static class SqlSchema
         displayname             JSONB,
         description             JSONB,
         tags                    JSONB,
-        created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        created_at              TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at              TIMESTAMP NOT NULL DEFAULT NOW(),
         owner_shortname         TEXT NOT NULL REFERENCES users(shortname) DEFERRABLE INITIALLY DEFERRED,
         owner_group_shortname   TEXT,
         acl                     JSONB,
@@ -215,8 +215,8 @@ public static class SqlSchema
         displayname                     JSONB,
         description                     JSONB,
         tags                            JSONB,
-        created_at                      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at                      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        created_at                      TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at                      TIMESTAMP NOT NULL DEFAULT NOW(),
         owner_shortname                 TEXT NOT NULL REFERENCES users(shortname) DEFERRABLE INITIALLY DEFERRED,
         owner_group_shortname           TEXT,
         acl                             JSONB,
@@ -249,7 +249,7 @@ public static class SqlSchema
         uuid                  UUID PRIMARY KEY,
         request_headers       JSONB,
         diff                  JSONB,
-        timestamp             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        timestamp             TIMESTAMP NOT NULL DEFAULT NOW(),
         owner_shortname       TEXT,
         last_checksum_history TEXT,
         space_name            TEXT NOT NULL,
@@ -266,7 +266,7 @@ public static class SqlSchema
         space_name        TEXT NOT NULL,
         subpath           TEXT NOT NULL,
         owner_shortname   TEXT NOT NULL,
-        timestamp         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        timestamp         TIMESTAMP NOT NULL DEFAULT NOW(),
         payload           JSONB,
         UNIQUE (shortname, space_name, subpath)
     );
@@ -278,7 +278,7 @@ public static class SqlSchema
         uuid             UUID PRIMARY KEY,
         shortname        TEXT NOT NULL,
         token            TEXT NOT NULL,
-        timestamp        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        timestamp        TIMESTAMP NOT NULL DEFAULT NOW(),
         firebase_token   TEXT
     );
 
@@ -289,7 +289,7 @@ public static class SqlSchema
         uuid              UUID PRIMARY KEY,
         invitation_token  TEXT NOT NULL UNIQUE,
         invitation_value  TEXT NOT NULL,
-        timestamp         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        timestamp         TIMESTAMP NOT NULL DEFAULT NOW()
     );
 
     -- ============================================================
@@ -299,7 +299,7 @@ public static class SqlSchema
         uuid        UUID PRIMARY KEY,
         token_uuid  TEXT NOT NULL,
         url         TEXT NOT NULL,
-        timestamp   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        timestamp   TIMESTAMP NOT NULL DEFAULT NOW()
     );
 
     -- ============================================================
@@ -308,7 +308,7 @@ public static class SqlSchema
     CREATE TABLE IF NOT EXISTS otp (
         key       TEXT PRIMARY KEY,
         value     hstore NOT NULL,
-        timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        timestamp TIMESTAMP NOT NULL DEFAULT NOW()
     );
 
     -- ============================================================
@@ -463,6 +463,38 @@ public static class SqlSchema
         IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN
             ALTER TABLE entries ADD COLUMN IF NOT EXISTS embedding vector;
         END IF;
+    END $$;
+
+    -- Python parity: Python dmart maps `datetime` to TIMESTAMP WITHOUT TIME ZONE
+    -- via SQLModel/SQLAlchemy. Older C# deployments used TIMESTAMPTZ which made
+    -- the application reason about UTC instants and a Local-vs-UTC conversion
+    -- in the JSON converter, producing wire values shifted from what psql
+    -- shows. The directive is "no UTC anywhere", so this DO block converts any
+    -- still-`timestamptz` column to `timestamp without time zone` while
+    -- preserving the wall-clock the operator currently sees in psql:
+    -- `col AT TIME ZONE current_setting('TIMEZONE')` projects the stored UTC
+    -- instant to the session's local wall-clock and drops the offset label.
+    -- Idempotent — already-converted columns are filtered out by the
+    -- information_schema lookup, so a second `dmart migrate` is a no-op.
+    DO $$
+    DECLARE
+        r RECORD;
+        tz TEXT := current_setting('TIMEZONE');
+    BEGIN
+        FOR r IN
+            SELECT table_name, column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND data_type = 'timestamp with time zone'
+              AND table_name IN ('entries','users','roles','permissions','spaces',
+                                 'attachments','histories','locks','sessions',
+                                 'otps','short_links')
+        LOOP
+            EXECUTE format(
+                'ALTER TABLE %I ALTER COLUMN %I TYPE timestamp WITHOUT TIME ZONE
+                 USING (%I AT TIME ZONE %L)',
+                r.table_name, r.column_name, r.column_name, tz);
+        END LOOP;
     END $$;
     """;
 }

@@ -168,7 +168,7 @@ public sealed class UserService(
         {
             var loginInfo = new Dictionary<string, object>
             {
-                ["timestamp"] = (int)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                ["timestamp"] = (int)DateTimeOffset.Now.ToUnixTimeSeconds(),
                 ["headers"] = requestHeaders,
             };
             var updated = user with { LastLogin = loginInfo, UpdatedAt = TimeUtils.Now() };
@@ -516,7 +516,7 @@ public sealed class UserService(
             var loginInfo = new Dictionary<string, object>
             {
                 // Cast to int so source-gen JSON can serialize it (no Int64 TypeInfo).
-                ["timestamp"] = (int)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                ["timestamp"] = (int)DateTimeOffset.Now.ToUnixTimeSeconds(),
                 ["headers"] = requestHeaders,
             };
             updatedUser = updatedUser with { LastLogin = loginInfo };
