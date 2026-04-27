@@ -91,6 +91,7 @@ public static class JsonStripEmptiesMiddleware
                 foreach (var kv in obj)
                 {
                     if (kv.Value is not null) StripEmpties(kv.Value);
+                    if (kv.Key == "payload") continue;
                     if (IsEmpty(kv.Value))
                         (toRemove ??= new List<string>()).Add(kv.Key);
                 }

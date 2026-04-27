@@ -4,6 +4,7 @@
   import {
     attachAttachmentsToEntity,
     createEntity,
+    getEntityByShortname,
     getSpaceFolders,
     getSpaces,
     getSpaceSchema,
@@ -32,7 +33,6 @@
     PlayOutline,
     PlusOutline,
     TagOutline,
-    TextUnderlineOutline,
     TrashBinSolid,
     UploadOutline,
   } from "flowbite-svelte-icons";
@@ -69,6 +69,7 @@
 
   let entryType = $state("content");
   let availableSchemas = $state<any[]>([]);
+  let allowedSchemaShortnames = $state<string[]>([]);
   let selectedSchema: any = $state(null);
   let schemaBasedTemplate: any = $state(null); // Template extracted from schema attachment
   let loadingSchemas = $state(false);
@@ -83,6 +84,7 @@
 
   let title = $state("");
   let shortname = $state("");
+  let slug = $state("");
   let shortnameError = $state("");
   const shortnamePattern = "^[a-zA-Z\\u0621-\\u064a0-9\\u0660-\\u0669\\u064b-\\u065f_]{1,64}$";
 
@@ -101,7 +103,6 @@
     }
   }
 
-  let isEditing = $state(false);
   let selectedSpace = $state("");
   let spaces = $state<any[]>([]);
   let subpathHierarchy = $state<any[]>([]);
@@ -112,6 +113,26 @@
   const canCreateEntry = $derived(
     shortname.trim().length > 0 && !shortnameError
   );
+
+  const filteredSchemas = $derived.by(() => {
+    if (!allowedSchemaShortnames.length) return availableSchemas;
+    const allowed = new Set(allowedSchemaShortnames);
+    return availableSchemas.filter((s: any) => allowed.has(s.shortname));
+  });
+
+  $effect(() => {
+    if (
+      selectedSchema &&
+      !filteredSchemas.some((s: any) => s.shortname === selectedSchema.shortname)
+    ) {
+      selectedSchema = null;
+      schema_shortname = "";
+      jsonFormData = {};
+      schemaBasedTemplate = null;
+      templateFormData = {};
+    }
+  });
+
   let workflow_shortname = "";
   let schema_shortname = "";
   let markdownEditorRef: any = $state(null);
@@ -281,16 +302,50 @@
     await loadSubpathLevel(spaceName, "", 0);
   }
 
+  // Split a navigated parentPath ("", "/", "/folder_a", "/folder_a/folder_b")
+  // into the (subpath, shortname) addressing the folder ITSELF — used to fetch
+  // the parent folder so its payload.body drives the schema/workflow/resource
+  // restrictions for entries created under it. Returns null at root.
+  function splitParentPath(
+    parentPath: string,
+  ): { subpath: string; shortname: string } | null {
+    const trimmed = (parentPath || "").replace(/^\/+/, "").replace(/\/+$/, "");
+    if (!trimmed) return null;
+    const lastSlash = trimmed.lastIndexOf("/");
+    return lastSlash < 0
+      ? { subpath: "/", shortname: trimmed }
+      : {
+          subpath: trimmed.slice(0, lastSlash),
+          shortname: trimmed.slice(lastSlash + 1),
+        };
+  }
+
   async function loadSubpathLevel(spaceName: any, parentPath: any, level: any) {
     if (!spaceName) return;
 
     loadingSubpaths = true;
     try {
-      const response = await getSpaceFolders(
-        spaceName,
-        parentPath || "/",
-        DmartScope.managed,
-      );
+      // Fetch the parent folder ITSELF in parallel with its children. The
+      // children query (getSpaceFolders) feeds the next-level dropdown; the
+      // parent retrieve drives content_schema_shortnames /
+      // content_resource_types / workflow_shortnames / schema_shortname for
+      // creation under this path. Reading those from records[0] (a child)
+      // was the previous bug — they belong to parentPath itself.
+      const parts = splitParentPath(parentPath);
+      const [response, parentEntry] = await Promise.all([
+        getSpaceFolders(spaceName, parentPath || "/", DmartScope.managed),
+        parts
+          ? getEntityByShortname(
+              parts.shortname,
+              spaceName,
+              parts.subpath,
+              ResourceType.folder,
+              DmartScope.managed,
+              true,
+              false,
+            )
+          : Promise.resolve(null),
+      ]);
 
       // The server returns records: null when the queried subpath has no
       // children — coerce to [] so the .filter/.some calls below don't blow
@@ -302,11 +357,16 @@
       const hasNonFolderContent = records.some(
         (item: any) => item.resource_type !== "folder",
       );
-      if (parentPath === "") {
-        itemResourceType =
-          records[0]?.attributes?.payload?.body
-            ?.content_resource_types?.[0];
-      }
+      const parentBody: any = (parentEntry as any)?.payload?.body ?? null;
+      itemResourceType = parentBody?.content_resource_types?.[0];
+
+      const folderContentSchemaShortnames: string[] = Array.isArray(
+        parentBody?.content_schema_shortnames,
+      )
+        ? parentBody.content_schema_shortnames.filter(
+            (s: any) => typeof s === "string" && s.trim().length > 0,
+          )
+        : [];
 
       const levelData = {
         level,
@@ -319,14 +379,12 @@
             : folder.shortname,
         })),
         resource_type: itemResourceType,
-        workflow_shortname:
-          records[0]?.attributes?.payload?.body
-            ?.workflow_shortnames?.[0] || "",
+        workflow_shortname: parentBody?.workflow_shortnames?.[0] || "",
         schema_shortname:
-          records[0]?.attributes?.payload?.schema_shortname ||
-          records[0]?.attributes?.payload?.body
-            ?.content_schema_shortnames?.[0] ||
+          (parentEntry as any)?.payload?.schema_shortname ||
+          folderContentSchemaShortnames[0] ||
           "",
+        content_schema_shortnames: folderContentSchemaShortnames,
         canCreateEntry:
           level > 0 || hasNonFolderContent || folders.length === 0,
         selectedFolder: "",
@@ -349,6 +407,7 @@
     resource_type = lastLevel.resource_type;
     workflow_shortname = subpathHierarchy[0].workflow_shortname;
     schema_shortname = lastLevel.schema_shortname;
+    allowedSchemaShortnames = lastLevel.content_schema_shortnames || [];
     currentPath = lastLevel.path;
   }
 
@@ -370,14 +429,6 @@
       subpathHierarchy = subpathHierarchy.slice(0, level + 1);
       updateCanCreateEntry();
     }
-  }
-
-  function handleLabelClick() {
-    isEditing = true;
-  }
-
-  function handleInputBlur() {
-    isEditing = false;
   }
 
   let tags = $state<any[]>([]);
@@ -629,6 +680,7 @@
         is_active: entity.is_active !== false,
         tags: entity.tags || [],
         relationships: [],
+        ...(slug.trim() ? { slug: slug.trim() } : {}),
         payload: {
           content_type: "json",
           body: entity.body,
@@ -782,6 +834,7 @@
       is_active: entity.is_active !== false,
       tags: entity.tags || [],
       relationships: [],
+      ...(slug.trim() ? { slug: slug.trim() } : {}),
       payload: {
         content_type: contentType || "json",
         body: entity.body,
@@ -1247,169 +1300,156 @@
     <div class="section">
       <div class="section-header">
         <FileCheckSolid class="section-icon" />
-        <h2>{$_("create_entry.entry_type.title")}</h2>
+        <h2>Entry Details</h2>
       </div>
-      <div class="section-content">
-        <div class="entry-type-selector">
-          <label class="entry-type-option">
-            <input
-              type="radio"
-              bind:group={entryType}
-              value="content"
-              onchange={handleEntryTypeChange}
-            />
-            <span class="entry-type-label">
-              <strong>{$_("create_entry.entry_type.content_title")}</strong>
-              <small>{$_("create_entry.entry_type.content_description")}</small>
-            </span>
-          </label>
-          <label class="entry-type-option">
-            <input
-              type="radio"
-              bind:group={entryType}
-              value="structured"
-              onchange={handleEntryTypeChange}
-            />
-            <span class="entry-type-label">
-              <strong>Structured Entry</strong>
-              <small>Form data merged with markdown template preview</small>
-            </span>
-          </label>
+      <div class="section-content details-content">
+        <div class="form-row">
+          <span class="form-row-label">Type</span>
+          <div class="entry-type-selector compact">
+            <label class="entry-type-option">
+              <input
+                type="radio"
+                bind:group={entryType}
+                value="content"
+                onchange={handleEntryTypeChange}
+              />
+              <span class="entry-type-label">
+                <strong>{$_("create_entry.entry_type.content_title")}</strong>
+                <small
+                  >{$_("create_entry.entry_type.content_description")}</small
+                >
+              </span>
+            </label>
+            <label class="entry-type-option">
+              <input
+                type="radio"
+                bind:group={entryType}
+                value="structured"
+                onchange={handleEntryTypeChange}
+              />
+              <span class="entry-type-label">
+                <strong>Structured Entry</strong>
+                <small>Form data merged with markdown template preview</small>
+              </span>
+            </label>
+          </div>
         </div>
-      </div>
-    </div>
 
-    <div class="section">
-      <div class="section-header">
-        <TextUnderlineOutline class="section-icon" />
-        <h2>{$_("create_entry.title.section_title")}</h2>
-      </div>
-      <div class="section-content">
-        {#if isEditing}
+        <div class="form-row">
+          <label for="title-input" class="form-row-label">
+            {$_("create_entry.title.section_title")}
+          </label>
           <input
             type="text"
-            bind:value={title}
-            onblur={handleInputBlur}
-            class="title-input"
-            placeholder={$_("create_entry.title.placeholder")}
             id="title-input"
+            bind:value={title}
+            class="form-row-input"
+            placeholder={$_("create_entry.title.placeholder")}
             aria-label={$_("create_entry.title.placeholder")}
           />
-        {:else}
-          <div
-            class="title-display"
-            tabindex="0"
-            onkeydown={(e) => {
-              if (e.key === "Enter") handleLabelClick();
-            }}
-            role="button"
-            aria-label={$_("create_entry.title.edit_aria")}
-            onclick={handleLabelClick}
-          >
-            {#if title}
-              {title}
-            {:else}
-              <span class="title-placeholder"
-                >{$_("create_entry.title.click_to_add")}</span
+        </div>
+
+        <div class="form-row">
+          <label for="shortname-input" class="form-row-label">
+            {$_("create_entry.shortname.section_title")}
+            <span class="required-indicator">*</span>
+          </label>
+          <div class="form-row-control">
+            <div
+              class="shortname-input-group"
+              class:input-error={shortnameError}
+            >
+              <input
+                type="text"
+                id="shortname-input"
+                bind:value={shortname}
+                class="shortname-input-field"
+                class:input-error={shortnameError}
+                pattern={shortnamePattern}
+                placeholder={$_("create_entry.shortname.placeholder")}
+                aria-label={$_("create_entry.shortname.placeholder")}
+                oninput={handleShortnameInput}
+              />
+              <button
+                type="button"
+                class="shortname-auto-btn"
+                onclick={() => (shortname = "auto")}
+                title="Use auto-generated shortname"
               >
+                Auto
+              </button>
+            </div>
+            {#if shortnameError}
+              <div class="shortname-error">
+                <svg class="error-icon" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd"></path>
+                </svg>
+                {shortnameError}
+              </div>
+            {:else}
+              <div class="shortname-help">
+                <small>{$_("create_entry.shortname.help_text")}</small>
+              </div>
             {/if}
           </div>
-        {/if}
-      </div>
-    </div>
-
-    <div class="section">
-      <div class="section-header">
-        <TagOutline class="section-icon" />
-        <h2>{$_("create_entry.shortname.section_title")} <span class="required-indicator">*</span></h2>
-      </div>
-      <div class="section-content">
-        <div class="shortname-input-group" class:input-error={shortnameError}>
-          <input
-            type="text"
-            bind:value={shortname}
-            class="shortname-input shortname-input-field"
-            class:input-error={shortnameError}
-            pattern={shortnamePattern}
-            placeholder={$_("create_entry.shortname.placeholder")}
-            id="shortname-input"
-            aria-label={$_("create_entry.shortname.placeholder")}
-            oninput={handleShortnameInput}
-          />
-          <button
-            type="button"
-            class="shortname-auto-btn"
-            onclick={() => (shortname = "auto")}
-            title="Use auto-generated shortname"
-          >
-            Auto
-          </button>
-        </div>
-        {#if shortnameError}
-          <div class="shortname-error">
-            <svg class="error-icon" fill="currentColor" viewBox="0 0 20 20">
-              <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd"></path>
-            </svg>
-            {shortnameError}
-          </div>
-        {:else}
-          <div class="shortname-help">
-            <small>{$_("create_entry.shortname.help_text")}</small>
-          </div>
-        {/if}
-      </div>
-    </div>
-
-    <div class="section">
-      <div class="section-header">
-        <TagOutline class="section-icon" />
-        <h2>{$_("create_entry.tags.section_title")}</h2>
-      </div>
-      <div class="section-content">
-        <div class="tag-input-container">
-          <input
-            type="text"
-            id="tag-input"
-            bind:value={newTag}
-            placeholder={$_("create_entry.tags.placeholder")}
-            class="tag-input"
-            onkeydown={(e) => {
-              if (e.key === "Enter") addTag();
-            }}
-          />
-          <button
-            aria-label={$_("create_entry.tags.add_button")}
-            class="add-tag-button"
-            onclick={addTag}
-            disabled={!newTag.trim()}
-          >
-            <PlusOutline class="icon button-icon" />
-            <span>{$_("create_entry.tags.add_button")}</span>
-          </button>
         </div>
 
-        {#if tags.length > 0}
-          <div class="tags-container">
-            {#each tags as tag, index}
-              <div class="tag-item">
-                <TagOutline class="tag-icon" />
-                <span class="tag-text">{tag}</span>
-                <button
-                  class="tag-remove"
-                  onclick={() => removeTag(index)}
-                  aria-label={$_("create_entry.tags.remove_aria")}
-                >
-                  <CloseCircleOutline class="icon" />
-                </button>
-              </div>
-            {/each}
+        <div class="form-row">
+          <label for="slug-input" class="form-row-label">
+            {$_("fields.slug")}
+          </label>
+          <input
+            type="text"
+            id="slug-input"
+            bind:value={slug}
+            class="form-row-input"
+            placeholder={$_("placeholders.slug")}
+            aria-label={$_("fields.slug")}
+          />
+        </div>
+
+        <div class="form-block">
+          <span class="form-row-label">{$_("create_entry.tags.section_title")}</span>
+          <div class="tag-input-container">
+            <input
+              type="text"
+              id="tag-input"
+              bind:value={newTag}
+              placeholder={$_("create_entry.tags.placeholder")}
+              class="tag-input"
+              onkeydown={(e) => {
+                if (e.key === "Enter") addTag();
+              }}
+            />
+            <button
+              aria-label={$_("create_entry.tags.add_button")}
+              class="add-tag-button"
+              onclick={addTag}
+              disabled={!newTag.trim()}
+            >
+              <PlusOutline class="icon button-icon" />
+              <span>{$_("create_entry.tags.add_button")}</span>
+            </button>
           </div>
-        {:else}
-          <div class="empty-state">
-            <TagOutline class="empty-icon" />
-            <p>{$_("create_entry.tags.empty_message")}</p>
-          </div>
-        {/if}
+
+          {#if tags.length > 0}
+            <div class="tags-container">
+              {#each tags as tag, index}
+                <div class="tag-item">
+                  <TagOutline class="tag-icon" />
+                  <span class="tag-text">{tag}</span>
+                  <button
+                    class="tag-remove"
+                    onclick={() => removeTag(index)}
+                    aria-label={$_("create_entry.tags.remove_aria")}
+                  >
+                    <CloseCircleOutline class="icon" />
+                  </button>
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
       </div>
     </div>
 
@@ -1476,7 +1516,7 @@
             <div class="loading-state">
               <p>{$_("create_entry.schema.loading")}</p>
             </div>
-          {:else if availableSchemas.length > 0}
+          {:else if filteredSchemas.length > 0}
             <div class="schema-selector">
               <label for="schema-select" class="selector-label"
                 >{$_("create_entry.schema.select_label")}</label
@@ -1489,7 +1529,7 @@
                 <option value=""
                   >{$_("create_entry.schema.choose_option")}</option
                 >
-                {#each availableSchemas as schema}
+                {#each filteredSchemas as schema}
                   <option value={schema.shortname}>{schema.title}</option>
                 {/each}
               </select>
@@ -1666,7 +1706,7 @@
             <div class="loading-state">
               <p>{$_("create_entry.schema.loading")}</p>
             </div>
-          {:else if availableSchemas.length > 0}
+          {:else if filteredSchemas.length > 0}
             <div class="schema-selector">
               <label for="schema-select" class="selector-label"
                 >{$_("create_entry.schema.select_label")}</label
@@ -1679,7 +1719,7 @@
                 <option value=""
                   >{$_("create_entry.schema.choose_option")}</option
                 >
-                {#each availableSchemas as schema}
+                {#each filteredSchemas as schema}
                   <option value={schema.shortname}>{schema.title}</option>
                 {/each}
               </select>
@@ -2314,30 +2354,71 @@
     padding: 2rem;
   }
 
-  .title-input,
-  .shortname-input {
-    width: 100%;
-    padding: 1rem 1.5rem;
-    border: 2px solid var(--gray-200);
-    border-radius: var(--radius-lg);
-    font-size: 1.5rem;
+  .details-content {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .form-row {
+    display: grid;
+    grid-template-columns: 160px 1fr;
+    align-items: start;
+    gap: 1rem;
+  }
+
+  .form-row-label {
+    font-size: 0.875rem;
     font-weight: 600;
+    color: var(--gray-700);
+    margin: 0;
+    padding-top: 0.625rem;
+  }
+
+  .form-row-control {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    min-width: 0;
+  }
+
+  .form-row-input {
+    width: 100%;
+    padding: 0.625rem 0.875rem;
+    border: 1px solid var(--gray-200);
+    border-radius: var(--radius-lg);
+    font-size: 0.95rem;
     color: var(--gray-800);
     transition: all 0.2s ease;
     outline: none;
+    background: var(--white);
   }
 
-  .shortname-input {
-    font-size: 1rem;
-    font-weight: 500;
+  .form-row-input:focus {
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+  }
+
+  .form-block {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  @media (max-width: 640px) {
+    .form-row {
+      grid-template-columns: 1fr;
+      gap: 0.375rem;
+    }
   }
 
   .shortname-input-group {
     display: flex;
     align-items: stretch;
-    border: 2px solid var(--gray-200);
+    border: 1px solid var(--gray-200);
     border-radius: var(--radius-lg);
     overflow: hidden;
+    background: var(--white);
     transition:
       border-color 0.2s ease,
       box-shadow 0.2s ease;
@@ -2353,8 +2434,8 @@
     border: none !important;
     border-radius: 0 !important;
     box-shadow: none !important;
-    padding: 0.75rem 1rem;
-    font-size: 1rem;
+    padding: 0.625rem 0.875rem;
+    font-size: 0.95rem;
     font-weight: 500;
     color: var(--gray-800);
     background: transparent;
@@ -2364,12 +2445,12 @@
 
   .shortname-auto-btn {
     flex-shrink: 0;
-    padding: 0 1.25rem;
+    padding: 0 1rem;
     background: var(--gray-100);
     border: none;
-    border-left: 2px solid var(--gray-200);
+    border-left: 1px solid var(--gray-200);
     color: var(--primary-color);
-    font-size: 0.875rem;
+    font-size: 0.8125rem;
     font-weight: 700;
     letter-spacing: 0.03em;
     cursor: pointer;
@@ -2385,41 +2466,11 @@
     border-left-color: var(--primary-color);
   }
 
-  .title-input:focus,
-  .shortname-input:focus {
-    border-color: var(--primary-color);
-    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
-  }
-
-  .title-display {
-    padding: 1rem 1.5rem;
-    border: 2px solid transparent;
-    border-radius: var(--radius-lg);
-    font-size: 1.5rem;
-    font-weight: 600;
-    color: var(--gray-800);
-    cursor: pointer;
-    transition: all 0.2s ease;
-    min-height: 4rem;
-    display: flex;
-    align-items: center;
-    background: var(--gray-50);
-  }
-
-  .title-display:hover {
-    border-color: var(--primary-color);
-    background: var(--white);
-    transform: translateY(-1px);
-    box-shadow: var(--shadow-md);
-  }
-
   .shortname-help {
-    margin-top: 0.5rem;
     color: var(--gray-500);
   }
 
   .shortname-error {
-    margin-top: 0.5rem;
     color: var(--danger-color);
     font-size: 0.875rem;
     display: flex;
@@ -2442,15 +2493,10 @@
     flex-shrink: 0;
   }
 
-  .title-placeholder {
-    color: var(--gray-400);
-  }
-
   .tag-input-container {
     display: flex;
     align-items: center;
-    gap: 1rem;
-    margin-bottom: 1.5rem;
+    gap: 0.75rem;
   }
 
   .tag-input {
@@ -3006,6 +3052,18 @@
     display: flex;
     flex-direction: column;
     gap: 1rem;
+  }
+
+  .entry-type-selector.compact {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+  }
+
+  .entry-type-selector.compact .entry-type-option {
+    flex: 1 1 220px;
+    padding: 0.625rem 0.875rem;
+    border-width: 1px;
   }
 
   .entry-type-option {
