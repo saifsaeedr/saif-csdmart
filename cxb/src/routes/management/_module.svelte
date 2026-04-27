@@ -51,7 +51,7 @@
     // for both signed-in and anonymous callers (no 401 noise on cold loads).
     // Mid-session expiration is still detected by the response interceptor
     // above when a regular API call returns 401.
-    const profilePromise = dmartAxios.get("info/me").then((r) => {
+    const profilePromise = dmartAxios.get("info/me").then(async (r) => {
         const authed = r.data?.attributes?.authenticated === true;
         if (!authed) {
             // Clean up any stale local state so the Login form shows.
@@ -63,6 +63,7 @@
             throw new Error("not signed in");
         }
         // Authed — fire the spaces fetch (best-effort) and resolve.
+        await Dmart.getProfile()
         getSpaces().catch(() => {});
         return r.data;
     });

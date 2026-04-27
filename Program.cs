@@ -158,10 +158,21 @@ switch (subcommand)
                              Backfill entries.query_policies for rows written
                              before write-time population landed. Idempotent.
                              Args: [<space>] [--dry-run]
+<<<<<<< HEAD
               create-users-folders
                              Backfill personal/people/<shortname>/{notifications,
                              private,protected,public,inbox} for every user.
                              Idempotent — existing folders are left untouched.
+||||||| 73d0630
+=======
+              update_query_policies
+                             Recompute query_policies for every entry and
+                             update rows whose stored value drifted (e.g.
+                             owner / is_active changed without going through
+                             the write path). Mirrors Python's
+                             update_query_policies.py.
+                             Args: [--batch-size <N>] (default 1000)
+>>>>>>> 4e0ad44aa20b7bcf7ecc5dea0ed928e7311f98b1
               cli            Interactive CLI client (REPL/command/script)
               help           Print this help
 
@@ -833,6 +844,102 @@ switch (subcommand)
         Console.WriteLine("===== DONE ======");
         Console.WriteLine($"Scanned {shortnames.Count} users, created {created} missing folders ({skipped} skipped, {failed} failed)");
         Environment.ExitCode = failed > 0 ? 2 : 0;
+        return;
+    }
+
+    case "update_query_policies":
+    case "update-query-policies":
+    {
+        // Recompute query_policies for every row in `entries` and write the
+        // value back when it differs from what's stored. Mirrors Python's
+        // update_query_policies.py — same name, same scope (Entries only),
+        // same default batch size. Use this when a bulk in-place change
+        // (e.g. an owner_shortname rename or an is_active toggle done via
+        // direct SQL) leaves the materialized policies stale; the regular
+        // /managed/request write path keeps them in sync going forward.
+        //
+        // Idempotent: rows whose recomputed policies match the stored array
+        // are skipped without an UPDATE. Safe on a live DB; each UPDATE
+        // touches only the query_policies column.
+        var batchSize = 1000;
+        for (var i = 0; i < serverArgs.Length; i++)
+        {
+            if (serverArgs[i] == "--batch-size" && i + 1 < serverArgs.Length
+                && int.TryParse(serverArgs[i + 1], out var b) && b > 0)
+                batchSize = b;
+        }
+
+        var (s, dbInst) = CliBootstrap.BuildOrExit(dotenvPath, dotenvValues,
+            "Error: Database not configured. Set DATABASE_* in config.env.");
+
+        Console.WriteLine($"Recomputing query_policies for entries in {s.DatabaseName}@{s.DatabaseHost}:{s.DatabasePort} (batch={batchSize})...");
+
+        await using var conn = await dbInst.OpenAsync();
+
+        var updated = 0;
+        var offset = 0;
+        while (true)
+        {
+            await using var sel = new Npgsql.NpgsqlCommand("""
+                SELECT shortname, space_name, subpath, resource_type, is_active,
+                       owner_shortname, owner_group_shortname, query_policies
+                FROM entries
+                ORDER BY space_name, subpath, shortname
+                OFFSET $1 LIMIT $2
+                """, conn);
+            sel.Parameters.Add(new() { Value = offset });
+            sel.Parameters.Add(new() { Value = batchSize });
+
+            var rows = new List<(string sn, string sp, string subp, string rt, bool act,
+                string own, string? og, string[] policies)>();
+            await using (var r = await sel.ExecuteReaderAsync())
+            {
+                while (await r.ReadAsync())
+                {
+                    rows.Add((
+                        r.GetString(0), r.GetString(1), r.GetString(2),
+                        r.GetString(3), r.GetBoolean(4),
+                        r.GetString(5), r.IsDBNull(6) ? null : r.GetString(6),
+                        r.IsDBNull(7) ? Array.Empty<string>() : r.GetFieldValue<string[]>(7)));
+                }
+            }
+            if (rows.Count == 0) break;
+            Console.WriteLine($"Processing {rows.Count} entries...");
+
+            foreach (var (sn, sp, subp, rt, act, own, og, current) in rows)
+            {
+                List<string> recomputed;
+                try
+                {
+                    var entryShortname = rt == "folder" ? sn : null;
+                    recomputed = Dmart.Utils.QueryPolicies.Generate(
+                        spaceName: sp, subpath: subp, resourceType: rt,
+                        isActive: act, ownerShortname: own ?? "dmart",
+                        ownerGroupShortname: og, entryShortname: entryShortname);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error while computing query_policies for {sp}/{subp}/{sn}");
+                    Console.WriteLine($"| {ex.Message}\n");
+                    continue;
+                }
+
+                if (current.SequenceEqual(recomputed)) continue;
+
+                await using var upd = new Npgsql.NpgsqlCommand("""
+                    UPDATE entries SET query_policies = $1
+                    WHERE shortname = $2 AND space_name = $3 AND subpath = $4
+                    """, conn);
+                upd.Parameters.Add(new() { Value = recomputed.ToArray() });
+                upd.Parameters.Add(new() { Value = sn });
+                upd.Parameters.Add(new() { Value = sp });
+                upd.Parameters.Add(new() { Value = subp });
+                updated += await upd.ExecuteNonQueryAsync();
+            }
+            offset += rows.Count;
+        }
+
+        Console.WriteLine($"Updated query_policies for {updated} entries.");
         return;
     }
 
