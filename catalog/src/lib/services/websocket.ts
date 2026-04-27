@@ -40,6 +40,8 @@ export class WebSocketService {
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
   private reconnectDelay = 3000;
+  private pingInterval: number | null = null;
+  private static readonly PING_INTERVAL_MS = 25_000;
   private callbacks: WebSocketCallbacks = {};
   private token: string;
   private subscriptions: WebSocketMessage[] = [];
@@ -148,6 +150,7 @@ export class WebSocketService {
           this.updateStatus("connected");
           this.reconnectAttempts = 0;
           this.resendSubscriptions();
+          this.startPing();
           resolve(true);
         };
 
@@ -192,6 +195,7 @@ export class WebSocketService {
   }
 
   private cleanup(): void {
+    this.stopPing();
     if (this.ws) {
       try {
         this.ws.close();
@@ -202,8 +206,31 @@ export class WebSocketService {
     }
   }
 
+  private startPing(): void {
+    if (this.pingInterval !== null) return;
+    this.pingInterval = window.setInterval(() => {
+      // Bypass send() so a missed ping during a transient disconnect
+      // doesn't kick off the reconnect machinery — onclose handles that.
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        try {
+          this.ws.send(JSON.stringify({ type: "ping" }));
+        } catch {
+          /* socket about to close — onclose will fire */
+        }
+      }
+    }, WebSocketService.PING_INTERVAL_MS);
+  }
+
+  private stopPing(): void {
+    if (this.pingInterval !== null) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+  }
+
   async disconnect(): Promise<void> {
     this.clearReconnectTimer();
+    this.stopPing();
     this.messageListeners.clear();
     this.statusListeners.clear();
     this.cleanup();
