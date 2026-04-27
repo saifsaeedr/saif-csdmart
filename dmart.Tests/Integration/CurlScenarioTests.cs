@@ -2,8 +2,12 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using Dmart.Auth;
+using Dmart.DataAdapters.Sql;
 using Dmart.Models.Api;
+using Dmart.Models.Enums;
 using Dmart.Models.Json;
+using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
 using Xunit;
 
@@ -30,21 +34,46 @@ public class CurlScenarioTests : IClassFixture<DmartFactory>
     [FactIfPg]
     public async Task Full_Curl_Sh_Scenario_End_To_End()
     {
+        // Per-test user with super_admin role — see DmartFactory.CreateLoggedInUserAsync.
+        // Login here is done inline (not via the helper) because this scenario
+        // asserts the literal Set-Cookie shape and the JWT claim values from
+        // /user/login, so it has to inspect the response itself.
+        var actorShortname = $"itest_{Guid.NewGuid():N}"[..16];
+        const string actorPassword = "TestPassword1";
+        var users = _factory.Services.GetRequiredService<UserRepository>();
+        var hasher = _factory.Services.GetRequiredService<PasswordHasher>();
+        await users.UpsertAsync(new Dmart.Models.Core.User
+        {
+            Uuid = Guid.NewGuid().ToString(),
+            Shortname = actorShortname,
+            SpaceName = "management",
+            Subpath = "/users",
+            OwnerShortname = actorShortname,
+            IsActive = true,
+            Password = hasher.Hash(actorPassword),
+            Type = UserType.Web,
+            Language = Language.En,
+            Roles = new() { "super_admin" },
+            Groups = new(),
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        });
+
         var client = _factory.CreateClient();
 
         // ---------------------------------------------------------------------
         // 1. Login — returns access_token in attributes AND a Set-Cookie header.
         // ---------------------------------------------------------------------
         var loginBodyJson =
-            "{\"shortname\":\"" + _factory.AdminShortname +
-            "\",\"password\":\"" + _factory.AdminPassword + "\"}";
+            "{\"shortname\":\"" + actorShortname +
+            "\",\"password\":\"" + actorPassword + "\"}";
         var loginResp = await client.PostAsync("/user/login", Json(loginBodyJson));
         var loginRaw = await loginResp.Content.ReadAsStringAsync();
         var loginBody = JsonSerializer.Deserialize(loginRaw, DmartJsonContext.Default.Response);
         loginBody.ShouldNotBeNull($"Login deserialization failed: {loginRaw}");
         loginBody!.Status.ShouldBe(Status.Success, $"Login failed: {loginRaw}");
         var token = loginBody.Records?.FirstOrDefault()?.Attributes?["access_token"]?.ToString()
-            ?? throw new InvalidOperationException($"Login failed for '{_factory.AdminShortname}': {loginResp.StatusCode} {loginRaw}");
+            ?? throw new InvalidOperationException($"Login failed for '{actorShortname}': {loginResp.StatusCode} {loginRaw}");
         token.ShouldNotBeNullOrEmpty();
 
         // Cookie should also be set (dmart parity check from curl.sh).
@@ -70,13 +99,13 @@ public class CurlScenarioTests : IClassFixture<DmartFactory>
         {
             var p = pdoc.RootElement;
             // Standard claims
-            p.GetProperty("sub").GetString().ShouldBe(_factory.AdminShortname);
+            p.GetProperty("sub").GetString().ShouldBe(actorShortname);
             p.TryGetProperty("exp", out _).ShouldBeTrue();
             p.TryGetProperty("iss", out _).ShouldBeTrue();
             p.TryGetProperty("aud", out _).ShouldBeTrue();
             // Python-compatible claims
             p.TryGetProperty("data", out var data).ShouldBeTrue("JWT missing data object");
-            data.GetProperty("shortname").GetString().ShouldBe(_factory.AdminShortname);
+            data.GetProperty("shortname").GetString().ShouldBe(actorShortname);
             data.TryGetProperty("type", out _).ShouldBeTrue("JWT data missing type");
             p.TryGetProperty("expires", out var expires).ShouldBeTrue("JWT missing expires");
             expires.GetInt64().ShouldBe(p.GetProperty("exp").GetInt64());

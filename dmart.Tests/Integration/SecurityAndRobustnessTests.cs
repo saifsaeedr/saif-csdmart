@@ -19,18 +19,12 @@ public class SecurityAndRobustnessTests : IClassFixture<DmartFactory>
     private readonly DmartFactory _factory;
     public SecurityAndRobustnessTests(DmartFactory factory) => _factory = factory;
 
+    // Per-test user (super_admin role) so concurrent tests don't race each
+    // other via MaxSessionsPerUser eviction — see DmartFactory.CreateLoggedInUserAsync.
     private async Task<(HttpClient Client, string Token)> LoginAsync()
     {
-        var client = _factory.CreateClient();
-        var login = new UserLoginRequest(_factory.AdminShortname, null, null, _factory.AdminPassword, null);
-        var resp = await client.PostAsJsonAsync("/user/login", login, DmartJsonContext.Default.UserLoginRequest);
-        var raw = await resp.Content.ReadAsStringAsync();
-        var body = JsonSerializer.Deserialize(raw, DmartJsonContext.Default.Response);
-        var token = body?.Records?.FirstOrDefault()?.Attributes?["access_token"]?.ToString()
-            ?? throw new InvalidOperationException(
-                $"Login failed for '{_factory.AdminShortname}': {resp.StatusCode} {raw}");
-        client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
-        return (client, token);
+        var u = await _factory.CreateLoggedInUserAsync();
+        return (u.Client, u.Token);
     }
 
     // ==================== CORS fallback uses localhost ====================

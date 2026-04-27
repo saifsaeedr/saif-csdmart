@@ -20,9 +20,7 @@ public class LockDbTests : IClassFixture<DmartFactory>
     [FactIfPg]
     public async Task Lock_Then_Unlock_Round_Trip()
     {
-        var client = _factory.CreateClient();
-        var token = await GetTokenAsync(client);
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var (client, _, _, _) = await _factory.CreateLoggedInUserAsync();
 
         var space = "test";
         var subpath = "lock-test";
@@ -50,9 +48,7 @@ public class LockDbTests : IClassFixture<DmartFactory>
     {
         // /managed/lock must echo the configured lock_period so clients can
         // schedule a refresh before the lock auto-expires. Mirrors Python.
-        var client = _factory.CreateClient();
-        var token = await GetTokenAsync(client);
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var (client, _, _, _) = await _factory.CreateLoggedInUserAsync();
 
         var space = "test";
         var subpath = "lock-period-test";
@@ -87,9 +83,7 @@ public class LockDbTests : IClassFixture<DmartFactory>
         {
             svcs.Configure<Dmart.Config.DmartSettings>(s => s.LockPeriod = 1);
         }));
-        var client = factory.CreateClient();
-        var token = await GetTokenAsync(client);
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var (client, _, _, _) = await _factory.CreateLoggedInUserAsync(host: factory);
 
         var space = "test";
         var subpath = "lock-expiry-test";
@@ -114,13 +108,4 @@ public class LockDbTests : IClassFixture<DmartFactory>
         await client.DeleteAsync($"/managed/lock/{space}/{subpath}/{shortname}");
     }
 
-    private async Task<string> GetTokenAsync(HttpClient client)
-    {
-        var login = new UserLoginRequest(_factory.AdminShortname, null, null, _factory.AdminPassword, null);
-        var resp = await client.PostAsJsonAsync("/user/login", login, DmartJsonContext.Default.UserLoginRequest);
-        var raw = await resp.Content.ReadAsStringAsync();
-        var body = JsonSerializer.Deserialize(raw, DmartJsonContext.Default.Response);
-        return body?.Records?.FirstOrDefault()?.Attributes?["access_token"]?.ToString()
-            ?? throw new InvalidOperationException($"Login failed for '{_factory.AdminShortname}': {resp.StatusCode} {raw}");
-    }
 }

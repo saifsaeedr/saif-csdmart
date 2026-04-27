@@ -258,18 +258,10 @@ public class QueryResponseShapeTests : IClassFixture<DmartFactory>
     [FactIfPg]
     public async Task User_Entry_Endpoint_Hides_Password()
     {
-        var client = _factory.CreateClient();
-        var raw = await client.PostAsync("/user/login",
-            new StringContent($"{{\"shortname\":\"{_factory.AdminShortname}\",\"password\":\"{_factory.AdminPassword}\"}}",
-                System.Text.Encoding.UTF8, "application/json"));
-        var loginBody = await raw.Content.ReadAsStringAsync();
-        var token = System.Text.Json.JsonDocument.Parse(loginBody).RootElement
-            .GetProperty("records")[0].GetProperty("attributes")
-            .GetProperty("access_token").GetString();
-        client.DefaultRequestHeaders.Authorization =
-            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+        // Per-test user with super_admin role — see DmartFactory.CreateLoggedInUserAsync.
+        var (client, _, shortname, _) = await _factory.CreateLoggedInUserAsync();
 
-        var resp = await client.GetAsync($"/managed/entry/user/management/users/{_factory.AdminShortname}");
+        var resp = await client.GetAsync($"/managed/entry/user/management/users/{shortname}");
         var body = await resp.Content.ReadAsStringAsync();
         body.ShouldNotContain("\"password\"");
         body.ShouldNotContain("\"query_policies\"");

@@ -32,21 +32,8 @@ public class CsvRoundTripTests : IClassFixture<DmartFactory>
     [FactIfPg]
     public async Task Csv_Import_Then_Export_Exercises_Flatten_And_Parse_Branches()
     {
-        var client = _factory.CreateClient();
-
-        // ---- login ------------------------------------------------------
-        var loginJson =
-            "{\"shortname\":\"" + _factory.AdminShortname +
-            "\",\"password\":\"" + _factory.AdminPassword + "\"}";
-        var loginResp = await client.PostAsync("/user/login",
-            new StringContent(loginJson, Encoding.UTF8, "application/json"));
-        var loginRaw = await loginResp.Content.ReadAsStringAsync();
-        var loginBody = JsonSerializer.Deserialize(loginRaw, DmartJsonContext.Default.Response);
-        loginBody.ShouldNotBeNull($"Login deserialization failed: {loginRaw}");
-        loginBody!.Status.ShouldBe(Status.Success, $"Login failed: {loginRaw}");
-        var token = loginBody.Records?.FirstOrDefault()?.Attributes?["access_token"]?.ToString()
-            ?? throw new InvalidOperationException($"Login failed for '{_factory.AdminShortname}': {loginResp.StatusCode} {loginRaw}");
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        // Per-test user with super_admin role — see DmartFactory.CreateLoggedInUserAsync.
+        var (client, _, _, _) = await _factory.CreateLoggedInUserAsync();
 
         try
         {

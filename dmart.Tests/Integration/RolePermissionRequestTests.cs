@@ -302,17 +302,11 @@ public sealed class RolePermissionRequestTests : IClassFixture<DmartFactory>
 
     // ==================== helpers ====================
 
+    // Per-test user (super_admin role) — see DmartFactory.CreateLoggedInUserAsync.
     private async Task<HttpClient> AuthedClient()
     {
-        var client = _factory.CreateClient();
-        var login = new UserLoginRequest(_factory.AdminShortname, null, null, _factory.AdminPassword, null);
-        var resp = await client.PostAsJsonAsync("/user/login", login, DmartJsonContext.Default.UserLoginRequest);
-        var raw = await resp.Content.ReadAsStringAsync();
-        var body = JsonSerializer.Deserialize(raw, DmartJsonContext.Default.Response);
-        var token = body?.Records?.FirstOrDefault()?.Attributes?["access_token"]?.ToString()
-            ?? throw new InvalidOperationException($"login failed: {resp.StatusCode} {raw}");
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
-        return client;
+        var u = await _factory.CreateLoggedInUserAsync();
+        return u.Client;
     }
 
     private static async Task CreateRecord(HttpClient client, ResourceType rt, string subpath, string shortname, Dictionary<string, object> attrs)

@@ -142,13 +142,7 @@ public sealed class SpaceUpdateCoverageTests : IClassFixture<DmartFactory>
         // Sibling contract: a partial patch that omits a field must NOT clear
         // the stored value. Guards against a regression where a `?? existing`
         // fallback gets replaced with a bare extract that turns absent → null.
-        var client = _factory.CreateClient();
-        var login = new UserLoginRequest(_factory.AdminShortname, null, null, _factory.AdminPassword, null);
-        var loginResp = await client.PostAsJsonAsync("/user/login", login, DmartJsonContext.Default.UserLoginRequest);
-        var raw = await loginResp.Content.ReadAsStringAsync();
-        var loginBody = JsonSerializer.Deserialize(raw, DmartJsonContext.Default.Response);
-        var token = loginBody!.Records!.First().Attributes!["access_token"]!.ToString()!;
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var (client, _, _, _) = await _factory.CreateLoggedInUserAsync();
 
         var spaces = _factory.Services.GetRequiredService<SpaceRepository>();
         var spaceName = $"itest_preserve_{Guid.NewGuid():N}"[..16];

@@ -20,22 +20,12 @@ public class ManagedRequestCreateResponseTests : IClassFixture<DmartFactory>
     private readonly DmartFactory _factory;
     public ManagedRequestCreateResponseTests(DmartFactory factory) => _factory = factory;
 
-    // Mint an admin access token directly — avoids depending on the admin
-    // password matching between appsettings.json and the DB row (drift that
-    // breaks the login-based setup in other tests).
-    private HttpClient AuthedClient()
-    {
-        var client = _factory.CreateClient();
-        var jwt = _factory.Services.GetRequiredService<JwtIssuer>();
-        var token = jwt.IssueAccess(_factory.AdminShortname, roles: null, userType: UserType.Web);
-        client.DefaultRequestHeaders.Authorization = new("Bearer", token);
-        return client;
-    }
-
     [FactIfPg]
     public async Task User_Create_Response_Includes_Created_Updated_Owner()
     {
-        var client = AuthedClient();
+        // Per-test user with super_admin role so the request authenticates and
+        // the new strict OnTokenValidated session check accepts the token.
+        var (client, _, actor, _) = await _factory.CreateLoggedInUserAsync();
         var shortname = "u_" + Guid.NewGuid().ToString("N")[..8];
         var body = "{\"space_name\":\"management\",\"request_type\":\"create\",\"records\":[" +
             "{\"resource_type\":\"user\",\"shortname\":\"" + shortname + "\",\"subpath\":\"/users\"," +
@@ -50,7 +40,7 @@ public class ManagedRequestCreateResponseTests : IClassFixture<DmartFactory>
         attrs.ShouldContainKey("created_at");
         attrs.ShouldContainKey("updated_at");
         attrs.ShouldContainKey("owner_shortname");
-        attrs["owner_shortname"].ToString().ShouldBe(_factory.AdminShortname);
+        attrs["owner_shortname"].ToString().ShouldBe(actor);
 
         var users = _factory.Services.GetRequiredService<UserRepository>();
         await users.DeleteAsync(shortname);
@@ -59,7 +49,7 @@ public class ManagedRequestCreateResponseTests : IClassFixture<DmartFactory>
     [FactIfPg]
     public async Task Role_Create_Response_Includes_Created_Updated_Owner()
     {
-        var client = AuthedClient();
+        var (client, _, actor, _) = await _factory.CreateLoggedInUserAsync();
         var shortname = "r_" + Guid.NewGuid().ToString("N")[..8];
         var body = "{\"space_name\":\"management\",\"request_type\":\"create\",\"records\":[" +
             "{\"resource_type\":\"role\",\"shortname\":\"" + shortname + "\",\"subpath\":\"/roles\"," +
@@ -74,7 +64,7 @@ public class ManagedRequestCreateResponseTests : IClassFixture<DmartFactory>
         attrs.ShouldContainKey("created_at");
         attrs.ShouldContainKey("updated_at");
         attrs.ShouldContainKey("owner_shortname");
-        attrs["owner_shortname"].ToString().ShouldBe(_factory.AdminShortname);
+        attrs["owner_shortname"].ToString().ShouldBe(actor);
 
         var access = _factory.Services.GetRequiredService<AccessRepository>();
         await access.DeleteRoleAsync(shortname);

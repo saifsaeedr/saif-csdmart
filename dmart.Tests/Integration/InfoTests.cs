@@ -76,17 +76,8 @@ public class InfoTests : IClassFixture<DmartFactory>
     [FactIfPg]
     public async Task Settings_With_Auth_Returns_Listening_Port()
     {
-        var client = _factory.CreateClient();
-        var login = new Dmart.Models.Api.UserLoginRequest(
-            _factory.AdminShortname, null, null, _factory.AdminPassword, null);
-        var loginResp = await client.PostAsJsonAsync("/user/login", login,
-            DmartJsonContext.Default.UserLoginRequest);
-        var raw = await loginResp.Content.ReadAsStringAsync();
-        var token = JsonDocument.Parse(raw).RootElement
-            .GetProperty("records")[0].GetProperty("attributes")
-            .GetProperty("access_token").GetString();
-        client.DefaultRequestHeaders.Authorization =
-            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+        // Per-test user with super_admin role — see DmartFactory.CreateLoggedInUserAsync.
+        var (client, _, _, _) = await _factory.CreateLoggedInUserAsync();
 
         var resp = await client.GetAsync("/info/settings");
         resp.StatusCode.ShouldBe(HttpStatusCode.OK);

@@ -19,9 +19,7 @@ public class ManagedCrudDbTests : IClassFixture<DmartFactory>
     [FactIfPg]
     public async Task Create_Get_Update_Delete_Roundtrip()
     {
-        var client = _factory.CreateClient();
-        var token = await GetTokenAsync(client);
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var (client, _, _, _) = await _factory.CreateLoggedInUserAsync();
 
         var shortname = $"itest-{Guid.NewGuid():N}".Substring(0, 16);
         var space = "test";
@@ -113,9 +111,7 @@ public class ManagedCrudDbTests : IClassFixture<DmartFactory>
     [FactIfPg]
     public async Task User_Update_Persists_Payload_Block()
     {
-        var client = _factory.CreateClient();
-        var token = await GetTokenAsync(client);
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var (client, _, _, _) = await _factory.CreateLoggedInUserAsync();
 
         var shortname = $"u{Guid.NewGuid():N}".Substring(0, 12);
         var managementSpace = "management";
@@ -201,9 +197,7 @@ public class ManagedCrudDbTests : IClassFixture<DmartFactory>
     [FactIfPg]
     public async Task UpdateAcl_Writes_Acl_RegularUpdate_Ignores_It()
     {
-        var client = _factory.CreateClient();
-        var token = await GetTokenAsync(client);
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var (client, _, _, _) = await _factory.CreateLoggedInUserAsync();
 
         var shortname = $"acltest-{Guid.NewGuid():N}".Substring(0, 16);
         var space = "test";
@@ -308,9 +302,7 @@ public class ManagedCrudDbTests : IClassFixture<DmartFactory>
     [FactIfPg]
     public async Task Query_Returns_Success_With_Records_List()
     {
-        var client = _factory.CreateClient();
-        var token = await GetTokenAsync(client);
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var (client, _, _, _) = await _factory.CreateLoggedInUserAsync();
 
         var query = new Query
         {
@@ -343,13 +335,4 @@ public class ManagedCrudDbTests : IClassFixture<DmartFactory>
         body.Error!.Type.ShouldBe("jwtauth");
     }
 
-    private async Task<string> GetTokenAsync(HttpClient client)
-    {
-        var login = new UserLoginRequest(_factory.AdminShortname, null, null, _factory.AdminPassword, null);
-        var resp = await client.PostAsJsonAsync("/user/login", login, DmartJsonContext.Default.UserLoginRequest);
-        var raw = await resp.Content.ReadAsStringAsync();
-        var body = JsonSerializer.Deserialize(raw, DmartJsonContext.Default.Response);
-        return body?.Records?.FirstOrDefault()?.Attributes?["access_token"]?.ToString()
-            ?? throw new InvalidOperationException($"Login failed for '{_factory.AdminShortname}': {resp.StatusCode} {raw}");
-    }
 }

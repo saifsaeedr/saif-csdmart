@@ -3,7 +3,9 @@ using System.Text;
 using System.Text.Json;
 using Dmart.Auth;
 using Dmart.Config;
+using Dmart.DataAdapters.Sql;
 using Dmart.Models.Api;
+using Dmart.Models.Enums;
 using Dmart.Models.Json;
 using Dmart.Services;
 using Microsoft.AspNetCore.Http.Extensions;
@@ -236,6 +238,7 @@ public static class OAuthEndpoints
 
     private static async Task<IResult> HandleTokenAsync(HttpContext http,
         OAuthCodeStore codes, JwtIssuer jwt, UserService users,
+        UserRepository userRepo,
         IOptions<DmartSettings> settings, CancellationToken ct)
     {
         // application/x-www-form-urlencoded per RFC 6749.
@@ -243,9 +246,9 @@ public static class OAuthEndpoints
         var grantType = form["grant_type"].ToString();
 
         if (grantType == "authorization_code")
-            return await ExchangeCodeAsync(form, codes, jwt, users, settings.Value, ct);
+            return await ExchangeCodeAsync(form, codes, jwt, users, userRepo, settings.Value, ct);
         if (grantType == "refresh_token")
-            return await RefreshAsync(form, jwt, users, settings.Value, ct);
+            return await RefreshAsync(form, jwt, users, userRepo, settings.Value, ct);
 
         return OAuthError(400, "unsupported_grant_type",
             $"grant_type `{grantType}` not supported");
@@ -253,6 +256,7 @@ public static class OAuthEndpoints
 
     private static async Task<IResult> ExchangeCodeAsync(IFormCollection form,
         OAuthCodeStore codes, JwtIssuer jwt, UserService users,
+        UserRepository userRepo,
         DmartSettings settings, CancellationToken ct)
     {
         var code = form["code"].ToString();
@@ -276,11 +280,18 @@ public static class OAuthEndpoints
         var access = jwt.IssueAccess(user.Shortname, user.Roles, user.Type);
         var refresh = jwt.IssueRefresh(user.Shortname, user.Type);
 
+        // The new strict JwtBearerSetup.OnTokenValidated requires a matching
+        // sessions row for non-bot tokens. Mirror ProcessLoginAsync (Services/
+        // UserService.cs:541) so OAuth-issued access tokens authenticate.
+        if (user.Type != UserType.Bot)
+            await userRepo.CreateSessionAsync(user.Shortname, access, null, ct);
+
         return TokenResponse(access, refresh, settings, entry.Scope);
     }
 
     private static async Task<IResult> RefreshAsync(IFormCollection form,
-        JwtIssuer jwt, UserService users, DmartSettings settings, CancellationToken ct)
+        JwtIssuer jwt, UserService users, UserRepository userRepo,
+        DmartSettings settings, CancellationToken ct)
     {
         var refreshToken = form["refresh_token"].ToString();
         if (string.IsNullOrEmpty(refreshToken))
@@ -314,6 +325,9 @@ public static class OAuthEndpoints
 
         var access = jwt.IssueAccess(user.Shortname, user.Roles, user.Type);
         var newRefresh = jwt.IssueRefresh(user.Shortname, user.Type, originalIat);
+
+        if (user.Type != UserType.Bot)
+            await userRepo.CreateSessionAsync(user.Shortname, access, null, ct);
 
         return TokenResponse(access, newRefresh, settings, scope: "mcp");
     }

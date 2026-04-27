@@ -1,7 +1,16 @@
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
+using System.Text.Json;
+using Dmart.Auth;
 using Dmart.Config;
+using Dmart.DataAdapters.Sql;
+using Dmart.Models.Api;
+using Dmart.Models.Enums;
+using Dmart.Models.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace Dmart.Tests.Integration;
@@ -110,5 +119,114 @@ public sealed class DmartFactory : WebApplicationFactory<Program>
 
             cfg.AddInMemoryCollection(overrides);
         });
+    }
+
+    // Per-test user with a fresh JWT + matching `sessions` row. Use this from
+    // any integration test that needs an authenticated client. Each call mints
+    // a unique shortname so concurrent xUnit tests don't race on the same
+    // admin via MaxSessionsPerUser eviction.
+    public sealed record TestUser(
+        HttpClient Client, string Token, string Shortname, Func<Task> Cleanup);
+
+    public Task<TestUser> CreateLoggedInUserAsync(
+        UserType type = UserType.Web,
+        List<string>? roles = null) =>
+        CreateLoggedInUserAsync(host: this, type, roles);
+
+    // For tests that drive their own login flow (e.g. /oauth/authorize) and
+    // only need the user row to exist, not a pre-issued JWT.
+    public sealed record TestCreds(string Shortname, string Password, Func<Task> Cleanup);
+
+    public async Task<TestCreds> CreateTestUserAsync(
+        UserType type = UserType.Web,
+        List<string>? roles = null)
+    {
+        var users = Services.GetRequiredService<UserRepository>();
+        var hasher = Services.GetRequiredService<PasswordHasher>();
+        var shortname = $"itest_{Guid.NewGuid():N}"[..16];
+        const string password = "TestPassword1";
+
+        await users.UpsertAsync(new Dmart.Models.Core.User
+        {
+            Uuid = Guid.NewGuid().ToString(),
+            Shortname = shortname,
+            SpaceName = "management",
+            Subpath = "/users",
+            OwnerShortname = shortname,
+            IsActive = true,
+            Password = hasher.Hash(password),
+            Type = type,
+            Language = Language.En,
+            Roles = roles ?? new() { "super_admin" },
+            Groups = new(),
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        });
+
+        async Task Cleanup()
+        {
+            try { await users.DeleteAllSessionsAsync(shortname); } catch { }
+            try { await users.DeleteAsync(shortname); } catch { }
+        }
+
+        return new TestCreds(shortname, password, Cleanup);
+    }
+
+    // Override `host` when the test is exercising a factory built via
+    // _factory.WithWebHostBuilder(...) so the login round-trip + returned
+    // client target the override host (same DB, different in-memory server).
+    public async Task<TestUser> CreateLoggedInUserAsync(
+        WebApplicationFactory<Program> host,
+        UserType type = UserType.Web,
+        List<string>? roles = null)
+    {
+        var users = host.Services.GetRequiredService<UserRepository>();
+        var hasher = host.Services.GetRequiredService<PasswordHasher>();
+        var shortname = $"itest_{Guid.NewGuid():N}"[..16];
+        // Match _factory.AdminPassword so tests that hardcode it for
+        // /user/validate_password (and similar self-lookups) still pass.
+        var password = AdminPassword;
+
+        await users.UpsertAsync(new Dmart.Models.Core.User
+        {
+            Uuid = Guid.NewGuid().ToString(),
+            Shortname = shortname,
+            SpaceName = "management",
+            Subpath = "/users",
+            OwnerShortname = shortname,
+            IsActive = true,
+            Password = hasher.Hash(password),
+            // Set email so /user/profile responses include the "email" key
+            // (Profile_GET_Returns_All_Python_Parity_Fields asserts it).
+            Email = $"{shortname}@test.local",
+            IsEmailVerified = true,
+            Type = type,
+            Language = Language.En,
+            Roles = roles ?? new() { "super_admin" },
+            Groups = new(),
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        });
+
+        var loginClient = host.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = false });
+        var login = new UserLoginRequest(shortname, null, null, password, null);
+        var loginResp = await loginClient.PostAsJsonAsync(
+            "/user/login", login, DmartJsonContext.Default.UserLoginRequest);
+        var raw = await loginResp.Content.ReadAsStringAsync();
+        var body = JsonSerializer.Deserialize(raw, DmartJsonContext.Default.Response);
+        var token = body?.Records?.FirstOrDefault()?.Attributes?["access_token"]?.ToString()
+            ?? throw new InvalidOperationException(
+                $"Login failed for '{shortname}': {loginResp.StatusCode} {raw}");
+
+        var client = host.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = false });
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        async Task Cleanup()
+        {
+            try { await users.DeleteAllSessionsAsync(shortname); } catch { }
+            try { await users.DeleteAsync(shortname); } catch { }
+        }
+
+        return new TestUser(client, token, shortname, Cleanup);
     }
 }

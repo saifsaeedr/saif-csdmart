@@ -118,6 +118,10 @@ public sealed class McpOAuthAndSseTests : IClassFixture<DmartFactory>
     [FactIfPg]
     public async Task FullOauthCodeFlow_With_Pkce_Issues_Valid_JwtAccessToken()
     {
+        // Per-test user — see DmartFactory.CreateTestUserAsync. Avoids the
+        // MaxSessionsPerUser eviction race when many tests log in as admin.
+        var creds = await _factory.CreateTestUserAsync();
+
         using var client = _factory.CreateClient();
         // Disable auto-redirects so the /oauth/authorize POST's 302 is visible.
         using var noRedirect = _factory.CreateClient(
@@ -140,7 +144,7 @@ public sealed class McpOAuthAndSseTests : IClassFixture<DmartFactory>
         var challenge = S256Challenge(verifier);
         var state = "xunit-state-1234";
 
-        // 3. POST /oauth/authorize with valid admin credentials.
+        // 3. POST /oauth/authorize with the per-test user credentials.
         var form = new FormUrlEncodedContent(new Dictionary<string, string>
         {
             ["response_type"] = "code",
@@ -150,8 +154,8 @@ public sealed class McpOAuthAndSseTests : IClassFixture<DmartFactory>
             ["state"] = state,
             ["code_challenge"] = challenge,
             ["code_challenge_method"] = "S256",
-            ["shortname"] = _factory.AdminShortname,
-            ["password"] = _factory.AdminPassword,
+            ["shortname"] = creds.Shortname,
+            ["password"] = creds.Password,
         });
         var authResp = await noRedirect.PostAsync("/oauth/authorize", form);
         authResp.StatusCode.ShouldBe(HttpStatusCode.Redirect);
@@ -206,6 +210,7 @@ public sealed class McpOAuthAndSseTests : IClassFixture<DmartFactory>
         var verifier = CreatePkceVerifier();
         var challenge = S256Challenge(verifier);
 
+        var creds = await _factory.CreateTestUserAsync();
         var form = new FormUrlEncodedContent(new Dictionary<string, string>
         {
             ["response_type"] = "code",
@@ -214,8 +219,8 @@ public sealed class McpOAuthAndSseTests : IClassFixture<DmartFactory>
             ["state"] = "x",
             ["code_challenge"] = challenge,
             ["code_challenge_method"] = "S256",
-            ["shortname"] = _factory.AdminShortname,
-            ["password"] = _factory.AdminPassword,
+            ["shortname"] = creds.Shortname,
+            ["password"] = creds.Password,
         });
         var authResp = await noRedirect.PostAsync("/oauth/authorize", form);
         var location = authResp.Headers.Location!.ToString();
@@ -264,6 +269,7 @@ public sealed class McpOAuthAndSseTests : IClassFixture<DmartFactory>
                 Encoding.UTF8, "application/json"));
         var clientId = (await ReadJson(reg)).GetProperty("client_id").GetString()!;
 
+        var creds = await _factory.CreateTestUserAsync();
         var verifier = CreatePkceVerifier();
         var authResp = await noRedirect.PostAsync("/oauth/authorize",
             new FormUrlEncodedContent(new Dictionary<string, string>
@@ -274,8 +280,8 @@ public sealed class McpOAuthAndSseTests : IClassFixture<DmartFactory>
                 ["state"] = "refresh-state",
                 ["code_challenge"] = S256Challenge(verifier),
                 ["code_challenge_method"] = "S256",
-                ["shortname"] = _factory.AdminShortname,
-                ["password"] = _factory.AdminPassword,
+                ["shortname"] = creds.Shortname,
+                ["password"] = creds.Password,
             }));
         var code = System.Web.HttpUtility.ParseQueryString(
             new Uri(authResp.Headers.Location!.ToString()).Query)["code"]!;
@@ -408,18 +414,11 @@ public sealed class McpOAuthAndSseTests : IClassFixture<DmartFactory>
 
     // ---- helpers ----
 
+    // Per-test user — see DmartFactory.CreateLoggedInUserAsync.
     private async Task<HttpClient> LoginClient()
     {
-        var client = _factory.CreateClient();
-        var login = new UserLoginRequest(_factory.AdminShortname, null, null,
-            _factory.AdminPassword, null);
-        var resp = await client.PostAsJsonAsync("/user/login", login,
-            DmartJsonContext.Default.UserLoginRequest);
-        resp.EnsureSuccessStatusCode();
-        var body = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
-        var token = body!.Records!.First().Attributes!["access_token"].ToString();
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
-        return client;
+        var u = await _factory.CreateLoggedInUserAsync();
+        return u.Client;
     }
 
     private static async Task<JsonElement> ReadJson(HttpResponseMessage resp)
