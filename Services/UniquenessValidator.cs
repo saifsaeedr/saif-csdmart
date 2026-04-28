@@ -34,8 +34,14 @@ namespace Dmart.Services;
 //                                     element. Writes search tokens with the
 //                                     `[].sku:` literal so QueryHelper's
 //                                     EXISTS-style JSONB predicate matches.
-// QueryHelper already understands the `field[].sub:value` SQL translation
-// (DataAdapters/Sql/QueryHelper.cs:458+).
+// QueryHelper handles the `field[].sub:value` SQL translation
+// (DataAdapters/Sql/QueryHelper.cs::BuildPayloadArraySql) for ONE bracket
+// segment per path. Paths with multiple bracket segments (e.g.
+// `outer[].inner[].leaf`) extract values correctly on the validator side
+// but the SQL probe degenerates — the second `[]` is treated as part of a
+// literal key name and finds nothing. Pinned by the
+// NestedArrays_Search_Is_Single_Bracket_Only integration test; lift that
+// test once QueryHelper grows nested-EXISTS support.
 //
 // Implementation note: we hit EntryRepository.QueryAsync directly (not
 // QueryService.ExecuteAsync). Uniqueness is a global constraint — if it
