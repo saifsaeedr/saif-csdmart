@@ -208,4 +208,115 @@ public class UniqueFieldsTests : IClassFixture<DmartFactory>
             await spaces.DeleteAsync(space);
         }
     }
+
+    // Regression: a multi-path compound `["email", "phone"]` must keep
+    // probing for collisions even when ONE of the paths is unchanged on
+    // update. Earlier C# port skipped the WHOLE compound on first
+    // unchanged path and silently allowed duplicates that share an
+    // unchanged field with an existing row whose changed field matches.
+    [FactIfPg]
+    public async Task MultiPath_Update_With_One_Field_Unchanged_Still_Collides()
+    {
+        var (spaces, entries, entryService) = Resolve();
+        var space = await SeedSpaceWithFolderAsync(spaces, entries,
+            """[["payload.body.email", "payload.body.phone"]]""");
+        try
+        {
+            // Two existing entries that don't collide today.
+            (await entryService.CreateAsync(
+                MakeContent(space, "/people", "alice",
+                    new { email = "shared@x.com", phone = "111" }), "dmart"))
+                .IsOk.ShouldBeTrue();
+            (await entryService.CreateAsync(
+                MakeContent(space, "/people", "bob",
+                    new { email = "shared@x.com", phone = "222" }), "dmart"))
+                .IsOk.ShouldBeTrue();
+
+            // Update bob to keep his email but change his phone to alice's.
+            // Email is UNCHANGED, phone is CHANGING — the new compound
+            // ("shared@x.com", "111") collides with alice. Must reject.
+            var patch = new System.Collections.Generic.Dictionary<string, object>
+            {
+                ["payload"] = new System.Collections.Generic.Dictionary<string, object>
+                {
+                    ["body"] = JsonDocument.Parse("""{"email":"shared@x.com","phone":"111"}""")
+                                          .RootElement.Clone(),
+                },
+            };
+            var collide = await entryService.UpdateAsync(
+                new Locator(ResourceType.Content, space, "/people", "bob"), patch, "dmart");
+            collide.IsOk.ShouldBeFalse("compound collision must be detected even when one field is unchanged");
+            collide.ErrorCode.ShouldBe(InternalErrorCode.DATA_SHOULD_BE_UNIQUE);
+        }
+        finally
+        {
+            await spaces.DeleteAsync(space);
+        }
+    }
+
+    // Compound semantics: a single-path match (sharing email but not phone)
+    // must NOT count as a collision — the whole compound has to match.
+    [FactIfPg]
+    public async Task MultiPath_Single_Path_Match_Is_Not_A_Collision()
+    {
+        var (spaces, entries, entryService) = Resolve();
+        var space = await SeedSpaceWithFolderAsync(spaces, entries,
+            """[["payload.body.email", "payload.body.phone"]]""");
+        try
+        {
+            (await entryService.CreateAsync(
+                MakeContent(space, "/people", "alice",
+                    new { email = "shared@x.com", phone = "111" }), "dmart"))
+                .IsOk.ShouldBeTrue();
+
+            // Same email, different phone — compound differs, so no collision.
+            var partialOverlap = await entryService.CreateAsync(
+                MakeContent(space, "/people", "bob",
+                    new { email = "shared@x.com", phone = "222" }), "dmart");
+            partialOverlap.IsOk.ShouldBeTrue(
+                $"single-path overlap on multi-path compound must not collide: {partialOverlap.ErrorMessage}");
+
+            // Same phone, different email — same story.
+            var phoneOverlap = await entryService.CreateAsync(
+                MakeContent(space, "/people", "carol",
+                    new { email = "different@x.com", phone = "111" }), "dmart");
+            phoneOverlap.IsOk.ShouldBeTrue(
+                $"single-path phone overlap must not collide: {phoneOverlap.ErrorMessage}");
+        }
+        finally
+        {
+            await spaces.DeleteAsync(space);
+        }
+    }
+
+    // A path that doesn't exist on the entry contributes no token. The
+    // compound is still probed using the remaining paths (Python parity).
+    [FactIfPg]
+    public async Task MultiPath_With_Missing_Field_Probes_Remaining_Paths()
+    {
+        var (spaces, entries, entryService) = Resolve();
+        var space = await SeedSpaceWithFolderAsync(spaces, entries,
+            """[["payload.body.email", "payload.body.never_set"]]""");
+        try
+        {
+            (await entryService.CreateAsync(
+                MakeContent(space, "/people", "alice", new { email = "a@x.com" }), "dmart"))
+                .IsOk.ShouldBeTrue();
+
+            // never_set is missing on both rows; email collides → reject.
+            var dup = await entryService.CreateAsync(
+                MakeContent(space, "/people", "bob", new { email = "a@x.com" }), "dmart");
+            dup.IsOk.ShouldBeFalse("missing optional path must not mask a collision on the present path");
+            dup.ErrorCode.ShouldBe(InternalErrorCode.DATA_SHOULD_BE_UNIQUE);
+
+            // Distinct email → no collision regardless of missing path.
+            var ok = await entryService.CreateAsync(
+                MakeContent(space, "/people", "carol", new { email = "c@x.com" }), "dmart");
+            ok.IsOk.ShouldBeTrue($"distinct email must pass: {ok.ErrorMessage}");
+        }
+        finally
+        {
+            await spaces.DeleteAsync(space);
+        }
+    }
 }

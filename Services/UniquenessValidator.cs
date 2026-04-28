@@ -71,35 +71,40 @@ public sealed class UniquenessValidator(
             if (compound.ValueKind != JsonValueKind.Array) continue;
 
             // Build the per-element queries that satisfy the whole compound.
-            // Each path in the compound contributes one or more search tokens;
+            // Each path in the compound contributes zero-or-more search tokens;
             // a list-valued path expands into N tokens (one per element) so we
             // detect a conflict if ANY element collides — matching the user's
             // intent for `payload.body.ids`.
+            //
+            // Per-path skip rules (Python parity, adapter.py:3144-3196): a
+            // single bad/missing/unchanged path skips just that path, NOT the
+            // whole compound. The remaining paths still contribute. A compound
+            // where every path skipped is dropped via the
+            // `perPathTokens.Count == 0` check below.
             var perPathTokens = new List<List<string>>();
-            var skipCompound = false;
             foreach (var pathEl in compound.EnumerateArray())
             {
-                if (pathEl.ValueKind != JsonValueKind.String) { skipCompound = true; break; }
+                if (pathEl.ValueKind != JsonValueKind.String) continue;
                 var path = pathEl.GetString();
-                if (string.IsNullOrEmpty(path)) { skipCompound = true; break; }
+                if (string.IsNullOrEmpty(path)) continue;
 
-                if (!TryReadValue(entry, path, out var newValues)) { skipCompound = true; break; }
-                if (newValues.Count == 0) { skipCompound = true; break; }
+                if (!TryReadValue(entry, path, out var newValues)) continue;
+                if (newValues.Count == 0) continue;
 
-                // Update parity with Python: if every value at this path is
-                // identical to the existing entry's, this compound can't
-                // collide with anything new — Python continues past the path.
+                // Path's value is unchanged on update: an entry whose new
+                // compound matches us on this path would have already been
+                // caught at create time, so dropping the token narrows the
+                // probe without losing collisions on the OTHER paths.
                 if (action == ActionType.Update && existing is not null
                     && TryReadValue(existing, path, out var oldValues)
                     && SequenceEquals(newValues, oldValues))
                 {
-                    skipCompound = true;
-                    break;
+                    continue;
                 }
 
                 perPathTokens.Add(BuildSearchTokens(path, newValues));
             }
-            if (skipCompound || perPathTokens.Count == 0) continue;
+            if (perPathTokens.Count == 0) continue;
 
             // For each combination of one token per path (Cartesian over the
             // expanded list values), run the search; ANY hit is a violation.
@@ -113,8 +118,10 @@ public sealed class UniquenessValidator(
                     Subpath = entry.Subpath,
                     ExactSubpath = true,
                     Search = search,
+                    // Limit=2 is enough — any single hit (after self-filter)
+                    // is a violation; we don't read totals so RetrieveTotal
+                    // would just buy a wasted COUNT(*) round-trip.
                     Limit = 2,
-                    RetrieveTotal = true,
                     // Default FilterSchemaNames is ["meta"] which would
                     // exclude every content entry that has no schema_shortname
                     // — exactly the rows we want to scan for collisions.
