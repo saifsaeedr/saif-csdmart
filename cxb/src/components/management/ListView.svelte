@@ -27,9 +27,10 @@
     import EmptyState from "@/components/ui/EmptyState.svelte";
     import ListViewActionBar from "@/components/management/ListViewActionBar.svelte";
     import {currentListView} from "@/stores/global";
-    import {untrack} from "svelte";
+    import {untrack, onDestroy} from "svelte";
     import {getRowsPerPageSetting, getValueByPath} from "@/utils/listViewUtils";
     import {website} from "@/config";
+    import {authToken} from "@/stores/auth";
 
     $goto;
 
@@ -48,6 +49,8 @@
         canDelete = $bindable(false),
         exact_subpath = $bindable(true),
         scope = $bindable(DmartScope.managed),
+        stream = $bindable(false),
+        onStreamUpdate = $bindable(undefined),
     }: {
         space_name?: string;
         subpath?: string;
@@ -61,6 +64,8 @@
         canDelete?: boolean;
         exact_subpath?: boolean;
         scope?: DmartScope;
+        stream?: boolean;
+        onStreamUpdate?: ((message: any) => void) | undefined;
     } = $props();
 
     $currentListView = {fetchPageRecords};
@@ -175,6 +180,69 @@
     });
 
     let isFetching = $state(false);
+
+    let streamSocket: WebSocket | null = null;
+
+    function closeStream() {
+        if (streamSocket) {
+            try { streamSocket.close(); } catch { /* already closed */ }
+            streamSocket = null;
+        }
+    }
+
+    function buildStreamUrl(token: string): string | null {
+        const backendBase = (website.backend?.trim()
+            || (typeof window !== "undefined" ? window.location.origin : "")
+        ).replace(/\/+$/, "");
+        if (!backendBase) return null;
+        const parsed = new URL(backendBase);
+        const wsProtocol = parsed.protocol === "https:" ? "wss:" : "ws:";
+        const path = parsed.pathname.replace(/\/+$/, "");
+        const wsPath = path.endsWith("/ws") ? path : `${path}/ws`;
+        return `${wsProtocol}//${parsed.host}${wsPath}?token=${encodeURIComponent(token)}`;
+    }
+
+    $effect(() => {
+        const enabled = stream === true && !!space_name && subpath !== undefined && subpath !== null;
+        const token = $authToken;
+        if (!enabled || !token) {
+            closeStream();
+            return;
+        }
+
+        const slashSubpath = (subpath ?? "").replaceAll("-", "/");
+        const normalizedSubpath = slashSubpath.startsWith("/") ? slashSubpath : `/${slashSubpath}`;
+        const url = buildStreamUrl(token);
+        if (!url) return;
+
+        closeStream();
+        const socket = new WebSocket(url);
+        streamSocket = socket;
+
+        socket.onopen = () => {
+            if (socket.readyState !== WebSocket.OPEN) return;
+            socket.send(JSON.stringify({
+                type: "notification_subscription",
+                space_name,
+                subpath: normalizedSubpath,
+            }));
+        };
+        socket.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                if (data?.type === "notification_subscription" && data?.message?.action_type) {
+                    onStreamUpdate?.(data.message);
+                }
+            } catch { /* ignore malformed frames */ }
+        };
+
+        return () => {
+            if (streamSocket === socket) streamSocket = null;
+            try { socket.close(); } catch { /* already closed */ }
+        };
+    });
+
+    onDestroy(closeStream);
 
     async function fetchPageRecords(isSetPage = true, requestExtra = {}) {
         const delayTotalCount = website.delay_total_count === true;

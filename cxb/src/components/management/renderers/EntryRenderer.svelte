@@ -469,6 +469,7 @@
     });
 
     let isRefreshLoading = $state(false);
+    let hasStreamChanges = $state(false);
     async function handleRefresh(e) {
         if (e) {
             e.preventDefault();
@@ -477,12 +478,14 @@
         if (isJEDirty) {
             pendingRefreshAction = async () => {
                 await refreshEntry();
+                hasStreamChanges = false;
             };
             showUnsavedChangesModal = true;
             return;
         }
 
         await refreshEntry();
+        hasStreamChanges = false;
     }
 
     $effect(() => {
@@ -778,18 +781,25 @@
             {/if}
             <li role="presentation">
                 <button
-                        class="inline-flex items-center p-4 border-b-2 rounded-t-lg border-transparent hover:text-primary hover:border-primary"
+                        class={hasStreamChanges
+                        ? "inline-flex items-center p-4 border-b-2 rounded-t-lg bg-orange-500 border-orange-500 text-white hover:bg-orange-600 hover:border-orange-600"
+                        : "inline-flex items-center p-4 border-b-2 rounded-t-lg border-transparent hover:text-primary hover:border-primary"}
                         type="button"
                         onclick={handleRefresh}
                         disabled={isRefreshLoading}
                         style={isRefreshLoading
                         ? "cursor: not-allowed"
                         : "cursor: pointer"}
-                        title="Save changes"
+                        title={hasStreamChanges ? "Changes available — click to refresh" : "Refresh"}
                 >
                     <div class="flex items-center gap-2">
-                        <RefreshOutline size="md" class="text-primary" />
-                        <p class="text-primary">Refresh</p>
+                        <RefreshOutline
+                                size="md"
+                                class={hasStreamChanges ? "text-white" : "text-primary"}
+                        />
+                        <p class={hasStreamChanges ? "text-white" : "text-primary"}>
+                            Refresh
+                        </p>
                     </div>
                 </button>
             </li>
@@ -807,6 +817,8 @@
                         sort_by={entry?.payload?.body?.sort_by ?? null}
                         sort_order={entry?.payload?.body?.sort_type ?? null}
                         query={entry?.payload?.body?.query ?? null}
+                        stream={entry?.payload?.body?.stream === true}
+                        onStreamUpdate={() => (hasStreamChanges = true)}
                         {canDelete}
                         exact_subpath={getExactSubpathValue(space_name, subpath)}
                 />
