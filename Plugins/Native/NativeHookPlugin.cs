@@ -13,7 +13,21 @@ internal sealed class NativeHookPlugin(NativePluginHandle handle, string shortna
     public Task HookAsync(Event e, CancellationToken ct = default)
     {
         var json = JsonSerializer.Serialize(e, DmartJsonContext.Default.Event);
-        var result = handle.CallHook(json);
+
+        // Expose the calling actor to host callbacks (e.g. QueryCb) so plugin
+        // queries default to the user's permissions. Restore the previous
+        // value rather than nulling it to keep nested invocations safe.
+        var previousActor = PluginInvocationContext.CurrentActor;
+        PluginInvocationContext.CurrentActor = e.UserShortname;
+        string? result;
+        try
+        {
+            result = handle.CallHook(json);
+        }
+        finally
+        {
+            PluginInvocationContext.CurrentActor = previousActor;
+        }
 
         if (!string.IsNullOrEmpty(result))
         {

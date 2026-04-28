@@ -49,8 +49,11 @@ public static unsafe class NativePluginCallbacks
         public delegate* unmanaged[Cdecl]<byte*, byte*, int> WsBroadcast;
         public delegate* unmanaged[Cdecl]<byte*, void> DmartFree;
         // Generic Query callback. Plugin sends a serialized Query JSON;
-        // host runs it through the same QueryService the HTTP API uses (no
-        // ACL — plugins are trusted) and returns a Response JSON. APPENDED.
+        // host runs it through the same QueryService the HTTP API uses.
+        // By default the query is executed as the user that triggered the
+        // hook (so user permissions are honored). The plugin can override
+        // by adding "as_actor" to the JSON: a string impersonates that
+        // user, JSON null bypasses ACLs (system). APPENDED.
         public delegate* unmanaged[Cdecl]<byte*, byte*> Query;
         // Media bytes for an attachment, by (space, subpath, shortname).
         // Returns the raw bytes via outBufLen (caller frees with DmartFree).
@@ -241,9 +244,13 @@ public static unsafe class NativePluginCallbacks
         if (ptr != null) Marshal.FreeHGlobal((IntPtr)ptr);
     }
 
-    // Plugin → host query: same path as POST /managed/query but without
-    // ACL filtering (plugins are trusted; the host vouches for them when
-    // it loads the .so).
+    // Plugin → host query: same QueryService the HTTP API uses. By default
+    // the query runs as the user that triggered the hook (so user
+    // permissions are honored). A plugin can override the actor by adding
+    // an "as_actor" field to the query JSON:
+    //   - field absent       → caller's actor (PluginInvocationContext)
+    //   - field = "username"  → impersonate that user
+    //   - field = null       → no actor (system / no ACL)
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     private static byte* QueryCb(byte* queryJson)
     {
@@ -253,6 +260,33 @@ public static unsafe class NativePluginCallbacks
             if (string.IsNullOrEmpty(json) || Services is null)
                 return AllocUtf8(BuildQueryFailJson(InternalErrorCode.SOMETHING_WRONG,
                     "empty query or services not initialized", ErrorTypes.Internal));
+
+            // Resolve the effective actor: explicit override from the JSON if
+            // the plugin set one, otherwise the caller carried via the
+            // ambient PluginInvocationContext. The Query model ignores this
+            // field on deserialize.
+            string? actor;
+            try
+            {
+                using var doc = JsonDocument.Parse(json);
+                if (doc.RootElement.ValueKind == JsonValueKind.Object
+                    && doc.RootElement.TryGetProperty("as_actor", out var asActor))
+                {
+                    actor = asActor.ValueKind == JsonValueKind.Null
+                        ? null
+                        : asActor.GetString();
+                }
+                else
+                {
+                    actor = PluginInvocationContext.CurrentActor;
+                }
+            }
+            catch (JsonException jex)
+            {
+                return AllocUtf8(BuildQueryFailJson(InternalErrorCode.INVALID_DATA,
+                    $"invalid query json: {jex.Message}", ErrorTypes.Request));
+            }
+
             Query? query;
             try { query = JsonSerializer.Deserialize(json, DmartJsonContext.Default.Query); }
             catch (JsonException jex)
@@ -265,7 +299,7 @@ public static unsafe class NativePluginCallbacks
                     "invalid query json", ErrorTypes.Request));
             using var scope = Services.CreateScope();
             var qsvc = scope.ServiceProvider.GetRequiredService<QueryService>();
-            var resp = qsvc.ExecuteAsync(query, actor: null).GetAwaiter().GetResult();
+            var resp = qsvc.ExecuteAsync(query, actor).GetAwaiter().GetResult();
             return AllocUtf8(JsonSerializer.Serialize(resp, DmartJsonContext.Default.Response));
         }
         catch (Exception ex)
