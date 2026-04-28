@@ -341,6 +341,121 @@ public class UniqueFieldsTests : IClassFixture<DmartFactory>
         }
     }
 
+    // Nested array iteration: the doc comment on WalkPath promises that
+    // `outer[].inner[].leaf` recurses through two array levels. Pin that
+    // contract — without this, a regression in the recursion would only
+    // surface in production.
+    [FactIfPg]
+    public async Task NestedArrays_Iterate_Through_Two_Levels()
+    {
+        var (spaces, entries, entryService) = Resolve();
+        var space = await SeedSpaceWithFolderAsync(spaces, entries,
+            """[["payload.body.outer[].inner[].leaf"]]""");
+        try
+        {
+            // First entry: leaves "alpha" and "beta" buried under outer/inner.
+            var first = await entryService.CreateAsync(
+                MakeContent(space, "/people", "p1", new
+                {
+                    outer = new object[]
+                    {
+                        new { inner = new object[] { new { leaf = "alpha" }, new { leaf = "beta" } } },
+                    },
+                }), "dmart");
+            first.IsOk.ShouldBeTrue($"first create failed: {first.ErrorMessage}");
+
+            // Second entry: differently-shaped outer array, but reuses "alpha"
+            // deep inside one of its branches → must be flagged as a collision.
+            var collide = await entryService.CreateAsync(
+                MakeContent(space, "/people", "p2", new
+                {
+                    outer = new object[]
+                    {
+                        new { inner = new object[] { new { leaf = "gamma" } } },
+                        new { inner = new object[] { new { leaf = "alpha" } } },
+                    },
+                }), "dmart");
+            collide.IsOk.ShouldBeFalse("nested-array overlap on .leaf must be detected");
+            collide.ErrorCode.ShouldBe(InternalErrorCode.DATA_SHOULD_BE_UNIQUE);
+
+            // Disjoint leaves — must succeed.
+            var ok = await entryService.CreateAsync(
+                MakeContent(space, "/people", "p3", new
+                {
+                    outer = new object[]
+                    {
+                        new { inner = new object[] { new { leaf = "delta" } } },
+                    },
+                }), "dmart");
+            ok.IsOk.ShouldBeTrue($"disjoint nested leaves must pass: {ok.ErrorMessage}");
+        }
+        finally
+        {
+            await spaces.DeleteAsync(space);
+        }
+    }
+
+    // Update on an array-of-object compound. Confirms that the per-path
+    // self-filter and the parity skip-rules behave correctly when the diff
+    // lives inside an array element rather than a flat scalar field.
+    [FactIfPg]
+    public async Task ObjectArray_Update_Allows_Self_And_Rejects_Other_Collision()
+    {
+        var (spaces, entries, entryService) = Resolve();
+        var space = await SeedSpaceWithFolderAsync(spaces, entries,
+            """[["payload.body.variants[].sku"]]""");
+        try
+        {
+            (await entryService.CreateAsync(
+                MakeContent(space, "/people", "p1", new
+                {
+                    variants = new object[] { new { sku = "A" }, new { sku = "B" } },
+                }), "dmart"))
+                .IsOk.ShouldBeTrue();
+            (await entryService.CreateAsync(
+                MakeContent(space, "/people", "p2", new
+                {
+                    variants = new object[] { new { sku = "X" }, new { sku = "Y" } },
+                }), "dmart"))
+                .IsOk.ShouldBeTrue();
+
+            // Update p2 to keep its own variants — must NOT flag self-collision.
+            var selfPatch = new System.Collections.Generic.Dictionary<string, object>
+            {
+                ["payload"] = new System.Collections.Generic.Dictionary<string, object>
+                {
+                    ["body"] = JsonDocument.Parse(JsonSerializer.Serialize(new
+                    {
+                        variants = new object[] { new { sku = "X" }, new { sku = "Y" } },
+                    })).RootElement.Clone(),
+                },
+            };
+            var sameVariants = await entryService.UpdateAsync(
+                new Locator(ResourceType.Content, space, "/people", "p2"), selfPatch, "dmart");
+            sameVariants.IsOk.ShouldBeTrue($"self-variants update should pass: {sameVariants.ErrorMessage}");
+
+            // Update p2 to take one of p1's skus → must collide.
+            var stealSku = new System.Collections.Generic.Dictionary<string, object>
+            {
+                ["payload"] = new System.Collections.Generic.Dictionary<string, object>
+                {
+                    ["body"] = JsonDocument.Parse(JsonSerializer.Serialize(new
+                    {
+                        variants = new object[] { new { sku = "B" }, new { sku = "Z" } },
+                    })).RootElement.Clone(),
+                },
+            };
+            var collide = await entryService.UpdateAsync(
+                new Locator(ResourceType.Content, space, "/people", "p2"), stealSku, "dmart");
+            collide.IsOk.ShouldBeFalse("variant overlap on update must be rejected");
+            collide.ErrorCode.ShouldBe(InternalErrorCode.DATA_SHOULD_BE_UNIQUE);
+        }
+        finally
+        {
+            await spaces.DeleteAsync(space);
+        }
+    }
+
     // A path that doesn't exist on the entry contributes no token. The
     // compound is still probed using the remaining paths (Python parity).
     [FactIfPg]

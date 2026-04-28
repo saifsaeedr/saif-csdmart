@@ -185,7 +185,7 @@ public sealed class UniquenessValidator(
     //   - JSON array of scalars        → one element per array item
     // Other shapes (objects, nested arrays) return empty so we don't
     // generate undefined search syntax.
-    private static bool TryReadValue(Entry entry, string path, out List<string> values)
+    private bool TryReadValue(Entry entry, string path, out List<string> values)
     {
         values = new List<string>();
 
@@ -193,7 +193,7 @@ public sealed class UniquenessValidator(
         {
             if (entry.Payload?.Body is not JsonElement bodyEl || bodyEl.ValueKind != JsonValueKind.Object)
                 return true; // path applies but no body — empty list
-            WalkPath(bodyEl, path["payload.body.".Length..], values);
+            WalkPath(bodyEl, path["payload.body.".Length..], values, originalPath: path);
             return true;
         }
 
@@ -212,11 +212,15 @@ public sealed class UniquenessValidator(
     //   "ids[]"                   → node["ids"], iterate, emit each element
     //   "variants[].sku"          → node["variants"], iterate, emit .sku of each
     //   "outer[].inner[].leaf"    → nested iteration
-    private static void WalkPath(JsonElement node, string path, List<string> values)
+    //
+    // `originalPath` is threaded through purely for diagnostics — when
+    // a path resolves to an object array but no `[].<sub>` was specified,
+    // we LogDebug to surface the silent-no-op.
+    private void WalkPath(JsonElement node, string path, List<string> values, string originalPath)
     {
         if (path.Length == 0)
         {
-            EmitScalarOrPrimitiveArray(node, values);
+            EmitScalarOrPrimitiveArray(node, values, originalPath);
             return;
         }
 
@@ -243,7 +247,7 @@ public sealed class UniquenessValidator(
             if (arr.ValueKind != JsonValueKind.Array) return;
 
             foreach (var item in arr.EnumerateArray())
-                WalkPath(item, rest, values);
+                WalkPath(item, rest, values, originalPath);
             return;
         }
 
@@ -252,10 +256,10 @@ public sealed class UniquenessValidator(
         else { segNorm = path[..dotIdx]; remNorm = path[(dotIdx + 1)..]; }
 
         if (node.ValueKind != JsonValueKind.Object || !node.TryGetProperty(segNorm, out var next)) return;
-        WalkPath(next, remNorm, values);
+        WalkPath(next, remNorm, values, originalPath);
     }
 
-    private static void EmitScalarOrPrimitiveArray(JsonElement el, List<string> values)
+    private void EmitScalarOrPrimitiveArray(JsonElement el, List<string> values, string originalPath)
     {
         switch (el.ValueKind)
         {
@@ -272,21 +276,38 @@ public sealed class UniquenessValidator(
             case JsonValueKind.True:  values.Add("true"); return;
             case JsonValueKind.False: values.Add("false"); return;
             case JsonValueKind.Array:
+                // Track per-array contributions so we can warn when the
+                // ENTIRE array was object/array-shaped (i.e. user pointed at
+                // an object array without specifying `[].<sub>`). A mixed
+                // array that produces some scalars stays silent — those
+                // scalars are useful uniqueness probes.
+                var addedHere = 0;
+                var skippedComposite = 0;
                 foreach (var item in el.EnumerateArray())
                 {
                     switch (item.ValueKind)
                     {
                         case JsonValueKind.String:
                             var ss = item.GetString();
-                            if (!string.IsNullOrEmpty(ss)) values.Add(ss);
+                            if (!string.IsNullOrEmpty(ss)) { values.Add(ss); addedHere++; }
                             break;
-                        case JsonValueKind.Number: values.Add(item.GetRawText()); break;
-                        case JsonValueKind.True:   values.Add("true"); break;
-                        case JsonValueKind.False:  values.Add("false"); break;
-                        // Nested objects/arrays — skip; uniqueness on those
-                        // shapes is undefined here. Use `[].sub` paths to
-                        // pick out fields from object arrays.
+                        case JsonValueKind.Number: values.Add(item.GetRawText()); addedHere++; break;
+                        case JsonValueKind.True:   values.Add("true"); addedHere++; break;
+                        case JsonValueKind.False:  values.Add("false"); addedHere++; break;
+                        case JsonValueKind.Object:
+                        case JsonValueKind.Array:
+                            // Nested objects/arrays — skip; uniqueness on those
+                            // shapes is undefined here. Use `[].sub` paths to
+                            // pick out fields from object arrays.
+                            skippedComposite++;
+                            break;
                     }
+                }
+                if (addedHere == 0 && skippedComposite > 0)
+                {
+                    log.LogDebug(
+                        "uniqueness: path {Path} resolved to an array of {Count} object/array element(s) but no `[].<sub>` syntax was specified — no tokens emitted, this compound key is effectively a no-op for object arrays",
+                        originalPath, skippedComposite);
                 }
                 return;
         }
