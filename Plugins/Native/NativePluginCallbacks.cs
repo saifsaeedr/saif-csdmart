@@ -47,6 +47,14 @@ public static unsafe class NativePluginCallbacks
         public delegate* unmanaged[Cdecl]<byte*, byte*, byte*, int> SendEmail;
         public delegate* unmanaged[Cdecl]<byte*, byte*, int> WsBroadcast;
         public delegate* unmanaged[Cdecl]<byte*, void> DmartFree;
+        // Generic Query callback. Plugin sends a serialized Query JSON;
+        // host runs it through the same QueryService the HTTP API uses (no
+        // ACL — plugins are trusted) and returns a Response JSON. APPENDED.
+        public delegate* unmanaged[Cdecl]<byte*, byte*> Query;
+        // Media bytes for an attachment, by (space, subpath, shortname).
+        // Returns the raw bytes via outBufLen (caller frees with DmartFree).
+        // null when the attachment has no media or doesn't exist. APPENDED.
+        public delegate* unmanaged[Cdecl]<byte*, byte*, byte*, int*, byte*> GetMediaAttachment;
     }
 
     // Allocated once, stays alive for the process lifetime. Plugins keep
@@ -75,6 +83,8 @@ public static unsafe class NativePluginCallbacks
             SendEmail = &SendEmailCb,
             WsBroadcast = &WsBroadcastCb,
             DmartFree = &DmartFreeCb,
+            Query = &QueryCb,
+            GetMediaAttachment = &GetMediaAttachmentCb,
         };
         // Copy into unmanaged memory so the pointer doesn't move under the
         // GC. The struct is small and ABI-stable; the pointer lives until
@@ -228,6 +238,64 @@ public static unsafe class NativePluginCallbacks
     private static void DmartFreeCb(byte* ptr)
     {
         if (ptr != null) Marshal.FreeHGlobal((IntPtr)ptr);
+    }
+
+    // Plugin → host query: same path as POST /managed/query but without
+    // ACL filtering (plugins are trusted; the host vouches for them when
+    // it loads the .so).
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static byte* QueryCb(byte* queryJson)
+    {
+        try
+        {
+            var json = PtrToString(queryJson);
+            if (string.IsNullOrEmpty(json) || Services is null)
+                return AllocUtf8("""{"status":"failed","error":{"type":"plugin","code":1,"message":"empty query or services not initialized"}}""");
+            var query = JsonSerializer.Deserialize(json, DmartJsonContext.Default.Query);
+            if (query is null)
+                return AllocUtf8("""{"status":"failed","error":{"type":"plugin","code":2,"message":"invalid query json"}}""");
+            using var scope = Services.CreateScope();
+            var qsvc = scope.ServiceProvider.GetRequiredService<QueryService>();
+            var resp = qsvc.ExecuteAsync(query, actor: null).GetAwaiter().GetResult();
+            return AllocUtf8(JsonSerializer.Serialize(resp, DmartJsonContext.Default.Response));
+        }
+        catch (Exception ex)
+        {
+            return AllocUtf8("{\"status\":\"failed\",\"error\":{\"type\":\"plugin\",\"code\":3,\"message\":" + JsonEncode(ex.Message) + "}}");
+        }
+    }
+
+    // Plugin → host: fetch the raw `media` BYTEA for an attachment by
+    // (space, subpath, shortname). Returns the bytes via outBufLen and a
+    // pointer that the plugin must release with DmartFree. Returns null
+    // when the attachment is missing or has no media.
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static byte* GetMediaAttachmentCb(byte* space, byte* subpath, byte* shortname, int* outBufLen)
+    {
+        try
+        {
+            if (outBufLen != null) *outBufLen = 0;
+            var sp = PtrToString(space) ?? "";
+            var sub = PtrToString(subpath) ?? "";
+            var sn = PtrToString(shortname) ?? "";
+            if (Services is null) return null;
+            using var scope = Services.CreateScope();
+            var atts = scope.ServiceProvider.GetRequiredService<AttachmentRepository>();
+            var att = atts.GetAsync(sp, sub, sn).GetAwaiter().GetResult();
+            if (att is null || !Guid.TryParse(att.Uuid, out var uuid)) return null;
+            var (bytes, _) = atts.GetMediaAsync(uuid).GetAwaiter().GetResult();
+            if (bytes is null || bytes.Length == 0) return null;
+            var ptr = (byte*)Marshal.AllocHGlobal(bytes.Length);
+            Marshal.Copy(bytes, 0, (IntPtr)ptr, bytes.Length);
+            if (outBufLen != null) *outBufLen = bytes.Length;
+            return ptr;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[plugin_cb] get_media_attachment failed: {ex.Message}");
+            if (outBufLen != null) *outBufLen = 0;
+            return null;
+        }
     }
 
     // ========================================================================

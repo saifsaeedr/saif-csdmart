@@ -75,8 +75,45 @@ internal sealed class NativeApiPlugin : IApiPlugin
         var requestJson = JsonSerializer.Serialize(envelope, DmartJsonContext.Default.NativeApiRequest);
         var resultJson = handle.CallHandleRequest(requestJson);
 
+        // Binary-response opt-in: a plugin that needs to return non-JSON
+        // (e.g. a generated PDF) wraps its bytes in
+        //   {"binary":true,"content_type":"...","body_b64":"...",
+        //    "filename":"optional.ext"}
+        // We unwrap and stream the bytes with the requested content-type.
+        // Anything else flows as JSON exactly like before.
+        if (TryDecodeBinary(resultJson, out var contentType, out var bodyBytes, out var filename))
+        {
+            ctx.Response.ContentType = contentType;
+            if (!string.IsNullOrEmpty(filename))
+                ctx.Response.Headers["Content-Disposition"] = $"attachment; filename=\"{filename}\"";
+            await ctx.Response.Body.WriteAsync(bodyBytes);
+            return;
+        }
+
         ctx.Response.ContentType = "application/json";
         await ctx.Response.WriteAsync(resultJson);
+    }
+
+    private static bool TryDecodeBinary(string json, out string contentType, out byte[] body, out string? filename)
+    {
+        contentType = "application/octet-stream";
+        body = Array.Empty<byte>();
+        filename = null;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return false;
+            if (!root.TryGetProperty("binary", out var b) || b.ValueKind != JsonValueKind.True) return false;
+            if (root.TryGetProperty("content_type", out var ct) && ct.ValueKind == JsonValueKind.String)
+                contentType = ct.GetString() ?? contentType;
+            if (root.TryGetProperty("filename", out var fn) && fn.ValueKind == JsonValueKind.String)
+                filename = fn.GetString();
+            if (root.TryGetProperty("body_b64", out var bb) && bb.ValueKind == JsonValueKind.String)
+                body = Convert.FromBase64String(bb.GetString() ?? "");
+            return body.Length > 0;
+        }
+        catch { return false; }
     }
 
     internal sealed record NativeRoute(string Method, string Path);
