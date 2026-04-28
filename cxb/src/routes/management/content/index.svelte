@@ -221,7 +221,7 @@
         <h1 class="text-2xl font-bold mb-6">All Spaces</h1>
         <Button
             size="md"
-            class="bg-primary"
+            class="bg-primary py-3!"
             style="cursor: pointer"
             onclick={showAddSpaceModal}
         >

@@ -967,24 +967,32 @@
     </div>
 </div>
 
-<Modal bind:open={openDeleteModal} size="md" title="Confirm Deletion">
-    <p class="text-center mb-6">
+<Modal
+    bind:open={openDeleteModal}
+    size="sm"
+    placement="center"
+    title="Confirm Deletion"
+    class="max-w-lg! w-full! my-auto! mx-auto!"
+>
+    <p class="text-center">
         Are you sure you want to delete <span class="font-bold"
-    >{entry.shortname}</span
-    >
+            >{entry.shortname}</span
+        >
         ({resource_type})?<br />
         This action cannot be undone.
     </p>
 
-    <div class="flex justify-between w-full">
-        <Button color="alternative" onclick={() => (openDeleteModal = false)}
-        >Cancel</Button
+    <div class="flex justify-center gap-3 w-full">
+        <Button
+            color="alternative"
+            class="py-3! px-5!"
+            onclick={() => (openDeleteModal = false)}>Cancel</Button
         >
         <Button
-                color="red"
-                onclick={deleteCurrentEntry}
-                disabled={isActionLoading}
-        >{isActionLoading ? "Deleting..." : "Delete"}</Button
+            class="py-3! px-5! bg-red-600! hover:bg-red-700! text-white! font-semibold!"
+            onclick={deleteCurrentEntry}
+            disabled={isActionLoading}
+            >{isActionLoading ? "Deleting..." : "Delete"}</Button
         >
     </div>
 </Modal>
