@@ -1,5 +1,7 @@
 using System.Security.Cryptography;
 using Dmart.Config;
+using Dmart.DataAdapters.Sql;
+using Dmart.Models.Enums;
 using Dmart.Services;
 using Microsoft.Extensions.Options;
 
@@ -9,6 +11,7 @@ public sealed class OtpProvider(
     IOptions<DmartSettings> settings,
     SmsSender sms,
     SmtpSender smtp,
+    LanguageLoader languages,
     ILogger<OtpProvider> log)
 {
     public string Generate(string destination)
@@ -31,28 +34,49 @@ public sealed class OtpProvider(
         return RandomNumberGenerator.GetInt32(0, 1_000_000).ToString("D6");
     }
 
-    public async Task SendAsync(string destination, string code, CancellationToken ct = default)
+    public async Task SendAsync(string destination, string code,
+        Language language = Language.En, CancellationToken ct = default)
     {
         // Dispatch:
         //   msisdn-shaped destination → SEND_SMS_OTP_API (configured) or log.
         //   email-shaped destination  → SMTP gateway (configured) or log.
         //   anything else             → log only.
+        var body = RenderMessage(language, code);
         if (IsMsisdn(destination))
         {
-            var sent = await sms.SendOtpAsync(destination, $"Your OTP code is {code}", language: null, ct);
+            var sent = await sms.SendOtpAsync(destination, body,
+                language: JsonbHelpers.EnumMember(language), ct);
             if (sent) return;
         }
         else if (IsEmail(destination))
         {
             // Python parity: email_send_otp() — HTML body containing the code.
-            var sent = await smtp.SendEmailAsync(
-                destination, "OTP", $"<p>Your OTP code is <b>{code}</b></p>", ct);
+            // Wrap the localized template in the same HTML shell Python uses,
+            // so "Your OTP code is 123456" / "رمز التحقق…" both render bold.
+            var html = $"<p>{System.Net.WebUtility.HtmlEncode(body)}</p>";
+            var sent = await smtp.SendEmailAsync(destination, "OTP", html, ct);
             if (sent) return;
         }
 
         // Fallback: log so developers can retrieve the code from server logs.
         log.LogInformation("OTP for {Destination}: {Code} (delivery not implemented or gateway unavailable)",
             destination, code);
+    }
+
+    // Resolves `otp_message` from the loaded languages and substitutes the
+    // `{code}` placeholder. Falls back to the historical English literal when
+    // the key isn't loaded — mirrors Python's send_otp() which does the same
+    // dictionary lookup with a hard-coded fallback. Operators override the
+    // template by dropping a JSON file at ~/.dmart/languages/<lang>.json with
+    // an `otp_message` key (LanguageLoader strategy 3).
+    //
+    // Internal so the unit suite can pin the rendering contract without
+    // standing up the full SMS / SMTP send pipeline.
+    internal string RenderMessage(Language language, string code)
+    {
+        const string fallback = "Your OTP code is {code}";
+        var template = languages.Get(language, "otp_message") ?? fallback;
+        return template.Replace("{code}", code, StringComparison.Ordinal);
     }
 
     // Lightweight email heuristic — good enough for dispatch routing; the OTP

@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Dmart.Config;
 using Dmart.Models.Api;
 using Dmart.Models.Json;
@@ -36,10 +37,18 @@ public static class ChannelAuthMiddleware
             }
 
             var registry = ctx.RequestServices.GetRequiredService<ChannelsRegistry>();
+            var log = ctx.RequestServices.GetRequiredService<ILogger<ChannelsRegistry>>();
             var path = ctx.Request.Path.Value ?? "/";
 
-            var headerValues = ctx.Request.Headers[ChannelKeyHeader];
-            var channelKey = headerValues.Count > 0 ? headerValues.ToString() : null;
+            // Match Python's `headers.get('x-channel-key')`: take the FIRST
+            // value when multiple are present. StringValues.ToString() joins
+            // with commas, which would never match a configured key.
+            string? channelKey = null;
+            if (ctx.Request.Headers.TryGetValue(ChannelKeyHeader, out var headerValues)
+                && headerValues.Count > 0)
+            {
+                channelKey = headerValues[0];
+            }
 
             if (string.IsNullOrEmpty(channelKey))
             {
@@ -47,8 +56,11 @@ public static class ChannelAuthMiddleware
                 {
                     foreach (var pattern in ch.AllowedApiPatterns)
                     {
-                        if (pattern.IsMatch(path))
+                        if (SafeIsMatch(pattern, path, log, ch.Name))
                         {
+                            log.LogWarning(
+                                "channel-auth denied: missing x-channel-key for restricted path {Path} (channel={Channel})",
+                                path, ch.Name);
                             await WriteForbidden(ctx, "Requested method or path is forbidden");
                             return;
                         }
@@ -70,21 +82,40 @@ public static class ChannelAuthMiddleware
 
             if (matched is null)
             {
+                log.LogWarning("channel-auth denied: unknown x-channel-key for {Path}", path);
                 await WriteForbidden(ctx, "Requested method or path is forbidden [2]");
                 return;
             }
 
             foreach (var pattern in matched.AllowedApiPatterns)
             {
-                if (pattern.IsMatch(path))
+                if (SafeIsMatch(pattern, path, log, matched.Name))
                 {
                     await next();
                     return;
                 }
             }
 
+            log.LogWarning(
+                "channel-auth denied: channel {Channel} not authorized for {Path}",
+                matched.Name, path);
             await WriteForbidden(ctx, "Requested method or path is forbidden [3]");
         });
+    }
+
+    // Wraps Regex.IsMatch so a pattern that exceeds its match-timeout (set in
+    // ChannelsRegistry) doesn't escape as an unhandled RegexMatchTimeoutException
+    // and 500 the request — log it and treat as a non-match. The combination of
+    // a 100ms timeout + a non-match fallback makes the gate ReDoS-resistant.
+    private static bool SafeIsMatch(Regex pattern, string path, ILogger log, string channelName)
+    {
+        try { return pattern.IsMatch(path); }
+        catch (RegexMatchTimeoutException)
+        {
+            log.LogError("channel-auth: regex timeout on channel={Channel} pattern={Pattern} path={Path}",
+                channelName, pattern, path);
+            return false;
+        }
     }
 
     private static async Task WriteForbidden(HttpContext ctx, string message)

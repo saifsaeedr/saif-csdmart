@@ -85,4 +85,55 @@ public class ChannelsRegistryTests : IDisposable
         reg.Channels[1].AllowedApiPatterns.Length.ShouldBe(2);
         reg.Channels[1].AllowedApiPatterns[1].IsMatch("/qr/abc").ShouldBeTrue();
     }
+
+    [Fact]
+    public void Pathological_Pattern_Times_Out_During_Match_Without_Crashing()
+    {
+        // Catastrophic-backtracking pattern + an attacker-shaped path. With
+        // RegexOptions.Compiled and no MatchTimeout this would hang the
+        // request thread for seconds (or until process kill). The 100ms
+        // MatchTimeout in ChannelsRegistry forces RegexMatchTimeoutException
+        // — middleware catches it via SafeIsMatch and treats as no-match.
+        File.WriteAllText(_tmpFile, """
+            [
+              {
+                "name": "evil",
+                "keys": ["k"],
+                "allowed_api_patterns": ["^(a+)+$"]
+              }
+            ]
+            """);
+        var reg = Build(_tmpFile);
+        reg.Channels.Count.ShouldBe(1);
+        var pattern = reg.Channels[0].AllowedApiPatterns[0];
+
+        // 30 'a's followed by 'b' — classic ReDoS input. Without the timeout
+        // this never returns; with it, IsMatch throws within ~100ms.
+        var input = new string('a', 30) + "b";
+        Should.Throw<System.Text.RegularExpressions.RegexMatchTimeoutException>(
+            () => pattern.IsMatch(input));
+    }
+
+    [Fact]
+    public void Invalid_Regex_Is_Dropped_Without_Failing_Channel()
+    {
+        // A single bad pattern must not make the whole channel disappear:
+        // log + drop just that pattern, keep the good ones. Critical for
+        // operator hygiene — typo'd regex shouldn't lock the operator out
+        // of every other path the same channel grants.
+        File.WriteAllText(_tmpFile, """
+            [
+              {
+                "name": "mixed",
+                "keys": ["k"],
+                "allowed_api_patterns": ["[unclosed", "/public/.*"]
+              }
+            ]
+            """);
+        var reg = Build(_tmpFile);
+        reg.Channels.Count.ShouldBe(1);
+        // Bad regex dropped, good regex retained.
+        reg.Channels[0].AllowedApiPatterns.Length.ShouldBe(1);
+        reg.Channels[0].AllowedApiPatterns[0].IsMatch("/public/x").ShouldBeTrue();
+    }
 }

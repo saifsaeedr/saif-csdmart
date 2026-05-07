@@ -47,13 +47,33 @@ public sealed class ChannelsRegistry
             var result = new List<Channel>(entries.Count);
             foreach (var e in entries)
             {
-                var patterns = (e.AllowedApiPatterns ?? new List<string>())
-                    .Select(p => new Regex(p, RegexOptions.Compiled))
-                    .ToArray();
+                // Per-pattern compile so a single bad regex (catastrophic
+                // backtracking, invalid syntax) doesn't poison the whole
+                // channel — log it and drop just that pattern. The 100ms
+                // match timeout is the runtime backstop: every IsMatch call
+                // aborts past that, defending the gate from a pattern that
+                // *compiles* but blows up at match time on attacker-shaped
+                // paths. Without it, a single ReDoS-prone entry in
+                // ~/.dmart/channels.json could hang every request thread.
+                var patternList = new List<Regex>();
+                foreach (var p in e.AllowedApiPatterns ?? new List<string>())
+                {
+                    try
+                    {
+                        patternList.Add(new Regex(p,
+                            RegexOptions.Compiled | RegexOptions.CultureInvariant,
+                            TimeSpan.FromMilliseconds(100)));
+                    }
+                    catch (ArgumentException ex)
+                    {
+                        log.LogError(ex, "channels: invalid regex {Pattern} on channel {Channel} — dropped",
+                            p, e.Name ?? "");
+                    }
+                }
                 result.Add(new Channel(
                     e.Name ?? "",
                     e.Keys ?? new List<string>(),
-                    patterns));
+                    patternList.ToArray()));
             }
             return result;
         }

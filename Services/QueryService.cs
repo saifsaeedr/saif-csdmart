@@ -317,6 +317,15 @@ public sealed class QueryService(
             return Response.Fail(InternalErrorCode.NOT_AUTHENTICATED,
                 "events queries require authentication", ErrorTypes.Auth);
 
+        // ACL is space-level only — matches Python upstream. The events feed
+        // surfaces actions across all subpaths in the space, so a user with
+        // read on / can see action timestamps for sub-paths they couldn't
+        // read directly. Two reasons we keep it: (a) parity with Python's
+        // events_query, (b) per-event ACL would require resolving each line
+        // back to its locator, defeating the file-tail performance model.
+        // TODO(future): if/when we add per-subpath ACL on the events feed,
+        // do it as a post-filter against `resource.subpath` in TryParseEventLine
+        // — the data is already there.
         if (!await CanQueryAsync(actor, ResourceType.Content, q.SpaceName, q.Subpath ?? "/", ct))
             return EmptyQueryResponse();
 
@@ -328,6 +337,12 @@ public sealed class QueryService(
             return Response.Ok(Array.Empty<Record>(), new() { ["total"] = 0, ["returned"] = 0 });
 
         var matches = new List<(DateTime Ts, Record Rec)>();
+        // skippedCorrupt counts lines we silently dropped so we can surface
+        // log-file corruption to ops once per query rather than per line —
+        // a tail of a half-written final line should not poison the whole
+        // response, but a rotated/truncated file dropping every line should
+        // be visible.
+        var skippedCorrupt = 0;
         // Open with FileShare.ReadWrite so a concurrent SpaceEventLogger.LogAsync
         // append doesn't lock us out while a query is running.
         await using var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
@@ -337,9 +352,16 @@ public sealed class QueryService(
         while ((line = await reader.ReadLineAsync(ct)) is not null)
         {
             if (string.IsNullOrWhiteSpace(line)) continue;
-            if (!TryParseEventLine(line, q, out var ts, out var rec)) continue;
+            if (!TryParseEventLine(line, q, out var ts, out var rec))
+            {
+                skippedCorrupt++;
+                continue;
+            }
             matches.Add((ts, rec!));
         }
+        if (skippedCorrupt > 0)
+            logger.LogWarning("events: {Count} unparseable lines skipped in {Path}",
+                skippedCorrupt, path);
 
         // Default sort: newest-first (Python's default for the events feed).
         // Ascending only when SortType.Ascending is requested explicitly.
@@ -400,6 +422,13 @@ public sealed class QueryService(
                 && resEl.ValueKind == JsonValueKind.Object;
             var src = hasResource ? resEl : root;
 
+            // Note on slash form: Record normalizes Subpath via Trim('/'),
+            // so "users" is stored on the outer Record while
+            // attributes.resource.subpath stays as the raw on-disk "/users".
+            // Both are correct by project convention — outer Record.Subpath
+            // is the canonical wire format, the inner block is the verbatim
+            // log payload. Clients reading either should know which they're
+            // reading.
             var subpath = src.TryGetProperty("subpath", out var spEl) && spEl.ValueKind == JsonValueKind.String
                 ? spEl.GetString() ?? "/" : "/";
             var shortname = src.TryGetProperty("shortname", out var snEl) && snEl.ValueKind == JsonValueKind.String

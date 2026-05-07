@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 using Dmart.Config;
@@ -41,19 +42,22 @@ public sealed class SpaceEventLogger(
 
     // Per-space write lock: multiple concurrent actions in the same space must
     // not interleave bytes inside one JSON line. Different spaces hit different
-    // files, so they don't contend.
-    private readonly Dictionary<string, SemaphoreSlim> _locks = new(StringComparer.Ordinal);
-    private readonly object _locksGate = new();
+    // files, so they don't contend. ConcurrentDictionary.GetOrAdd is the
+    // lock-free idiom — at worst two threads racing on the same new space
+    // create one extra SemaphoreSlim that's immediately discarded; the cost
+    // is bounded by the number of distinct spaces ever seen by this process.
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks =
+        new(StringComparer.Ordinal);
+
+    // Memoizes "this space's .dm directory exists" so we skip the syscall on
+    // the second-and-subsequent log per space. CreateDirectory is a no-op when
+    // the dir already exists, but it's still a stat — at audit-log volumes the
+    // accumulated cost is real, and the semantics are unchanged.
+    private readonly ConcurrentDictionary<string, bool> _dirsCreated =
+        new(StringComparer.Ordinal);
 
     private SemaphoreSlim GetLock(string space)
-    {
-        lock (_locksGate)
-        {
-            if (!_locks.TryGetValue(space, out var sem))
-                _locks[space] = sem = new SemaphoreSlim(1, 1);
-            return sem;
-        }
-    }
+        => _locks.GetOrAdd(space, _ => new SemaphoreSlim(1, 1));
 
     public bool Enabled => !string.IsNullOrWhiteSpace(settings.Value.SpacesFolder);
 
@@ -102,7 +106,17 @@ public sealed class SpaceEventLogger(
         await sem.WaitAsync(ct);
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            // Cache the "directory created" bit per space — typical hot path
+            // is steady-state appends to an existing dir, so skip the stat.
+            // TODO: add log rotation. The per-space events.jsonl grows
+            // unbounded; matches Python upstream but is a real risk in
+            // long-running deployments. Mitigation belongs in this writer
+            // (e.g., size-based rollover to events.jsonl.<n>).
+            if (!_dirsCreated.ContainsKey(e.SpaceName))
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                _dirsCreated[e.SpaceName] = true;
+            }
             await File.AppendAllTextAsync(path, line, Encoding.UTF8, ct);
         }
         catch (Exception ex)

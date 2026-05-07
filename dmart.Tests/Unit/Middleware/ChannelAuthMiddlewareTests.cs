@@ -31,7 +31,8 @@ public class ChannelAuthMiddlewareTests : IDisposable
         bool enableChannelAuth,
         string channelsJsonContent,
         string path,
-        string? channelKey = null)
+        string? channelKey = null,
+        string[]? channelKeyValues = null)
     {
         File.WriteAllText(_channelsJson, channelsJsonContent);
 
@@ -59,7 +60,9 @@ public class ChannelAuthMiddlewareTests : IDisposable
         var ctx = new DefaultHttpContext { RequestServices = sp };
         ctx.Request.Path = path;
         ctx.Request.Method = "GET";
-        if (channelKey is not null)
+        if (channelKeyValues is not null)
+            ctx.Request.Headers["x-channel-key"] = channelKeyValues;
+        else if (channelKey is not null)
             ctx.Request.Headers["x-channel-key"] = channelKey;
         ctx.Response.Body = new MemoryStream();
 
@@ -156,6 +159,51 @@ public class ChannelAuthMiddlewareTests : IDisposable
             channelsJsonContent: twoChannels,
             path: "/info/health",
             channelKey: "k2");
+        ctx.Response.StatusCode.ShouldBe(200);
+    }
+
+    [Fact]
+    public async Task MultiValue_Header_Uses_First_Value_Like_Python()
+    {
+        // A client that (intentionally or by proxy quirk) sends two
+        // x-channel-key values must be matched on the FIRST value, like
+        // Python's headers.get('x-channel-key'). The pre-fix code used
+        // StringValues.ToString() which joined with commas — making
+        // "valid-key-1, junk" the single key string and missing the
+        // configured "valid-key-1" entry entirely.
+        var ctx = await Run(enableChannelAuth: true,
+            channelsJsonContent: SingleChannelJson,
+            path: "/public/foo",
+            channelKeyValues: new[] { "valid-key-1", "junk" });
+        ctx.Response.StatusCode.ShouldBe(200);
+    }
+
+    [Fact]
+    public async Task Pathological_Pattern_Times_Out_And_Treated_As_NoMatch()
+    {
+        // ChannelsRegistry compiles patterns with a 100ms MatchTimeout.
+        // SafeIsMatch in the middleware must catch RegexMatchTimeoutException
+        // and treat the timeout as a non-match — translating to "path is not
+        // restricted by this channel" for the no-header branch (pass through)
+        // or "path not authorized for this channel" for the with-key branch
+        // (403). Here we use the no-header branch: a path that triggers ReDoS
+        // must not 500 the request — it should pass through to the handler.
+        const string evilJson = """
+            [
+              {
+                "name": "evil",
+                "keys": ["k"],
+                "allowed_api_patterns": ["^(a+)+$"]
+              }
+            ]
+            """;
+        var redosPath = "/" + new string('a', 30) + "b";
+        var ctx = await Run(enableChannelAuth: true,
+            channelsJsonContent: evilJson,
+            path: redosPath,
+            channelKey: null);
+        // Pattern timeout → SafeIsMatch returns false → no channel claims
+        // this path → unauthenticated request passes through.
         ctx.Response.StatusCode.ShouldBe(200);
     }
 }

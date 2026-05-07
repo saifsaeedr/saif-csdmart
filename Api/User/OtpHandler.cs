@@ -70,7 +70,9 @@ public static class OtpHandler
                 var code = otp.Generate(dest);
                 var expiresAt = TimeUtils.Now().AddSeconds(s.OtpTokenTtl);
                 await repo.StoreAsync(dest, code, expiresAt, ct);
-                await otp.SendAsync(dest, code, ct);
+                // Use the registered user's language when known; default to
+                // English for the registrable-anonymous path (no user yet).
+                await otp.SendAsync(dest, code, user?.Language ?? Models.Enums.Language.En, ct);
             }
 
             return Response.Ok();
@@ -123,7 +125,7 @@ public static class OtpHandler
             var code = otp.Generate(dest);
             var expiresAt = TimeUtils.Now().AddSeconds(s.OtpTokenTtl);
             await repo.StoreAsync(dest, code, expiresAt, ct);
-            await otp.SendAsync(dest, code, ct);
+            await otp.SendAsync(dest, code, user.Language, ct);
             return Response.Ok();
         }).RequireRateLimiting("auth-by-ip");
 
