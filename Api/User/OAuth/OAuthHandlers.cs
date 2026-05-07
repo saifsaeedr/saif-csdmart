@@ -93,9 +93,13 @@ public static class OAuthHandlers
         }).RequireRateLimiting("auth-by-ip");
 
         // ---- Apple ----
-        // Only the id_token path is implemented. Code → id_token exchange
-        // needs a signed ES256 client-assertion JWT — skipped for AOT
-        // simplicity. The mobile flow covers the common case.
+        // Two callback shapes are possible from Apple:
+        //   * id_token in the query/form (response_mode=form_post + id_token
+        //     scope) → validate directly, no exchange needed.
+        //   * code in the query → POST to Apple's token endpoint with a
+        //     freshly-minted ES256 client_assertion. The exchange path
+        //     requires the full set of TeamId/KeyId/P8/Callback settings;
+        //     IsConfigured (id only) covers the id_token branch.
         g.MapGet("/apple/callback", async (string? code, string? id_token,
             AppleProvider provider, OAuthUserResolver resolver,
             UserService users, IOptions<DmartSettings> settings,
@@ -104,18 +108,24 @@ public static class OAuthHandlers
             if (!provider.IsConfigured)
                 return ProviderError("apple oauth not configured");
 
-            // Apple sometimes posts id_token directly in the callback (form
-            // post response mode). If we have it, skip the code exchange.
-            string? token = id_token;
-            if (string.IsNullOrEmpty(token))
+            OAuthUserInfo? info;
+            if (!string.IsNullOrEmpty(id_token))
             {
-                if (string.IsNullOrEmpty(code))
-                    return ProviderError("apple callback needs either `code` or `id_token`");
-                return ProviderError(
-                    "apple code exchange is not implemented — use the mobile/id_token flow");
+                info = await provider.ValidateIdTokenAsync(id_token, ct);
+                if (info is null) return ProviderError("invalid apple id token");
             }
-            var info = await provider.ValidateIdTokenAsync(token, ct);
-            if (info is null) return ProviderError("invalid apple id token");
+            else if (!string.IsNullOrEmpty(code))
+            {
+                if (!provider.SupportsCodeExchange)
+                    return ProviderError(
+                        "apple code exchange not configured — set AppleTeamId, AppleKeyId, AppleP8PrivateKey, AppleOauthCallback");
+                info = await provider.ExchangeCodeAsync(code, ct);
+                if (info is null) return ProviderError("apple code exchange failed");
+            }
+            else
+            {
+                return ProviderError("apple callback needs either `code` or `id_token`");
+            }
             return await CompleteLoginAsync(info, resolver, users, settings, http, ct);
         });
 
