@@ -94,7 +94,10 @@ public static class AuthHandler
                 if (auth.StartsWith(bearerPrefix, StringComparison.OrdinalIgnoreCase))
                     token = auth[bearerPrefix.Length..].Trim();
             }
-            await svc.LogoutAsync(token, ct);
+            // Hashed-token storage: pull the actor from the (already-validated)
+            // JWT claims so the repository can narrow the candidate row set.
+            var actor = http.User?.Identity?.Name;
+            await svc.LogoutAsync(actor, token, ct);
 
             // Clear the cookie by setting an empty value with max_age=0.
             http.Response.Cookies.Append("auth_token", "", new CookieOptions

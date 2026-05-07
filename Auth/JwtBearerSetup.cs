@@ -113,8 +113,8 @@ public static class JwtBearerSetup
 
                         var liveSession = settings.SessionInactivityTtl > 0
                             ? await users.TouchSessionAsync(
-                                raw, settings.SessionInactivityTtl, ctx.HttpContext.RequestAborted)
-                            : await users.IsSessionValidAsync(raw, ctx.HttpContext.RequestAborted);
+                                actor, raw, settings.SessionInactivityTtl, ctx.HttpContext.RequestAborted)
+                            : await users.IsSessionValidAsync(actor, raw, ctx.HttpContext.RequestAborted);
                         if (!liveSession)
                             ctx.Fail(new SecurityTokenException("session expired or revoked"));
                     },

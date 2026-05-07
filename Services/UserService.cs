@@ -899,11 +899,13 @@ public sealed class UserService(
         await users.DeleteAsync(shortname, ct);
     }
 
-    public async Task LogoutAsync(string? token, CancellationToken ct = default)
+    public async Task LogoutAsync(string? shortname, string? token, CancellationToken ct = default)
     {
         // Python: db.remove_user_session() — delete the specific session row.
-        if (!string.IsNullOrEmpty(token))
-            await users.DeleteSessionAsync(token, ct);
+        // Hashed-token storage means we need the shortname to narrow the
+        // candidate set before Argon2-verifying which row to drop.
+        if (!string.IsNullOrEmpty(token) && !string.IsNullOrEmpty(shortname))
+            await users.DeleteSessionAsync(shortname, token, ct);
     }
 
     private async Task<User?> ResolveUserAsync(UserLoginRequest req, CancellationToken ct)

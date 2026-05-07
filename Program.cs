@@ -336,7 +336,7 @@ switch (subcommand)
         var nlog = Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance;
         var refresher = new AuthzCacheRefresher();
         var entryRepo = new EntryRepository(dbInst);
-        var userRepo = new UserRepository(dbInst, refresher);
+        var userRepo = new UserRepository(dbInst, refresher, new Dmart.Auth.PasswordHasher());
         var accessRepo = new AccessRepository(dbInst, refresher, userRepo);
         var exportService = new ImportExportService(entryRepo,
             new AttachmentRepository(dbInst),
@@ -390,7 +390,7 @@ switch (subcommand)
         var nlog = Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance;
         var refresher = new AuthzCacheRefresher();
         var entryRepo = new EntryRepository(dbInst);
-        var userRepo = new UserRepository(dbInst, refresher);
+        var userRepo = new UserRepository(dbInst, refresher, new Dmart.Auth.PasswordHasher());
         var accessRepo = new AccessRepository(dbInst, refresher, userRepo);
         var entryService = new EntryService(entryRepo,
             new AttachmentRepository(dbInst),

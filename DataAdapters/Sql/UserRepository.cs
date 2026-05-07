@@ -1,3 +1,4 @@
+using Dmart.Auth;
 using Dmart.Models.Core;
 using Dmart.Models.Enums;
 using Npgsql;
@@ -5,7 +6,7 @@ using NpgsqlTypes;
 
 namespace Dmart.DataAdapters.Sql;
 
-public sealed class UserRepository(Db db, AuthzCacheRefresher refresher)
+public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, PasswordHasher hasher)
 {
     private const string SelectAllColumns = """
         SELECT uuid, shortname, space_name, subpath, is_active, slug,
@@ -206,6 +207,11 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher)
     }
 
     // ----- sessions -----
+    // Python parity: the JWT is hashed (Argon2id) before insert — same primitive
+    // and parameters as user passwords. See backend/data_adapters/sql/adapter.py
+    // ::set_user_session in dmart-py. A DB read therefore can't yield replayable
+    // bearer tokens; an attacker would have to brute-force each row's hash.
+    //
     // `firebaseToken` is optional — Python persists it on the session row at
     // login time so downstream push-notification code can fan out to every
     // active session without a per-session update cycle. The C# port doesn't
@@ -214,13 +220,14 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher)
     public async Task CreateSessionAsync(
         string shortname, string token, string? firebaseToken = null, CancellationToken ct = default)
     {
+        var tokenHash = hasher.Hash(token);
         await using var conn = await db.OpenAsync(ct);
         await using var cmd = new NpgsqlCommand("""
             INSERT INTO sessions (uuid, shortname, token, firebase_token, timestamp)
             VALUES (gen_random_uuid(), $1, $2, $3, NOW())
             """, conn);
         cmd.Parameters.Add(new() { Value = shortname });
-        cmd.Parameters.Add(new() { Value = token });
+        cmd.Parameters.Add(new() { Value = tokenHash });
         cmd.Parameters.Add(new() { Value = (object?)firebaseToken ?? DBNull.Value });
         await cmd.ExecuteNonQueryAsync(ct);
     }
@@ -229,18 +236,44 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher)
     // (shortname, token). Mirrors Python's db.update_session_firebase_token()
     // in backend/data_adapters/sql/adapter.py. Called from the profile update
     // flow when the caller PATCHes `firebase_token` on /user/profile.
+    //
+    // Argon2 is non-deterministic, so we can't WHERE on the token directly.
+    // Iterate every session row for the shortname, Verify each, then UPDATE
+    // the matching uuid.
     public async Task UpdateSessionFirebaseTokenAsync(
         string shortname, string token, string firebaseToken, CancellationToken ct = default)
     {
         await using var conn = await db.OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand("""
-            UPDATE sessions SET firebase_token = $3
-            WHERE shortname = $1 AND token = $2
-            """, conn);
-        cmd.Parameters.Add(new() { Value = shortname });
-        cmd.Parameters.Add(new() { Value = token });
+        var matched = await FindMatchingSessionUuidAsync(conn, shortname, token, ct);
+        if (matched is null) return;
+        await using var cmd = new NpgsqlCommand(
+            "UPDATE sessions SET firebase_token = $1 WHERE uuid = $2", conn);
         cmd.Parameters.Add(new() { Value = firebaseToken });
+        cmd.Parameters.Add(new() { Value = matched.Value });
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    // Iterates session rows for `shortname` and returns the uuid of the row
+    // whose hashed token verifies against `rawToken`. Null when no row
+    // matches. Used by every session-mutation code path that has the raw
+    // bearer token in hand.
+    private async Task<Guid?> FindMatchingSessionUuidAsync(
+        NpgsqlConnection conn, string shortname, string rawToken, CancellationToken ct)
+    {
+        var rows = new List<(Guid Uuid, string Hash)>();
+        await using (var sel = new NpgsqlCommand(
+            "SELECT uuid, token FROM sessions WHERE shortname = $1", conn))
+        {
+            sel.Parameters.Add(new() { Value = shortname });
+            await using var reader = await sel.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+                rows.Add((reader.GetGuid(0), reader.GetString(1)));
+        }
+        foreach (var (uuid, hash) in rows)
+        {
+            if (hasher.Verify(rawToken, hash)) return uuid;
+        }
+        return null;
     }
 
     // Returns every non-null firebase_token across the user's active sessions.
@@ -283,47 +316,74 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher)
         return result;
     }
 
-    public async Task<bool> IsSessionValidAsync(string token, CancellationToken ct = default)
+    // Python parity: `shortname` narrows the candidate set to that user's
+    // sessions; we then Argon2-Verify each row's hashed token against `token`.
+    // The shortname is always available at the call site (JwtBearer's
+    // OnTokenValidated has already extracted the JWT's `sub` claim).
+    public async Task<bool> IsSessionValidAsync(string shortname, string token, CancellationToken ct = default)
     {
         await using var conn = await db.OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand("SELECT 1 FROM sessions WHERE token = $1", conn);
-        cmd.Parameters.Add(new() { Value = token });
-        return await cmd.ExecuteScalarAsync(ct) is not null;
+        return await FindMatchingSessionUuidAsync(conn, shortname, token, ct) is not null;
     }
 
     // Atomic session activity check + touch. When SessionInactivityTtl > 0:
-    //   * UPDATE bumps the session's timestamp to NOW() iff it exists AND is
-    //     not older than `inactivityTtlSeconds`. Returns 1 row on success.
-    //   * If the UPDATE affected 0 rows, the session is either missing OR
-    //     stale — we then DELETE any stale row so the caller can't continue
-    //     under an expired token.
+    //   * Find the row whose hashed token verifies against `token` AND whose
+    //     timestamp is within the TTL window. Bump its timestamp to NOW().
+    //   * If no such row, evict any matching stale row so the caller can't
+    //     continue under an expired token.
     // Returns true if the session is live (and was just touched), false if
     // it was missing or evicted. Called from the JwtBearer OnTokenValidated
     // hook so every authenticated request resets the inactivity clock.
-    public async Task<bool> TouchSessionAsync(string token, int inactivityTtlSeconds, CancellationToken ct = default)
+    public async Task<bool> TouchSessionAsync(
+        string shortname, string token, int inactivityTtlSeconds, CancellationToken ct = default)
     {
         await using var conn = await db.OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand("""
-            UPDATE sessions SET timestamp = NOW()
-            WHERE token = $1
-              AND timestamp >= NOW() - ($2 || ' seconds')::interval
-            """, conn);
-        cmd.Parameters.Add(new() { Value = token });
-        cmd.Parameters.Add(new() { Value = inactivityTtlSeconds.ToString() });
-        var touched = await cmd.ExecuteNonQueryAsync(ct);
-        if (touched > 0) return true;
-        // Not touched — evict any stale row so SELECTs see the session gone.
-        await using var purge = new NpgsqlCommand("DELETE FROM sessions WHERE token = $1", conn);
-        purge.Parameters.Add(new() { Value = token });
-        await purge.ExecuteNonQueryAsync(ct);
+
+        // Pull (uuid, token, fresh?) for every session this user has so we
+        // can decide both freshness and identity in one round-trip plus an
+        // Argon2-verify pass.
+        var rows = new List<(Guid Uuid, string Hash, bool Fresh)>();
+        await using (var sel = new NpgsqlCommand("""
+            SELECT uuid, token,
+                   timestamp >= NOW() - ($2 || ' seconds')::interval AS fresh
+            FROM sessions WHERE shortname = $1
+            """, conn))
+        {
+            sel.Parameters.Add(new() { Value = shortname });
+            sel.Parameters.Add(new() { Value = inactivityTtlSeconds.ToString() });
+            await using var reader = await sel.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+                rows.Add((reader.GetGuid(0), reader.GetString(1), reader.GetBoolean(2)));
+        }
+
+        foreach (var (uuid, hash, fresh) in rows)
+        {
+            if (!hasher.Verify(token, hash)) continue;
+            // Identity match. Either touch (fresh) or evict (stale) and exit.
+            if (fresh)
+            {
+                await using var bump = new NpgsqlCommand(
+                    "UPDATE sessions SET timestamp = NOW() WHERE uuid = $1", conn);
+                bump.Parameters.Add(new() { Value = uuid });
+                await bump.ExecuteNonQueryAsync(ct);
+                return true;
+            }
+            await using var purge = new NpgsqlCommand(
+                "DELETE FROM sessions WHERE uuid = $1", conn);
+            purge.Parameters.Add(new() { Value = uuid });
+            await purge.ExecuteNonQueryAsync(ct);
+            return false;
+        }
         return false;
     }
 
-    public async Task DeleteSessionAsync(string token, CancellationToken ct = default)
+    public async Task DeleteSessionAsync(string shortname, string token, CancellationToken ct = default)
     {
         await using var conn = await db.OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand("DELETE FROM sessions WHERE token = $1", conn);
-        cmd.Parameters.Add(new() { Value = token });
+        var matched = await FindMatchingSessionUuidAsync(conn, shortname, token, ct);
+        if (matched is null) return;
+        await using var cmd = new NpgsqlCommand("DELETE FROM sessions WHERE uuid = $1", conn);
+        cmd.Parameters.Add(new() { Value = matched.Value });
         await cmd.ExecuteNonQueryAsync(ct);
     }
 

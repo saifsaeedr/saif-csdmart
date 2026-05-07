@@ -115,7 +115,7 @@ public class FullParityTests : IClassFixture<DmartFactory>
             var logout = await client.PostAsync("/user/logout", null);
             logout.StatusCode.ShouldBe(HttpStatusCode.OK);
 
-            (await users.IsSessionValidAsync(token)).ShouldBeFalse();
+            (await users.IsSessionValidAsync(shortname, token)).ShouldBeFalse();
 
             var afterLogout = await client.GetAsync("/info/manifest");
             afterLogout.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
@@ -164,8 +164,8 @@ public class FullParityTests : IClassFixture<DmartFactory>
             var token = body?.Records?.FirstOrDefault()?.Attributes?["access_token"]?.ToString()
                 ?? throw new InvalidOperationException($"Login failed for '{shortname}': {loginResp.StatusCode} {raw}");
 
-            await users.DeleteSessionAsync(token);
-            (await users.IsSessionValidAsync(token)).ShouldBeFalse();
+            await users.DeleteSessionAsync(shortname, token);
+            (await users.IsSessionValidAsync(shortname, token)).ShouldBeFalse();
 
             var client = _factory.CreateClient(new Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactoryClientOptions
             {

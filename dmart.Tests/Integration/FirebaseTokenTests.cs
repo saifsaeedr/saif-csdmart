@@ -38,7 +38,7 @@ public sealed class FirebaseTokenTests : IClassFixture<DmartFactory>
             var token = await ExtractAccessTokenAsync(resp);
             token.ShouldNotBeNullOrEmpty();
 
-            var stored = await ReadFirebaseTokenAsync(token!);
+            var stored = await ReadFirebaseTokenAsync(shortname, token!);
             stored.ShouldBe("fcm-login-token");
         }
         finally { await DeleteUserAsync(shortname); }
@@ -56,7 +56,7 @@ public sealed class FirebaseTokenTests : IClassFixture<DmartFactory>
                 DmartJsonContext.Default.UserLoginRequest);
             var token = (await ExtractAccessTokenAsync(loginResp))!;
 
-            (await ReadFirebaseTokenAsync(token)).ShouldBeNull();
+            (await ReadFirebaseTokenAsync(shortname, token)).ShouldBeNull();
 
             client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
             var patch = new Dictionary<string, object> { ["firebase_token"] = "fcm-from-profile" };
@@ -64,7 +64,7 @@ public sealed class FirebaseTokenTests : IClassFixture<DmartFactory>
                 DmartJsonContext.Default.DictionaryStringObject);
             patchResp.StatusCode.ShouldBe(HttpStatusCode.OK);
 
-            (await ReadFirebaseTokenAsync(token)).ShouldBe("fcm-from-profile");
+            (await ReadFirebaseTokenAsync(shortname, token)).ShouldBe("fcm-from-profile");
         }
         finally { await DeleteUserAsync(shortname); }
     }
@@ -96,8 +96,8 @@ public sealed class FirebaseTokenTests : IClassFixture<DmartFactory>
                 DmartJsonContext.Default.DictionaryStringObject);
             patchResp.StatusCode.ShouldBe(HttpStatusCode.OK);
 
-            (await ReadFirebaseTokenAsync(tokenA)).ShouldBe("fcm-A-updated");
-            (await ReadFirebaseTokenAsync(tokenB)).ShouldBe("fcm-B");
+            (await ReadFirebaseTokenAsync(shortname, tokenA)).ShouldBe("fcm-A-updated");
+            (await ReadFirebaseTokenAsync(shortname, tokenB)).ShouldBe("fcm-B");
         }
         finally { await DeleteUserAsync(shortname); }
     }
@@ -122,6 +122,39 @@ public sealed class FirebaseTokenTests : IClassFixture<DmartFactory>
             var tokens = await users.GetSessionFirebaseTokensAsync(shortname);
             tokens.ShouldContain("fcm-list-1");
             tokens.ShouldNotContain((string?)null!);
+        }
+        finally { await DeleteUserAsync(shortname); }
+    }
+
+    // Regression: Python parity guarantees the bearer JWT is NEVER persisted
+    // in plaintext. A DB read should yield Argon2 PHC strings; the raw JWT
+    // must verify against the stored hash but must not appear verbatim.
+    [FactIfPg]
+    public async Task Session_Token_Stored_Hashed_Not_Raw()
+    {
+        var (shortname, password) = await CreateUserAsync();
+        try
+        {
+            var client = _factory.CreateClient();
+            var loginResp = await client.PostAsJsonAsync("/user/login",
+                new UserLoginRequest(shortname, null, null, password, null),
+                DmartJsonContext.Default.UserLoginRequest);
+            loginResp.StatusCode.ShouldBe(HttpStatusCode.OK);
+            var rawJwt = (await ExtractAccessTokenAsync(loginResp))!;
+
+            var db = _factory.Services.GetRequiredService<Db>();
+            var hasher = _factory.Services.GetRequiredService<PasswordHasher>();
+            await using var conn = await db.OpenAsync();
+            await using var cmd = new NpgsqlCommand(
+                "SELECT token FROM sessions WHERE shortname = $1", conn);
+            cmd.Parameters.Add(new() { Value = shortname });
+            await using var reader = await cmd.ExecuteReaderAsync();
+            (await reader.ReadAsync()).ShouldBeTrue();
+            var stored = reader.GetString(0);
+
+            stored.ShouldStartWith("$argon2id$");
+            stored.ShouldNotBe(rawJwt);
+            hasher.Verify(rawJwt, stored).ShouldBeTrue();
         }
         finally { await DeleteUserAsync(shortname); }
     }
@@ -174,14 +207,23 @@ public sealed class FirebaseTokenTests : IClassFixture<DmartFactory>
 
     // Read sessions.firebase_token directly — the repository exposes only the
     // write paths and a list-by-shortname read, both of which this test
-    // exercises elsewhere.
-    private async Task<string?> ReadFirebaseTokenAsync(string token)
+    // exercises elsewhere. Tokens are now Argon2-hashed in the DB (Python
+    // parity), so we iterate the user's session rows and Verify each.
+    private async Task<string?> ReadFirebaseTokenAsync(string shortname, string token)
     {
         var db = _factory.Services.GetRequiredService<Db>();
+        var hasher = _factory.Services.GetRequiredService<PasswordHasher>();
         await using var conn = await db.OpenAsync();
-        await using var cmd = new NpgsqlCommand("SELECT firebase_token FROM sessions WHERE token = $1", conn);
-        cmd.Parameters.Add(new() { Value = token });
-        var raw = await cmd.ExecuteScalarAsync();
-        return raw is string s ? s : null;
+        await using var cmd = new NpgsqlCommand(
+            "SELECT token, firebase_token FROM sessions WHERE shortname = $1", conn);
+        cmd.Parameters.Add(new() { Value = shortname });
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            var stored = reader.GetString(0);
+            if (!hasher.Verify(token, stored)) continue;
+            return reader.IsDBNull(1) ? null : reader.GetString(1);
+        }
+        return null;
     }
 }
