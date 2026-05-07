@@ -46,6 +46,52 @@ export async function getEntities(search: string) {
     return allRecordsArrays.flat();
 }
 
+/**
+ * Same query fan-out as `getEntities`, but invokes `onBatch` as each space's
+ * query resolves so callers can render results progressively. Returns a
+ * `cancel` handle so a newer search can ignore stale in-flight batches.
+ */
+export function streamEntitiesAcrossSpaces(
+    search: string,
+    onBatch: (records: any[], space: string) => void
+): { done: Promise<void>; cancel: () => void } {
+    let cancelled = false;
+
+    const done = (async () => {
+        const result = await getSpaces();
+        if (cancelled) return;
+        const spaces = result.records.map((space) => space.shortname);
+
+        await Promise.all(
+            spaces.map(async (space) => {
+                if (cancelled) return;
+                const queryRequest: QueryRequest = {
+                    filter_shortnames: [],
+                    type: QueryType.subpath,
+                    space_name: space,
+                    subpath: "/",
+                    exact_subpath: false,
+                    sort_by: "shortname",
+                    sort_type: SortType.ascending,
+                    search,
+                    retrieve_json_payload: true,
+                    retrieve_attachments: true,
+                };
+                const response: ApiQueryResponse = (await Dmart.query(queryRequest))!;
+                if (cancelled) return;
+                onBatch(response?.records ?? [], space);
+            })
+        );
+    })();
+
+    return {
+        done,
+        cancel: () => {
+            cancelled = true;
+        },
+    };
+}
+
 export async function getMyEntities(shortname: string = "") {
     const result = await getSpaces(false, DmartScope.managed, [
         MESSAGES_SPACE,

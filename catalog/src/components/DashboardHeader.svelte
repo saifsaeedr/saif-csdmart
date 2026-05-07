@@ -128,7 +128,7 @@
       <!-- Logo/Brand -->
       <div
         class={$user.signedin
-          ? "flex items-center pl-2 w-3/6"
+          ? "flex items-center pl-2 flex-1 min-w-0"
           : "flex items-center w-3/6"}
       >
         <a
@@ -212,7 +212,7 @@
           >
         </a>
         {#if $user.signedin}
-          <div class="w-4/6 ms-2">
+          <div class="flex-1 ms-2 min-w-0">
             <SearchBar />
           </div>
         {/if}
