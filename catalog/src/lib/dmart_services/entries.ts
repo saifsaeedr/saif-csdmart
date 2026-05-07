@@ -46,21 +46,50 @@ export async function getEntities(search: string) {
     return allRecordsArrays.flat();
 }
 
+export type StreamEntitiesOptions = {
+    // Restrict the fan-out to a single space (matches the "Current space:" tag chip).
+    spaceFilter?: string;
+    // Restrict the query to an exact subpath within each space (matches the
+    // "Current folder:" tag chip). Falsy = whole space.
+    subpathFilter?: string;
+    // Per-space row cap. Defaults to 50 to keep the dropdown DOM bounded
+    // when a space contains many entries.
+    limitPerSpace?: number;
+};
+
 /**
  * Same query fan-out as `getEntities`, but invokes `onBatch` as each space's
  * query resolves so callers can render results progressively. Returns a
  * `cancel` handle so a newer search can ignore stale in-flight batches.
+ *
+ * Per-space queries are isolated: if one space's query rejects, the failure
+ * is logged and the rest of the fan-out continues. The aggregate `done`
+ * promise still resolves so callers can flip their loading state.
  */
 export function streamEntitiesAcrossSpaces(
     search: string,
-    onBatch: (records: any[], space: string) => void
+    onBatch: (records: any[], space: string) => void,
+    options: StreamEntitiesOptions = {}
 ): { done: Promise<void>; cancel: () => void } {
     let cancelled = false;
+    const limit = options.limitPerSpace ?? 50;
 
     const done = (async () => {
-        const result = await getSpaces();
-        if (cancelled) return;
-        const spaces = result.records.map((space) => space.shortname);
+        let spaces: string[];
+        if (options.spaceFilter) {
+            spaces = [options.spaceFilter];
+        } else {
+            const result = await getSpaces();
+            if (cancelled) return;
+            spaces = result.records.map((space) => space.shortname);
+        }
+
+        const subpath = options.subpathFilter
+            ? options.subpathFilter.startsWith("/")
+                ? options.subpathFilter
+                : `/${options.subpathFilter}`
+            : "/";
+        const exactSubpath = !!options.subpathFilter;
 
         await Promise.all(
             spaces.map(async (space) => {
@@ -69,17 +98,24 @@ export function streamEntitiesAcrossSpaces(
                     filter_shortnames: [],
                     type: QueryType.subpath,
                     space_name: space,
-                    subpath: "/",
-                    exact_subpath: false,
+                    subpath,
+                    exact_subpath: exactSubpath,
                     sort_by: "shortname",
                     sort_type: SortType.ascending,
                     search,
+                    limit,
                     retrieve_json_payload: true,
                     retrieve_attachments: true,
                 };
-                const response: ApiQueryResponse = (await Dmart.query(queryRequest))!;
-                if (cancelled) return;
-                onBatch(response?.records ?? [], space);
+                try {
+                    const response: ApiQueryResponse = (await Dmart.query(queryRequest))!;
+                    if (cancelled) return;
+                    onBatch(response?.records ?? [], space);
+                } catch (error) {
+                    if (cancelled) return;
+                    log.error(`Search failed for space "${space}":`, error);
+                    onBatch([], space);
+                }
             })
         );
     })();

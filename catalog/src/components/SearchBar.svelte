@@ -27,14 +27,14 @@
       opts.push({
         type: "space",
         value: currentSpace,
-        label: `Current space: ${currentSpace}`,
+        label: $_("route_labels.search_current_space", { values: { value: currentSpace } }),
       });
     }
     if (currentFolder) {
       opts.push({
         type: "folder",
         value: currentFolder,
-        label: `Current folder: ${currentFolder}`,
+        label: $_("route_labels.search_current_folder", { values: { value: currentFolder } }),
       });
     }
     return opts.filter((o) => !tags.find((t) => t.type === o.type));
@@ -48,10 +48,12 @@
     if (tags.find((t) => t.type === tag.type)) return;
     tags = [...tags, tag];
     searchInput?.focus();
+    if (searchString.trim()) handleSearchChange();
   }
 
   function removeTag(tag: TagItem) {
     tags = tags.filter((t) => t.type !== tag.type);
+    if (searchString.trim()) handleSearchChange();
   }
 
   function handleDocumentClick(e: MouseEvent) {
@@ -66,7 +68,14 @@
     }
   }
 
-  let timeout: any;
+  function handleKeydown(e: KeyboardEvent) {
+    if (e.key === "Escape" && showDropdown) {
+      showDropdown = false;
+      searchInput?.blur();
+    }
+  }
+
+  let timeout: ReturnType<typeof setTimeout> | undefined;
   let searchToken = 0;
   let activeStream: { cancel: () => void } | null = null;
 
@@ -95,6 +104,9 @@
       entities = [];
       isProjectBeingFetched = true;
 
+      const spaceTag = tags.find((t) => t.type === "space");
+      const folderTag = tags.find((t) => t.type === "folder");
+
       const stream = streamEntitiesAcrossSpaces(
         searchString,
         (records, space) => {
@@ -113,8 +125,11 @@
             };
           });
 
-          if (token !== searchToken) return;
           entities = [...entities, ...enriched];
+        },
+        {
+          spaceFilter: spaceTag?.value,
+          subpathFilter: folderTag?.value,
         },
       );
 
@@ -167,6 +182,7 @@
 
   onMount(() => {
     document.addEventListener("click", handleDocumentClick);
+    document.addEventListener("keydown", handleKeydown);
   });
 
   onDestroy(() => {
@@ -174,6 +190,7 @@
     cancelActiveStream();
     if (typeof document !== "undefined") {
       document.removeEventListener("click", handleDocumentClick);
+      document.removeEventListener("keydown", handleKeydown);
     }
   });
 </script>
@@ -198,7 +215,7 @@
         <button
           type="button"
           class="search-tag-chip-remove"
-          aria-label="Remove tag"
+          aria-label={$_("route_labels.search_remove_tag")}
           onclick={(e) => {
             e.stopPropagation();
             removeTag(tag);
@@ -216,7 +233,7 @@
       type="text"
       placeholder={$_("route_labels.search_placeholder_short")}
       bind:value={searchString}
-      onkeyup={handleSearchChange}
+      oninput={handleSearchChange}
       onfocus={openDropdown}
       class="search-trigger-input"
     />
@@ -231,7 +248,7 @@
     >
       {#if searchString.trim().length === 0}
         {#if availableTagOptions.length === 0}
-          <div class="search-dropdown-empty">No filters available here</div>
+          <div class="search-dropdown-empty">{$_("route_labels.search_no_filters_available")}</div>
         {:else}
           {#each availableTagOptions as opt (opt.type)}
             <button
