@@ -185,10 +185,39 @@ public sealed class DmartSettings
 
     // Apple: id_token is a JWT signed with RS256 against one of the keys
     // published at https://appleid.apple.com/auth/keys. AppleClientId is the
-    // bundle id (iOS) or service id (web). Only the mobile / id-token flow
-    // is implemented — web-callback code exchange (which would need a signed
-    // ES256 client-assertion JWT) is stubbed out in OAuthHandlers.
+    // bundle id (iOS) or service id (web). Two flows are wired:
+    //
+    //   * Mobile / id-token: client supplies an Apple-issued id_token directly,
+    //     we verify it against JWKS. Requires only AppleClientId.
+    //   * Web callback (auth-code → token exchange): Apple POSTs to
+    //     AppleOauthCallback with a `code`, we exchange it at
+    //     https://appleid.apple.com/auth/token. Requires the full set:
+    //     AppleClientId + AppleTeamId + AppleKeyId + AppleP8PrivateKey
+    //     + AppleOauthCallback. The `client_secret` Apple's token endpoint
+    //     expects is itself a short-lived ES256-signed JWT — AppleProvider
+    //     mints it on the fly from AppleP8PrivateKey, so operators only set
+    //     credentials once instead of pre-baking a 6-month-expiry JWT.
     public string AppleClientId { get; set; } = "";
+
+    // Apple Developer Team ID — the 10-character identifier visible in the
+    // top-right of developer.apple.com. Used as the `iss` claim of the
+    // ES256-signed client_assertion JWT sent to Apple's token endpoint.
+    public string AppleTeamId { get; set; } = "";
+
+    // Key ID of the .p8 signing key (kid in the client_assertion JWT header).
+    // Pulled from the Apple Developer console alongside the .p8 file itself.
+    public string AppleKeyId { get; set; } = "";
+
+    // PEM-encoded EC private key (.p8 contents downloaded from Apple). The
+    // string MUST include the BEGIN/END PRIVATE KEY armor — newlines may be
+    // \n-escaped if loaded from .env. AppleProvider calls
+    // ECDsa.ImportFromPem on this verbatim.
+    public string AppleP8PrivateKey { get; set; } = "";
+
+    // Public callback URL registered with Apple. Apple POSTs the auth code
+    // here after a successful user consent. Required for the web-callback
+    // flow; ignored by the mobile/id-token flow.
+    public string AppleOauthCallback { get; set; } = "";
 
     public bool LogoutOnPwdChange { get; set; } = true;
     public int RequestTimeout { get; set; } = 35;
