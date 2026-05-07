@@ -397,7 +397,10 @@ switch (subcommand)
             new HistoryRepository(dbInst),
             new PermissionService(userRepo, accessRepo, refresher),
             new PluginManager(Array.Empty<IHookPlugin>(), Array.Empty<IApiPlugin>(),
-                new SpaceRepository(dbInst), nlog.CreateLogger<PluginManager>()),
+                new SpaceRepository(dbInst),
+                new SpaceEventLogger(Microsoft.Extensions.Options.Options.Create(s),
+                    nlog.CreateLogger<SpaceEventLogger>()),
+                nlog.CreateLogger<PluginManager>()),
             new SchemaValidator(entryRepo, nlog.CreateLogger<SchemaValidator>()),
             new WorkflowEngine(entryRepo, nlog.CreateLogger<WorkflowEngine>()),
             nlog.CreateLogger<EntryService>());
@@ -1093,6 +1096,12 @@ builder.Services.AddOptions<DmartSettings>()
 builder.Services.AddOptions<DmartSettings>().ValidateOnStart();
 builder.Services.Configure<SpacesOptions>(builder.Configuration.GetSection("Spaces"));
 
+// Channel-auth registry — loads `~/.dmart/channels.json` (or
+// settings.ChannelsConfigPath) once, pre-compiles regexes. The middleware
+// short-circuits when EnableChannelAuth=false, so the singleton is essentially
+// free in deployments that don't opt in.
+builder.Services.AddSingleton<ChannelsRegistry>();
+
 // SQL backend
 builder.Services.AddSingleton<Db>();
 builder.Services.AddSingleton<AuthzCacheRefresher>();
@@ -1164,6 +1173,10 @@ builder.Services.AddSingleton<QueryService>();
 builder.Services.AddSingleton<UserService>();
 builder.Services.AddSingleton<WorkflowEngine>();
 builder.Services.AddSingleton<WorkflowService>();
+// SpaceEventLogger captures inbound request headers (Python parity, minus
+// cookie/authorization) into the audit log; needs IHttpContextAccessor.
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddSingleton<SpaceEventLogger>();
 builder.Services.AddSingleton<PluginManager>();
 builder.Services.AddSingleton<LanguageLoader>();
 builder.Services.AddSingleton<LockService>();
@@ -1314,6 +1327,13 @@ app.Use(async (ctx, next) =>
 
 // CORS + security headers + OPTIONS preflight
 app.UseDmartResponseHeaders();
+
+// Channel-auth gate (Python parity: utils/middleware.py::ChannelMiddleware).
+// No-op when ENABLE_CHANNEL_AUTH=false. Placed after the response-headers
+// middleware so OPTIONS preflights and CORS headers are handled first, and
+// before route matching so the gate is evaluated for every request, including
+// 404 paths that would otherwise probe the surface area unauthenticated.
+app.UseChannelAuth();
 
 // Python parity: unmatched API routes return INVALID_ROUTE (230) under
 // type=request with HTTP 422, instead of an empty 404 body. Registered BEFORE

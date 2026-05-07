@@ -3,6 +3,7 @@ using Dmart.DataAdapters.Sql;
 using Dmart.Models.Core;
 using Dmart.Models.Enums;
 using Dmart.Models.Json;
+using Dmart.Services;
 
 namespace Dmart.Plugins;
 
@@ -32,6 +33,7 @@ public sealed class PluginManager(
     IEnumerable<IHookPlugin> hookPluginInstances,
     IEnumerable<IApiPlugin> apiPluginInstances,
     SpaceRepository spaces,
+    SpaceEventLogger eventLogger,
     ILogger<PluginManager> log)
 {
     // shortname -> instance lookup for both kinds
@@ -228,6 +230,20 @@ public sealed class PluginManager(
 
     public async Task AfterActionAsync(Event e, CancellationToken ct = default)
     {
+        // Audit-log every after-action event before plugin dispatch — this is
+        // the parity hook for Python's spaces_folder/<space>/.dm/events.jsonl.log.
+        // Logging first means the trail captures actions even if a plugin later
+        // throws (it's an after-the-fact record of what already happened in PG).
+        //
+        // DELIBERATE PARITY DIVERGENCE: Python implements action_log as a
+        // regular plugin, so a space whose `active_plugins` excludes
+        // `action_log` produces no audit lines. The C# port treats audit as
+        // first-class and runs it unconditionally — so the only switch is
+        // global (DmartSettings.SpacesFolder being non-empty). Operators
+        // relying on per-space disable should set SpacesFolder="" and
+        // surface the audit trail elsewhere (e.g. PG history).
+        await eventLogger.LogAsync(e, ct);
+
         if (!_after.TryGetValue(e.ActionType, out var plugins)) return;
         var spaceActive = await GetSpaceActivePluginsAsync(e.SpaceName, ct);
         if (spaceActive is null) return;

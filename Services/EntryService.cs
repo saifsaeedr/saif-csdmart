@@ -436,6 +436,13 @@ public sealed class EntryService(
             SchemaShortname = entry.Payload?.SchemaShortname,
             UserShortname = actor ?? "anonymous",
             Attributes = attrs,
+            // Snapshot the resource fields Python's action_log captures inside
+            // the `resource` (Locator) block — so the audit log can render the
+            // same nested shape without re-fetching the entry.
+            Uuid = entry.Uuid,
+            Displayname = entry.Displayname,
+            Description = entry.Description,
+            Tags = entry.Tags,
         };
     }
 

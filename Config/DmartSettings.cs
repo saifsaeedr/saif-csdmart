@@ -193,6 +193,31 @@ public sealed class DmartSettings
     public bool LogoutOnPwdChange { get; set; } = true;
     public int RequestTimeout { get; set; } = 35;
 
+    // ---- Channel authentication (Python parity) ----
+    // When enabled, an opt-in API gate keyed off the `x-channel-key` request
+    // header. Matches dmart Python's ChannelMiddleware (utils/middleware.py):
+    //
+    //   * No header  → request passes UNLESS the path matches an
+    //                  `allowed_api_patterns` regex on any configured channel
+    //                  (those paths are channel-restricted by definition).
+    //   * Header set → must match a channel's `keys` list AND the path must
+    //                  match one of that channel's `allowed_api_patterns`,
+    //                  else the gate returns HTTP 403 with type="channel_auth".
+    //
+    // Channel definitions live in a JSON file (see ChannelsConfigPath). When
+    // EnableChannelAuth is false the middleware is a no-op regardless of file
+    // contents. Mirrors Python's `enable_channel_auth` flag.
+    public bool EnableChannelAuth { get; set; }
+
+    // Filesystem path to the channels JSON file. Empty = default
+    // `~/.dmart/channels.json`. The file holds an array of channel objects,
+    // each with `name`, `keys` (list of strings), and `allowed_api_patterns`
+    // (list of regex patterns matched anywhere within request.Path). When the
+    // file is missing or unreadable we log a warning and treat the channel
+    // list as empty — combined with EnableChannelAuth=true, that means every
+    // header-bearing request is rejected (same behavior as Python).
+    public string ChannelsConfigPath { get; set; } = "";
+
     // Timeout (seconds) for the `jq` subprocess invoked when a join sub-query
     // carries a jq_filter expression. Python default (backend/utils/settings.py).
     public int JqTimeout { get; set; } = 2;
@@ -204,6 +229,14 @@ public sealed class DmartSettings
     // Optional log file path. Empty = stdout only (container-friendly).
     // Python default: "../logs/dmart.ljson.log"
     public string LogFile { get; set; } = "";
+
+    // Filesystem root for per-space audit log files. When set, every
+    // after-action event is appended to "{SpacesFolder}/{space}/.dm/events.jsonl.log"
+    // — one JSON object per line — for parity with Python dmart's
+    // spaces_folder/<space>/.dm/events.jsonl.log audit trail. The C# port keeps
+    // entry data in PostgreSQL, so this is purely an append-only log; no other
+    // code path reads it. Empty = disabled (no log files written).
+    public string SpacesFolder { get; set; } = "";
     // Log level: trace, debug, information, warning, error, critical, none.
     // Default "information" matches Python. Set to "warning" in production
     // to reduce noise.

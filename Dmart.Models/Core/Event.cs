@@ -16,4 +16,14 @@ public sealed record Event
     public string? SchemaShortname { get; init; }
     public Dictionary<string, object> Attributes { get; init; } = new();
     public required string UserShortname { get; init; }
+
+    // Resource snapshot fields, populated by EntryService.BuildEvent so the
+    // SpaceEventLogger can serialize the same nested `resource` block Python
+    // dmart's action_log writes (uuid + displayname/description/tags +
+    // schema_shortname). Optional — when null, the writer either omits the
+    // key (matching Python's pydantic JsonOmitNull) or emits null per shape.
+    public string? Uuid { get; init; }
+    public Translation? Displayname { get; init; }
+    public Translation? Description { get; init; }
+    public List<string>? Tags { get; init; }
 }

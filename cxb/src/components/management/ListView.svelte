@@ -28,7 +28,7 @@
     import ListViewActionBar from "@/components/management/ListViewActionBar.svelte";
     import {currentListView} from "@/stores/global";
     import {untrack, onDestroy} from "svelte";
-    import {getAttributeValue, getRowsPerPageSetting} from "@/utils/listViewUtils";
+    import {filterRequestHeaders, getAttributeValue, getRowsPerPageSetting} from "@/utils/listViewUtils";
     import {website} from "@/config";
     import {authToken} from "@/stores/auth";
 
@@ -327,21 +327,11 @@
         if (type === QueryType.events) {
             open = true;
 
-            const blacklist = ["sec", "content-type", "accept", "host", "connection"];
-            modalData = structuredClone(record);
+            modalData = $state.snapshot(record);
 
             if (modalData?.attributes?.attributes?.request_headers) {
-                modalData.attributes.attributes.request_headers = Object.keys(
+                modalData.attributes.attributes.request_headers = filterRequestHeaders(
                     modalData.attributes.attributes.request_headers,
-                ).reduce(
-                    (acc, key) =>
-                        blacklist.some((item) => key.includes(item))
-                            ? acc
-                            : {
-                                ...acc,
-                                [key]: modalData.attributes.attributes.request_headers[key],
-                            },
-                    {},
                 );
             }
             return;

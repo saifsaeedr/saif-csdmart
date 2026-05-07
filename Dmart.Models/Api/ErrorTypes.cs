@@ -50,4 +50,10 @@ public static class ErrorTypes
 
     // QR-code generator endpoint failure.
     public const string Qr = "qr";
+
+    // Channel-authentication gate (utils/middleware.py::ChannelMiddleware in
+    // Python). Surfaced when ENABLE_CHANNEL_AUTH=true and the request either
+    // omits the x-channel-key header for a channel-restricted path or supplies
+    // a key that doesn't grant access to the requested path.
+    public const string ChannelAuth = "channel_auth";
 }

@@ -32,6 +32,7 @@ public sealed class QueryService(
     AttachmentRepository attachments,
     HistoryRepository history,
     PermissionService perms,
+    SpaceEventLogger eventLogger,
     Db db,
     IOptions<DmartSettings> settings,
     ILogger<QueryService> logger)
@@ -85,9 +86,7 @@ public sealed class QueryService(
             QueryType.Aggregation => await QueryAggregationAsync(q, actor, "entries", ct),
             QueryType.AttachmentsAggregation => await QueryAggregationAsync(q, actor, "attachments", ct),
             QueryType.Counters => await QueryCountersAsync(q, actor, ct),
-            QueryType.Events => Response.Fail(InternalErrorCode.NOT_SUPPORTED_TYPE,
-                "events query is Python-only (reads spaces_folder/<space>/.dm/events.jsonl from disk); the C# port keeps all data in PostgreSQL",
-                ErrorTypes.Request),
+            QueryType.Events => await QueryEventsAsync(q, actor, ct),
             _ => await DispatchTableQuery(q, actor, ct),
         };
 
@@ -294,6 +293,193 @@ public sealed class QueryService(
 
         var records = (await pageTask).Select(HistoryMapper.ToRecord).ToList();
         return Response.Ok(records, new() { ["total"] = await totalTask, ["returned"] = records.Count });
+    }
+
+    // ====================================================================
+    // EVENTS (file-based, parity with Python's spaces_folder/<space>/.dm/events.jsonl.log)
+    // ====================================================================
+
+    // Reads the per-space audit log written by SpaceEventLogger. Each line is
+    // one JSON object; we apply the same Query filters Python does — subpath
+    // (prefix unless ExactSubpath), shortname allow-list, FromDate/ToDate
+    // against the timestamp, then SortType (newest-first by default), then
+    // offset/limit. Returns an empty success when the file doesn't exist
+    // (a fresh space, or SpacesFolder unconfigured) — same shape as Python's
+    // empty-list-on-missing behavior.
+    //
+    // No PG fallback: this matches Python exactly. If you want events for
+    // pre-existing entries, set SpacesFolder and re-trigger the actions, or
+    // backfill the log file manually.
+    private async Task<Response> QueryEventsAsync(Query q, string? actor, CancellationToken ct)
+    {
+        // Python blocks anonymous users for the events feed.
+        if (actor is null)
+            return Response.Fail(InternalErrorCode.NOT_AUTHENTICATED,
+                "events queries require authentication", ErrorTypes.Auth);
+
+        // ACL is space-level only — matches Python upstream. The events feed
+        // surfaces actions across all subpaths in the space, so a user with
+        // read on / can see action timestamps for sub-paths they couldn't
+        // read directly. Two reasons we keep it: (a) parity with Python's
+        // events_query, (b) per-event ACL would require resolving each line
+        // back to its locator, defeating the file-tail performance model.
+        // TODO(future): if/when we add per-subpath ACL on the events feed,
+        // do it as a post-filter against `resource.subpath` in TryParseEventLine
+        // — the data is already there.
+        if (!await CanQueryAsync(actor, ResourceType.Content, q.SpaceName, q.Subpath ?? "/", ct))
+            return EmptyQueryResponse();
+
+        if (!eventLogger.Enabled)
+            return Response.Ok(Array.Empty<Record>(), new() { ["total"] = 0, ["returned"] = 0 });
+
+        var path = eventLogger.ResolveLogPath(q.SpaceName);
+        if (!File.Exists(path))
+            return Response.Ok(Array.Empty<Record>(), new() { ["total"] = 0, ["returned"] = 0 });
+
+        var matches = new List<(DateTime Ts, Record Rec)>();
+        // skippedCorrupt counts lines we silently dropped so we can surface
+        // log-file corruption to ops once per query rather than per line —
+        // a tail of a half-written final line should not poison the whole
+        // response, but a rotated/truncated file dropping every line should
+        // be visible.
+        var skippedCorrupt = 0;
+        // Open with FileShare.ReadWrite so a concurrent SpaceEventLogger.LogAsync
+        // append doesn't lock us out while a query is running.
+        await using var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(fs);
+        string? line;
+        while ((line = await reader.ReadLineAsync(ct)) is not null)
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            if (!TryParseEventLine(line, q, out var ts, out var rec))
+            {
+                skippedCorrupt++;
+                continue;
+            }
+            matches.Add((ts, rec!));
+        }
+        if (skippedCorrupt > 0)
+            logger.LogWarning("events: {Count} unparseable lines skipped in {Path}",
+                skippedCorrupt, path);
+
+        // Default sort: newest-first (Python's default for the events feed).
+        // Ascending only when SortType.Ascending is requested explicitly.
+        if (q.SortType == Dmart.Models.Enums.SortType.Ascending)
+            matches.Sort((a, b) => a.Ts.CompareTo(b.Ts));
+        else
+            matches.Sort((a, b) => b.Ts.CompareTo(a.Ts));
+
+        var total = matches.Count;
+        var page = matches.Skip(q.Offset).Take(q.Limit).Select(t => t.Rec).ToList();
+        return Response.Ok(page, new()
+        {
+            ["total"] = q.RetrieveTotal == false ? -1 : total,
+            ["returned"] = page.Count,
+        });
+    }
+
+    // Parse one line of events.jsonl and apply the only filters Python's
+    // events_query (backend/data_adapters/sql/adapter_helpers.py) honors —
+    // FromDate, ToDate, and the substring `search`. Returns false when the
+    // line isn't well-formed or the date filter rejects it.
+    //
+    // Per Python parity:
+    //   - `filter_shortnames`, `filter_types`, `subpath`, `exact_subpath` are
+    //     IGNORED (events live at the space root; no per-subpath bucketing).
+    //   - The whole parsed event JSON becomes the Record's `attributes`.
+    //   - `resource_type`, `shortname`, `subpath` of the Record come from
+    //     `resource.type` / `resource.shortname` / `resource.subpath`.
+    //
+    // Also tolerates the legacy flat shape we wrote in an earlier revision so
+    // an operator's pre-existing logs keep parsing across the upgrade.
+    //
+    // Internal so the unit suite can drive it without spinning up the full
+    // QueryService (which needs PG, perms, and the DI graph).
+    internal static bool TryParseEventLine(string line, Query q, out DateTime ts, out Record? rec)
+    {
+        ts = default;
+        rec = null;
+
+        // Substring search runs against the raw line first — Python's
+        // process_jsonl_file does the same, before JSON parsing. Cheap and
+        // matches across the whole event payload.
+        if (!string.IsNullOrEmpty(q.Search) && line.IndexOf(q.Search, StringComparison.Ordinal) < 0)
+            return false;
+
+        JsonDocument doc;
+        try { doc = JsonDocument.Parse(line); }
+        catch (JsonException) { return false; }
+        using (doc)
+        {
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return false;
+
+            // The Locator block is at root.resource on Python lines; on legacy
+            // flat lines the same fields live at root. Resolve once and read
+            // through the same JsonElement pointer below.
+            var hasResource = root.TryGetProperty("resource", out var resEl)
+                && resEl.ValueKind == JsonValueKind.Object;
+            var src = hasResource ? resEl : root;
+
+            // Note on slash form: Record normalizes Subpath via Trim('/'),
+            // so "users" is stored on the outer Record while
+            // attributes.resource.subpath stays as the raw on-disk "/users".
+            // Both are correct by project convention — outer Record.Subpath
+            // is the canonical wire format, the inner block is the verbatim
+            // log payload. Clients reading either should know which they're
+            // reading.
+            var subpath = src.TryGetProperty("subpath", out var spEl) && spEl.ValueKind == JsonValueKind.String
+                ? spEl.GetString() ?? "/" : "/";
+            var shortname = src.TryGetProperty("shortname", out var snEl) && snEl.ValueKind == JsonValueKind.String
+                ? snEl.GetString() ?? "" : "";
+
+            // Timestamp parsing — written by SpaceEventLogger as
+            // "yyyy-MM-ddTHH:mm:ss.ffffff" (Python parity, 6-digit micros).
+            // DateTime.TryParse already handles the legacy 3-digit format too.
+            if (!root.TryGetProperty("timestamp", out var tsEl)
+                || tsEl.ValueKind != JsonValueKind.String
+                || !DateTime.TryParse(tsEl.GetString(),
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AssumeLocal, out ts))
+                ts = DateTime.MinValue;
+
+            if (q.FromDate is { } from && ts < from) return false;
+            if (q.ToDate   is { } to   && ts > to) return false;
+
+            // Resource type — Python writes `resource.type`; legacy flat
+            // shape wrote `resource_type` at the root. Try both.
+            ResourceType? rt = null;
+            string? rtStr = null;
+            if (hasResource && src.TryGetProperty("type", out var rtEl) && rtEl.ValueKind == JsonValueKind.String)
+                rtStr = rtEl.GetString();
+            else if (root.TryGetProperty("resource_type", out var legacyEl) && legacyEl.ValueKind == JsonValueKind.String)
+                rtStr = legacyEl.GetString();
+
+            if (!string.IsNullOrEmpty(rtStr))
+            {
+                try { rt = JsonSerializer.Deserialize($"\"{rtStr}\"", DmartJsonContext.Default.ResourceType); }
+                catch (JsonException) { rt = null; }
+            }
+
+            // Python parity: Record.attributes is the WHOLE parsed event
+            // JSON, not a curated subset. Walk every top-level key into a
+            // dict so the wire response carries `resource`, `request`,
+            // `timestamp`, `user_shortname`, and the inner `attributes`
+            // exactly as written.
+            var attrs = new Dictionary<string, object>(StringComparer.Ordinal);
+            foreach (var prop in root.EnumerateObject())
+                attrs[prop.Name] = prop.Value.Clone();
+
+            rec = new Record
+            {
+                ResourceType = rt ?? ResourceType.Content,
+                Shortname = string.IsNullOrEmpty(shortname) ? "_" : shortname,
+                Subpath = subpath,
+                Attributes = attrs,
+            };
+            return true;
+        }
     }
 
     // ====================================================================

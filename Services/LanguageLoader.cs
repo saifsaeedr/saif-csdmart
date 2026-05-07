@@ -9,12 +9,16 @@ namespace Dmart.Services;
 // Port of dmart Python's backend/languages/loader.py.
 //
 // Single source of truth for translated strings (invitation_message,
-// reset_message, state labels, ...). Loads from two sources, in order:
+// reset_message, otp_message, state labels, ...). Loads from three sources:
 //   1. Embedded resources whose name matches "*.languages.*.json" inside
 //      this assembly — always present in the AOT release binary because
 //      dmart.csproj does <EmbeddedResource Include="languages/*.json" />.
 //   2. Filesystem fallback at {BaseDir}/languages and {Cwd}/languages —
 //      lets tests / dotnet-run from source override without rebuilding.
+//      Only fills file-level gaps left by the embedded pass.
+//   3. ~/.dmart/languages/*.json — operator override that merges per-key
+//      onto whatever (1)+(2) produced, so a deployment can change a single
+//      message without shipping a full locale file.
 // Shape mirrors Python's `languages: dict[str, dict[str, str]]`, keyed by
 // the file stem ("english", "arabic", "kurdish").
 public sealed class LanguageLoader(ILogger<LanguageLoader> log)
@@ -90,6 +94,41 @@ public sealed class LanguageLoader(ILogger<LanguageLoader> log)
                 catch (Exception ex)
                 {
                     log.LogError(ex, "language load failed: {File}", file);
+                }
+            }
+        }
+
+        // Strategy 3: ~/.dmart/languages/ — operator override. Unlike (2),
+        // this merges per-key into the existing dict so the user can change
+        // a single string (e.g. otp_message) without copying the whole file.
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (!string.IsNullOrEmpty(home))
+        {
+            var userRoot = Path.Combine(home, ".dmart", "languages");
+            if (Directory.Exists(userRoot))
+            {
+                foreach (var file in Directory.EnumerateFiles(userRoot, "*.json"))
+                {
+                    var stem = Path.GetFileNameWithoutExtension(file);
+                    try
+                    {
+                        var bytes = File.ReadAllBytes(file);
+                        var dict = JsonSerializer.Deserialize(bytes, DmartJsonContext.Default.DictionaryStringString);
+                        if (dict is null) continue;
+                        if (loaded.TryGetValue(stem, out var existing))
+                        {
+                            foreach (var (k, v) in dict) existing[k] = v;
+                        }
+                        else
+                        {
+                            loaded[stem] = new Dictionary<string, string>(dict, StringComparer.OrdinalIgnoreCase);
+                        }
+                        if (!sources.Contains("~/.dmart")) sources.Add("~/.dmart");
+                    }
+                    catch (Exception ex)
+                    {
+                        log.LogError(ex, "language load failed: {File}", file);
+                    }
                 }
             }
         }
