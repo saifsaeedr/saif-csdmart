@@ -126,9 +126,9 @@ public sealed class FirebaseTokenTests : IClassFixture<DmartFactory>
         finally { await DeleteUserAsync(shortname); }
     }
 
-    // Regression: Python parity guarantees the bearer JWT is NEVER persisted
-    // in plaintext. A DB read should yield Argon2 PHC strings; the raw JWT
-    // must verify against the stored hash but must not appear verbatim.
+    // Regression: the bearer JWT is NEVER persisted in plaintext. The column
+    // holds a keyed HMAC-SHA256 hex digest of the raw JWT; the raw JWT must
+    // hash to the stored value but must not appear verbatim.
     [FactIfPg]
     public async Task Session_Token_Stored_Hashed_Not_Raw()
     {
@@ -143,7 +143,7 @@ public sealed class FirebaseTokenTests : IClassFixture<DmartFactory>
             var rawJwt = (await ExtractAccessTokenAsync(loginResp))!;
 
             var db = _factory.Services.GetRequiredService<Db>();
-            var hasher = _factory.Services.GetRequiredService<PasswordHasher>();
+            var tokenHasher = _factory.Services.GetRequiredService<SessionTokenHasher>();
             await using var conn = await db.OpenAsync();
             await using var cmd = new NpgsqlCommand(
                 "SELECT token FROM sessions WHERE shortname = $1", conn);
@@ -152,9 +152,11 @@ public sealed class FirebaseTokenTests : IClassFixture<DmartFactory>
             (await reader.ReadAsync()).ShouldBeTrue();
             var stored = reader.GetString(0);
 
-            stored.ShouldStartWith("$argon2id$");
+            // 64 lowercase hex chars (SHA-256 / HMAC-SHA256 output).
+            stored.Length.ShouldBe(64);
+            stored.ShouldMatch("^[0-9a-f]{64}$");
             stored.ShouldNotBe(rawJwt);
-            hasher.Verify(rawJwt, stored).ShouldBeTrue();
+            stored.ShouldBe(tokenHasher.Hash(rawJwt));
         }
         finally { await DeleteUserAsync(shortname); }
     }
@@ -207,23 +209,18 @@ public sealed class FirebaseTokenTests : IClassFixture<DmartFactory>
 
     // Read sessions.firebase_token directly — the repository exposes only the
     // write paths and a list-by-shortname read, both of which this test
-    // exercises elsewhere. Tokens are now Argon2-hashed in the DB (Python
-    // parity), so we iterate the user's session rows and Verify each.
+    // exercises elsewhere. Tokens are stored as keyed HMAC hex digests, so we
+    // hash the raw token once and look it up directly.
     private async Task<string?> ReadFirebaseTokenAsync(string shortname, string token)
     {
         var db = _factory.Services.GetRequiredService<Db>();
-        var hasher = _factory.Services.GetRequiredService<PasswordHasher>();
+        var tokenHasher = _factory.Services.GetRequiredService<SessionTokenHasher>();
         await using var conn = await db.OpenAsync();
         await using var cmd = new NpgsqlCommand(
-            "SELECT token, firebase_token FROM sessions WHERE shortname = $1", conn);
+            "SELECT firebase_token FROM sessions WHERE shortname = $1 AND token = $2", conn);
         cmd.Parameters.Add(new() { Value = shortname });
-        await using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
-        {
-            var stored = reader.GetString(0);
-            if (!hasher.Verify(token, stored)) continue;
-            return reader.IsDBNull(1) ? null : reader.GetString(1);
-        }
-        return null;
+        cmd.Parameters.Add(new() { Value = tokenHasher.Hash(token) });
+        var raw = await cmd.ExecuteScalarAsync();
+        return raw is string s ? s : null;
     }
 }
