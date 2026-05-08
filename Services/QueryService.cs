@@ -496,6 +496,8 @@ public sealed class QueryService(
         var policies = await perms.BuildUserQueryPoliciesAsync(actor, q.SpaceName, q.Subpath ?? "/", ct);
         if (policies.Count == 0) return EmptyQueryResponse();
 
+        q = await MergeFilterFieldsValuesAsync(q, policies, actor, ct);
+
         var effectiveActor = actor ?? PermissionService.AnonymousUser;
 
         // SQL: unnest tags jsonb array, group by tag, count.
@@ -561,6 +563,12 @@ public sealed class QueryService(
         var policies = await perms.BuildUserQueryPoliciesAsync(actor, q.SpaceName, q.Subpath ?? "/", ct);
         if (policies.Count == 0) return EmptyQueryResponse();
 
+        // Python parity (adapter.py:1529-1566): merge per-permission
+        // filter_fields_values into q.Search before SQL is built. Each
+        // matching permission contributes a `@field:value` clause that
+        // narrows the result set to rows the user is authorized to see.
+        q = await MergeFilterFieldsValuesAsync(q, policies, actor, ct);
+
         var effectiveActor = actor ?? PermissionService.AnonymousUser;
         var pageTask = entries.QueryAsync(q, effectiveActor, policies, ct);
         var totalTask = q.RetrieveTotal == false
@@ -621,6 +629,8 @@ public sealed class QueryService(
         // Python parity (adapter.py:1510-1520): policy list is the only gate.
         var policies = await perms.BuildUserQueryPoliciesAsync(actor, q.SpaceName, q.Subpath ?? "/", ct);
         if (policies.Count == 0) return EmptyQueryResponse();
+
+        q = await MergeFilterFieldsValuesAsync(q, policies, actor, ct);
 
         var effectiveActor = actor ?? PermissionService.AnonymousUser;
         var rows = await QueryHelper.RunAggregationAsync(db, tableName, q, ct, effectiveActor, policies);
@@ -710,6 +720,7 @@ public sealed class QueryService(
                 // Python parity: policy list is the only gate (no rt-specific preflight).
                 var policies = await perms.BuildUserQueryPoliciesAsync(actor, q.SpaceName, q.Subpath ?? "/", ct);
                 if (policies.Count == 0) return EmptyQueryResponse();
+                q = await MergeFilterFieldsValuesAsync(q, policies, actor, ct);
                 total = await entries.CountQueryAsync(q, actor ?? PermissionService.AnonymousUser, policies, ct);
             }
         }
@@ -717,6 +728,7 @@ public sealed class QueryService(
         {
             var policies = await perms.BuildUserQueryPoliciesAsync(actor, q.SpaceName, q.Subpath ?? "/", ct);
             if (policies.Count == 0) return EmptyQueryResponse();
+            q = await MergeFilterFieldsValuesAsync(q, policies, actor, ct);
             total = await entries.CountQueryAsync(q, actor ?? PermissionService.AnonymousUser, policies, ct);
         }
 
@@ -1080,6 +1092,135 @@ public sealed class QueryService(
         bool b => b ? "True" : "False",  // Python str(True) == "True"
         _ => Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture) ?? "",
     };
+
+    // ====================================================================
+    // FILTER FIELDS VALUES (row-level ACL via search-clause merge)
+    // ====================================================================
+    // Mirrors Python's adapter.py:1529-1566 — every permission can carry a
+    // `filter_fields_values` string (RediSearch-style `@field:value` clause)
+    // that further restricts which rows the holder is allowed to see. We
+    // build the per-permission map, intersect it with the request's
+    // resolved query policies, and merge the resulting clauses into
+    // q.Search alongside the @space_name / @subpath / @resource_type
+    // restriction so the SQL layer narrows the page accordingly.
+    private async Task<Query> MergeFilterFieldsValuesAsync(
+        Query q, List<string> policies, string? actor, CancellationToken ct)
+    {
+        var userShortname = actor ?? PermissionService.AnonymousUser;
+        var userPermissions = await access.GenerateUserPermissionsAsync(userShortname, ct);
+        return MergeFilterFieldsValues(q, policies, userPermissions);
+    }
+
+    // Pure logic split out of MergeFilterFieldsValuesAsync so it's
+    // testable without spinning up an AccessRepository / DB.
+    internal static Query MergeFilterFieldsValues(
+        Query q, List<string> policies, Dictionary<string, object> userPermissions)
+    {
+        if (userPermissions.Count == 0) return DedupeSearchTokens(q);
+
+        // Mirror adapter.py: filtered_policies subset by space:subpath
+        // (and filter_types when present).
+        var subpathTarget = string.IsNullOrEmpty(q.Subpath) || q.Subpath == "/"
+            ? "/" : q.Subpath.TrimStart('/');
+
+        List<string> filteredPolicies;
+        if (q.FilterTypes is { Count: > 0 } fts)
+        {
+            // Python's loop reassigns `filtered_policies` on each iteration,
+            // so only the LAST filter_type's matches survive. Preserve that.
+            filteredPolicies = new();
+            foreach (var ft in fts)
+            {
+                var rtStr = JsonbHelpers.EnumMember(ft);
+                var target = $"{q.SpaceName}:{subpathTarget}:{rtStr}";
+                filteredPolicies = policies
+                    .Where(p => p.StartsWith(target, StringComparison.Ordinal))
+                    .ToList();
+            }
+        }
+        else
+        {
+            var target = $"{q.SpaceName}:{subpathTarget}";
+            filteredPolicies = policies
+                .Where(p => p.StartsWith(target, StringComparison.Ordinal))
+                .ToList();
+        }
+
+        var ffvSpaces = new List<string>();
+        var ffvSubpaths = new List<string>();
+        var ffvResourceTypes = new List<string>();
+        var ffvQuery = new List<string>();
+
+        foreach (var policy in filteredPolicies)
+        {
+            foreach (var (permKey, permEntry) in userPermissions)
+            {
+                if (!policy.StartsWith(permKey, StringComparison.Ordinal)) continue;
+
+                var ffv = ExtractFilterFieldsValues(permEntry);
+                if (string.IsNullOrEmpty(ffv)) continue;
+
+                if (!ffvQuery.Contains(ffv)) ffvQuery.Add(ffv);
+                var parts = permKey.Split(':');
+                if (parts.Length < 3) continue;
+                ffvSpaces.Add(parts[0]);
+                ffvSubpaths.Add(parts[1]);
+                ffvResourceTypes.Add(parts[2]);
+            }
+        }
+
+        if (ffvSpaces.Count == 0) return DedupeSearchTokens(q);
+
+        var permKeyQuery =
+            $"@space_name:{string.Join("|", ffvSpaces)} " +
+            $"@subpath:/{string.Join("|/", ffvSubpaths)} " +
+            $"@resource_type:{string.Join("|", ffvResourceTypes)} " +
+            string.Join(" ", ffvQuery);
+
+        var newSearch = string.IsNullOrEmpty(q.Search)
+            ? permKeyQuery
+            : $"{q.Search} {permKeyQuery}";
+
+        return DedupeSearchTokens(q with { Search = newSearch });
+    }
+
+    internal static Query DedupeSearchTokens(Query q)
+    {
+        if (string.IsNullOrEmpty(q.Search)) return q;
+        var parts = q.Search.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var deduped = new List<string>(parts.Length);
+        foreach (var p in parts)
+            if (seen.Add(p)) deduped.Add(p);
+        if (deduped.Count == parts.Length) return q;
+        return q with { Search = string.Join(' ', deduped) };
+    }
+
+    // user_permissions values come either as Dictionary<string,object>
+    // (freshly built by GenerateUserPermissionsAsync) or as JsonElement
+    // (when round-tripped through the userpermissionscache JSONB column).
+    // Handle both.
+    internal static string? ExtractFilterFieldsValues(object permEntry)
+    {
+        switch (permEntry)
+        {
+            case Dictionary<string, object> dict
+                when dict.TryGetValue("filter_fields_values", out var v):
+                return v switch
+                {
+                    string s => string.IsNullOrEmpty(s) ? null : s,
+                    JsonElement je when je.ValueKind == JsonValueKind.String
+                        => je.GetString() is { Length: > 0 } gs ? gs : null,
+                    _ => null,
+                };
+            case JsonElement je when je.ValueKind == JsonValueKind.Object
+                && je.TryGetProperty("filter_fields_values", out var v2)
+                && v2.ValueKind == JsonValueKind.String:
+                return v2.GetString() is { Length: > 0 } s2 ? s2 : null;
+            default:
+                return null;
+        }
+    }
 }
 
 // ========================================================================
