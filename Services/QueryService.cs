@@ -496,6 +496,8 @@ public sealed class QueryService(
         var policies = await perms.BuildUserQueryPoliciesAsync(actor, q.SpaceName, q.Subpath ?? "/", ct);
         if (policies.Count == 0) return EmptyQueryResponse();
 
+        q = await MergeFilterFieldsValuesAsync(q, policies, actor, ct);
+
         var effectiveActor = actor ?? PermissionService.AnonymousUser;
 
         // SQL: unnest tags jsonb array, group by tag, count.
@@ -561,6 +563,12 @@ public sealed class QueryService(
         var policies = await perms.BuildUserQueryPoliciesAsync(actor, q.SpaceName, q.Subpath ?? "/", ct);
         if (policies.Count == 0) return EmptyQueryResponse();
 
+        // Python parity (adapter.py:1529-1566): merge per-permission
+        // filter_fields_values into q.Search before SQL is built. Each
+        // matching permission contributes a `@field:value` clause that
+        // narrows the result set to rows the user is authorized to see.
+        q = await MergeFilterFieldsValuesAsync(q, policies, actor, ct);
+
         var effectiveActor = actor ?? PermissionService.AnonymousUser;
         var pageTask = entries.QueryAsync(q, effectiveActor, policies, ct);
         var totalTask = q.RetrieveTotal == false
@@ -621,6 +629,8 @@ public sealed class QueryService(
         // Python parity (adapter.py:1510-1520): policy list is the only gate.
         var policies = await perms.BuildUserQueryPoliciesAsync(actor, q.SpaceName, q.Subpath ?? "/", ct);
         if (policies.Count == 0) return EmptyQueryResponse();
+
+        q = await MergeFilterFieldsValuesAsync(q, policies, actor, ct);
 
         var effectiveActor = actor ?? PermissionService.AnonymousUser;
         var rows = await QueryHelper.RunAggregationAsync(db, tableName, q, ct, effectiveActor, policies);
@@ -710,6 +720,7 @@ public sealed class QueryService(
                 // Python parity: policy list is the only gate (no rt-specific preflight).
                 var policies = await perms.BuildUserQueryPoliciesAsync(actor, q.SpaceName, q.Subpath ?? "/", ct);
                 if (policies.Count == 0) return EmptyQueryResponse();
+                q = await MergeFilterFieldsValuesAsync(q, policies, actor, ct);
                 total = await entries.CountQueryAsync(q, actor ?? PermissionService.AnonymousUser, policies, ct);
             }
         }
@@ -717,6 +728,7 @@ public sealed class QueryService(
         {
             var policies = await perms.BuildUserQueryPoliciesAsync(actor, q.SpaceName, q.Subpath ?? "/", ct);
             if (policies.Count == 0) return EmptyQueryResponse();
+            q = await MergeFilterFieldsValuesAsync(q, policies, actor, ct);
             total = await entries.CountQueryAsync(q, actor ?? PermissionService.AnonymousUser, policies, ct);
         }
 
@@ -1080,6 +1092,176 @@ public sealed class QueryService(
         bool b => b ? "True" : "False",  // Python str(True) == "True"
         _ => Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture) ?? "",
     };
+
+    // ====================================================================
+    // FILTER FIELDS VALUES (row-level ACL via search-clause merge)
+    // ====================================================================
+    // Mirrors Python's adapter.py:1529-1566 — every permission can carry a
+    // `filter_fields_values` string (RediSearch-style `@field:value` clause)
+    // that further restricts which rows the holder is allowed to see. We
+    // build the per-permission map, intersect it with the request's
+    // resolved query policies, and merge the resulting clauses into
+    // q.Search alongside the @space_name / @subpath / @resource_type
+    // restriction so the SQL layer narrows the page accordingly.
+    //
+    // TRUST MODEL: filter_fields_values strings are admin-managed input —
+    // they come from rows in the `permissions` table (only writable by
+    // admin paths) and are concatenated verbatim into the search clause.
+    // Any future code path that lets a non-admin influence a permission
+    // row's filter_fields_values would open a search-clause-injection
+    // hole. Don't add such a path without escaping.
+    //
+    // Per-request cost: GenerateUserPermissionsAsync hits userpermissionscache
+    // (single indexed SELECT on user_shortname). The role-walk cold path is
+    // rare; the warm path is one PG round-trip. No in-memory cache layer
+    // sits above it — high-QPS deployments could add one if this becomes
+    // a profile hot spot.
+    private async Task<Query> MergeFilterFieldsValuesAsync(
+        Query q, List<string> policies, string? actor, CancellationToken ct)
+    {
+        var userShortname = actor ?? PermissionService.AnonymousUser;
+        var userPermissions = await access.GenerateUserPermissionsAsync(userShortname, ct);
+        return MergeFilterFieldsValues(q, policies, userPermissions);
+    }
+
+    // Pure logic split out of MergeFilterFieldsValuesAsync so it's
+    // testable without spinning up an AccessRepository / DB.
+    internal static Query MergeFilterFieldsValues(
+        Query q, List<string> policies, Dictionary<string, object> userPermissions)
+    {
+        if (userPermissions.Count == 0) return DedupeSearchTokens(q);
+
+        // Mirror adapter.py: filtered_policies subset by space:subpath
+        // (and filter_types when present).
+        var subpathTarget = string.IsNullOrEmpty(q.Subpath) || q.Subpath == "/"
+            ? "/" : q.Subpath.TrimStart('/');
+
+        List<string> filteredPolicies;
+        if (q.FilterTypes is { Count: > 0 } fts)
+        {
+            // PYTHON-BUG PARITY: upstream's loop reassigns `filtered_policies`
+            // on each iteration instead of accumulating, so only the LAST
+            // filter_type's matches contribute the FFV restriction. A query
+            // for FilterTypes=[User, Role] applies the Role permission's FFV
+            // only — the User permission's FFV is dropped on the floor.
+            // We mirror that here for wire compatibility; release notes call
+            // it out so consumers don't structure queries assuming the
+            // logical-union behavior they'd expect.
+            // TODO(parity): file an upstream fix; once Python lands the
+            // accumulating version, switch to .Concat() here in lockstep.
+            filteredPolicies = new();
+            foreach (var ft in fts)
+            {
+                var rtStr = JsonbHelpers.EnumMember(ft);
+                var target = $"{q.SpaceName}:{subpathTarget}:{rtStr}";
+                filteredPolicies = policies
+                    .Where(p => p.StartsWith(target, StringComparison.Ordinal))
+                    .ToList();
+            }
+        }
+        else
+        {
+            var target = $"{q.SpaceName}:{subpathTarget}";
+            filteredPolicies = policies
+                .Where(p => p.StartsWith(target, StringComparison.Ordinal))
+                .ToList();
+        }
+
+        var ffvSpaces = new List<string>();
+        var ffvSubpaths = new List<string>();
+        var ffvResourceTypes = new List<string>();
+        var ffvQuery = new List<string>();
+
+        foreach (var policy in filteredPolicies)
+        {
+            foreach (var (permKey, permEntry) in userPermissions)
+            {
+                // BuildUserQueryPoliciesAsync emits policies with the subpath
+                // segment TrimStart('/')'d, but GenerateUserPermissionsAsync
+                // stores whatever was in `permissions.subpaths` — typically
+                // WITH a leading slash. Without normalisation a permission
+                // stored as "/sp" never matches a policy keyed "sp", and
+                // FFV silently no-ops. Try the raw permKey first (preserves
+                // any deployment whose storage already aligns), then the
+                // slash-stripped form. The @subpath:/{…} clause below
+                // emits the normalised value so the SQL parser sees a
+                // single canonical leading slash regardless of storage.
+                var keyParts = permKey.Split(':');
+                if (keyParts.Length < 3) continue;
+                var permSubpathNorm = keyParts[1].TrimStart('/');
+                var normalizedKey = $"{keyParts[0]}:{permSubpathNorm}:{keyParts[2]}";
+                var matches = policy.StartsWith(permKey, StringComparison.Ordinal)
+                    || policy.StartsWith(normalizedKey, StringComparison.Ordinal);
+                if (!matches) continue;
+
+                var ffv = ExtractFilterFieldsValues(permEntry);
+                if (string.IsNullOrEmpty(ffv)) continue;
+
+                if (!ffvQuery.Contains(ffv)) ffvQuery.Add(ffv);
+                ffvSpaces.Add(keyParts[0]);
+                ffvSubpaths.Add(permSubpathNorm);
+                ffvResourceTypes.Add(keyParts[2]);
+            }
+        }
+
+        if (ffvSpaces.Count == 0) return DedupeSearchTokens(q);
+
+        var permKeyQuery =
+            $"@space_name:{string.Join("|", ffvSpaces)} " +
+            $"@subpath:/{string.Join("|/", ffvSubpaths)} " +
+            $"@resource_type:{string.Join("|", ffvResourceTypes)} " +
+            string.Join(" ", ffvQuery);
+
+        var newSearch = string.IsNullOrEmpty(q.Search)
+            ? permKeyQuery
+            : $"{q.Search} {permKeyQuery}";
+
+        return DedupeSearchTokens(q with { Search = newSearch });
+    }
+
+    // Tokenises q.Search on plain ASCII space and dedupes — good enough
+    // for the @field:value tokens dmart's permission FFV strings actually
+    // produce, none of which contain whitespace. RediSearch's quoted
+    // alternative — `@field:"hello world"` — would split incorrectly here,
+    // but that shape is not generated anywhere in the FFV path; if it ever
+    // is, this function needs a quote-aware tokenizer.
+    internal static Query DedupeSearchTokens(Query q)
+    {
+        if (string.IsNullOrEmpty(q.Search)) return q;
+        var parts = q.Search.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var deduped = new List<string>(parts.Length);
+        foreach (var p in parts)
+            if (seen.Add(p)) deduped.Add(p);
+        if (deduped.Count == parts.Length) return q;
+        return q with { Search = string.Join(' ', deduped) };
+    }
+
+    // user_permissions values come either as Dictionary<string,object>
+    // (freshly built by GenerateUserPermissionsAsync) or as JsonElement
+    // (when round-tripped through the userpermissionscache JSONB column).
+    // Handle both.
+    internal static string? ExtractFilterFieldsValues(object permEntry)
+    {
+        switch (permEntry)
+        {
+            case Dictionary<string, object> dict
+                when dict.TryGetValue("filter_fields_values", out var v):
+                return v switch
+                {
+                    string s => string.IsNullOrEmpty(s) ? null : s,
+                    JsonElement je when je.ValueKind == JsonValueKind.String
+                        => je.GetString() is { Length: > 0 } gs ? gs : null,
+                    _ => null,
+                };
+            case JsonElement je when je.ValueKind == JsonValueKind.Object
+                && je.TryGetProperty("filter_fields_values", out var v2)
+                && v2.ValueKind == JsonValueKind.String:
+                return v2.GetString() is { Length: > 0 } s2 ? s2 : null;
+            default:
+                return null;
+        }
+    }
 }
 
 // ========================================================================

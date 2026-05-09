@@ -1,3 +1,4 @@
+using Dmart.Auth;
 using Dmart.Models.Core;
 using Dmart.Models.Enums;
 using Npgsql;
@@ -5,7 +6,7 @@ using NpgsqlTypes;
 
 namespace Dmart.DataAdapters.Sql;
 
-public sealed class UserRepository(Db db, AuthzCacheRefresher refresher)
+public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, SessionTokenHasher tokenHasher)
 {
     private const string SelectAllColumns = """
         SELECT uuid, shortname, space_name, subpath, is_active, slug,
@@ -206,6 +207,14 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher)
     }
 
     // ----- sessions -----
+    // The bearer JWT is run through a keyed HMAC-SHA256 (see SessionTokenHasher)
+    // before being persisted, so a DB dump never yields replayable tokens —
+    // without the JWT secret an attacker can't recompute the column value.
+    // The hash is deterministic, so every session lookup remains a single
+    // indexed equality predicate (`WHERE shortname = $1 AND token = $2`),
+    // unlike a password-grade KDF that would force a per-row Verify pass on
+    // every authenticated request.
+    //
     // `firebaseToken` is optional — Python persists it on the session row at
     // login time so downstream push-notification code can fan out to every
     // active session without a per-session update cycle. The C# port doesn't
@@ -214,13 +223,14 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher)
     public async Task CreateSessionAsync(
         string shortname, string token, string? firebaseToken = null, CancellationToken ct = default)
     {
+        var tokenHash = tokenHasher.Hash(token);
         await using var conn = await db.OpenAsync(ct);
         await using var cmd = new NpgsqlCommand("""
             INSERT INTO sessions (uuid, shortname, token, firebase_token, timestamp)
             VALUES (gen_random_uuid(), $1, $2, $3, NOW())
             """, conn);
         cmd.Parameters.Add(new() { Value = shortname });
-        cmd.Parameters.Add(new() { Value = token });
+        cmd.Parameters.Add(new() { Value = tokenHash });
         cmd.Parameters.Add(new() { Value = (object?)firebaseToken ?? DBNull.Value });
         await cmd.ExecuteNonQueryAsync(ct);
     }
@@ -232,13 +242,14 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher)
     public async Task UpdateSessionFirebaseTokenAsync(
         string shortname, string token, string firebaseToken, CancellationToken ct = default)
     {
+        var tokenHash = tokenHasher.Hash(token);
         await using var conn = await db.OpenAsync(ct);
         await using var cmd = new NpgsqlCommand("""
             UPDATE sessions SET firebase_token = $3
             WHERE shortname = $1 AND token = $2
             """, conn);
         cmd.Parameters.Add(new() { Value = shortname });
-        cmd.Parameters.Add(new() { Value = token });
+        cmd.Parameters.Add(new() { Value = tokenHash });
         cmd.Parameters.Add(new() { Value = firebaseToken });
         await cmd.ExecuteNonQueryAsync(ct);
     }
@@ -283,11 +294,18 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher)
         return result;
     }
 
-    public async Task<bool> IsSessionValidAsync(string token, CancellationToken ct = default)
+    // `shortname` is folded into the WHERE clause as defense-in-depth — a
+    // signature-valid token paired with the wrong actor returns false rather
+    // than cross-matching another user's session row. With deterministic
+    // hashing the second predicate is essentially free.
+    public async Task<bool> IsSessionValidAsync(string shortname, string token, CancellationToken ct = default)
     {
+        var tokenHash = tokenHasher.Hash(token);
         await using var conn = await db.OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand("SELECT 1 FROM sessions WHERE token = $1", conn);
-        cmd.Parameters.Add(new() { Value = token });
+        await using var cmd = new NpgsqlCommand(
+            "SELECT 1 FROM sessions WHERE shortname = $1 AND token = $2", conn);
+        cmd.Parameters.Add(new() { Value = shortname });
+        cmd.Parameters.Add(new() { Value = tokenHash });
         return await cmd.ExecuteScalarAsync(ct) is not null;
     }
 
@@ -300,30 +318,38 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher)
     // Returns true if the session is live (and was just touched), false if
     // it was missing or evicted. Called from the JwtBearer OnTokenValidated
     // hook so every authenticated request resets the inactivity clock.
-    public async Task<bool> TouchSessionAsync(string token, int inactivityTtlSeconds, CancellationToken ct = default)
+    public async Task<bool> TouchSessionAsync(
+        string shortname, string token, int inactivityTtlSeconds, CancellationToken ct = default)
     {
+        var tokenHash = tokenHasher.Hash(token);
         await using var conn = await db.OpenAsync(ct);
         await using var cmd = new NpgsqlCommand("""
             UPDATE sessions SET timestamp = NOW()
-            WHERE token = $1
-              AND timestamp >= NOW() - ($2 || ' seconds')::interval
+            WHERE shortname = $1 AND token = $2
+              AND timestamp >= NOW() - ($3 || ' seconds')::interval
             """, conn);
-        cmd.Parameters.Add(new() { Value = token });
+        cmd.Parameters.Add(new() { Value = shortname });
+        cmd.Parameters.Add(new() { Value = tokenHash });
         cmd.Parameters.Add(new() { Value = inactivityTtlSeconds.ToString() });
         var touched = await cmd.ExecuteNonQueryAsync(ct);
         if (touched > 0) return true;
         // Not touched — evict any stale row so SELECTs see the session gone.
-        await using var purge = new NpgsqlCommand("DELETE FROM sessions WHERE token = $1", conn);
-        purge.Parameters.Add(new() { Value = token });
+        await using var purge = new NpgsqlCommand(
+            "DELETE FROM sessions WHERE shortname = $1 AND token = $2", conn);
+        purge.Parameters.Add(new() { Value = shortname });
+        purge.Parameters.Add(new() { Value = tokenHash });
         await purge.ExecuteNonQueryAsync(ct);
         return false;
     }
 
-    public async Task DeleteSessionAsync(string token, CancellationToken ct = default)
+    public async Task DeleteSessionAsync(string shortname, string token, CancellationToken ct = default)
     {
+        var tokenHash = tokenHasher.Hash(token);
         await using var conn = await db.OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand("DELETE FROM sessions WHERE token = $1", conn);
-        cmd.Parameters.Add(new() { Value = token });
+        await using var cmd = new NpgsqlCommand(
+            "DELETE FROM sessions WHERE shortname = $1 AND token = $2", conn);
+        cmd.Parameters.Add(new() { Value = shortname });
+        cmd.Parameters.Add(new() { Value = tokenHash });
         await cmd.ExecuteNonQueryAsync(ct);
     }
 

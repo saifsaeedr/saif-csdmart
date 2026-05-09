@@ -336,7 +336,7 @@ switch (subcommand)
         var nlog = Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance;
         var refresher = new AuthzCacheRefresher();
         var entryRepo = new EntryRepository(dbInst);
-        var userRepo = new UserRepository(dbInst, refresher);
+        var userRepo = new UserRepository(dbInst, refresher, new Dmart.Auth.SessionTokenHasher(s));
         var accessRepo = new AccessRepository(dbInst, refresher, userRepo);
         var exportService = new ImportExportService(entryRepo,
             new AttachmentRepository(dbInst),
@@ -390,7 +390,7 @@ switch (subcommand)
         var nlog = Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance;
         var refresher = new AuthzCacheRefresher();
         var entryRepo = new EntryRepository(dbInst);
-        var userRepo = new UserRepository(dbInst, refresher);
+        var userRepo = new UserRepository(dbInst, refresher, new Dmart.Auth.SessionTokenHasher(s));
         var accessRepo = new AccessRepository(dbInst, refresher, userRepo);
         var entryService = new EntryService(entryRepo,
             new AttachmentRepository(dbInst),
@@ -1193,6 +1193,8 @@ builder.Services.AddSingleton<SmsSender>();
 builder.Services.AddSingleton<SmtpSender>();
 builder.Services.AddSingleton<InvitationService>();
 builder.Services.AddSingleton<PasswordHasher>();
+builder.Services.AddSingleton<SessionTokenHasher>(sp =>
+    new SessionTokenHasher(sp.GetRequiredService<IOptions<DmartSettings>>().Value));
 builder.Services.AddSingleton<OtpProvider>();
 builder.Services.AddSingleton<Dmart.Auth.OAuth.GoogleProvider>();
 builder.Services.AddSingleton<Dmart.Auth.OAuth.FacebookProvider>();

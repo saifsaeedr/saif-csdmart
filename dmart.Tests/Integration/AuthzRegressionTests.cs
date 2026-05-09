@@ -362,6 +362,140 @@ public sealed class AuthzRegressionTests : IClassFixture<DmartFactory>
         }
     }
 
+    // End-to-end pin for the filter_fields_values merge: a permission whose
+    // FFV is "@state:active" must restrict the SQL result set to entries
+    // whose State column equals "active". Pre-merge wiring this would return
+    // both rows because the permission grants access to the whole subpath.
+    [FactIfPg]
+    public async Task FilterFieldsValues_NarrowsResultSet_ByState()
+    {
+        _factory.CreateClient();
+        var users = _factory.Services.GetRequiredService<UserRepository>();
+        var access = _factory.Services.GetRequiredService<AccessRepository>();
+        var entries = _factory.Services.GetRequiredService<EntryRepository>();
+        var spaces = _factory.Services.GetRequiredService<SpaceRepository>();
+        var hasher = _factory.Services.GetRequiredService<PasswordHasher>();
+
+        var user = Unique("ffv_user");
+        var role = Unique("ffv_role");
+        var perm = Unique("ffv_perm");
+        var space = Unique("ffv_space");
+        var subpath = $"/sp_{Guid.NewGuid():N}"[..14];
+        var activeSn = Unique("ffv_active");
+        var archivedSn = Unique("ffv_archived");
+        var now = DateTime.UtcNow;
+
+        await spaces.UpsertAsync(new Space
+        {
+            Uuid = Guid.NewGuid().ToString(),
+            Shortname = space,
+            SpaceName = "management",
+            Subpath = "/",
+            OwnerShortname = "dmart",
+            IsActive = true,
+            Languages = new() { Language.En },
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+        await access.UpsertPermissionAsync(new Permission
+        {
+            Uuid = Guid.NewGuid().ToString(),
+            Shortname = perm,
+            SpaceName = "management",
+            Subpath = "/permissions",
+            OwnerShortname = "dmart",
+            IsActive = true,
+            Subpaths = new() { [space] = new() { subpath } },
+            ResourceTypes = new() { "content" },
+            Actions = new() { "view", "query" },
+            // Row-level ACL: only entries with State="active" are visible.
+            FilterFieldsValues = "@state:active",
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+        await access.UpsertRoleAsync(new Role
+        {
+            Uuid = Guid.NewGuid().ToString(),
+            Shortname = role,
+            SpaceName = "management",
+            Subpath = "/roles",
+            OwnerShortname = "dmart",
+            IsActive = true,
+            Permissions = new() { perm },
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+        await CreateUserAsync(users, hasher, user, new() { role });
+
+        // Two entries, same subpath, same resource type; only `state` differs.
+        await entries.UpsertAsync(new Entry
+        {
+            Uuid = Guid.NewGuid().ToString(),
+            Shortname = activeSn,
+            SpaceName = space,
+            Subpath = subpath,
+            OwnerShortname = "dmart",
+            ResourceType = ResourceType.Content,
+            IsActive = true,
+            State = "active",
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+        await entries.UpsertAsync(new Entry
+        {
+            Uuid = Guid.NewGuid().ToString(),
+            Shortname = archivedSn,
+            SpaceName = space,
+            Subpath = subpath,
+            OwnerShortname = "dmart",
+            ResourceType = ResourceType.Content,
+            IsActive = true,
+            State = "archived",
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+        await access.InvalidateAllCachesAsync();
+
+        try
+        {
+            var (client, _) = await LoginAsAsync(user);
+
+            var resp = await client.PostAsJsonAsync("/managed/query", new Query
+            {
+                Type = QueryType.Subpath,
+                SpaceName = space,
+                Subpath = subpath,
+                FilterSchemaNames = new(),
+                Limit = 50,
+            }, DmartJsonContext.Default.Query);
+            var raw = await resp.Content.ReadAsStringAsync();
+            resp.StatusCode.ShouldBe(HttpStatusCode.OK, raw);
+
+            using var doc = JsonDocument.Parse(raw);
+            doc.RootElement.GetProperty("status").GetString().ShouldBe("success");
+            var shortnames = doc.RootElement.GetProperty("records").EnumerateArray()
+                .Select(r => r.GetProperty("shortname").GetString())
+                .ToArray();
+
+            // The FFV restriction is the load-bearing assertion: only the
+            // active row may surface; the archived row must be filtered out
+            // even though the permission's subpath grant covers both.
+            shortnames.ShouldContain(activeSn);
+            shortnames.ShouldNotContain(archivedSn);
+        }
+        finally
+        {
+            try { await entries.DeleteAsync(space, subpath, activeSn, ResourceType.Content); } catch { }
+            try { await entries.DeleteAsync(space, subpath, archivedSn, ResourceType.Content); } catch { }
+            try { await users.DeleteAllSessionsAsync(user); } catch { }
+            try { await users.DeleteAsync(user); } catch { }
+            try { await access.DeleteRoleAsync(role); } catch { }
+            try { await access.DeletePermissionAsync(perm); } catch { }
+            try { await spaces.DeleteAsync(space); } catch { }
+            await access.InvalidateAllCachesAsync();
+        }
+    }
+
     private static string Unique(string prefix) => $"{prefix}_{Guid.NewGuid():N}"[..24];
 
     private static async Task CreateUserAsync(
