@@ -19,33 +19,6 @@ import { log } from "@/lib/logger";
 import { MESSAGES_SPACE } from "@/lib/constants";
 import { ensureUploadSize } from "./core";
 
-export async function getEntities(search: string) {
-    const result = await getSpaces();
-    const spaces = result.records.map((space) => space.shortname);
-
-    const promises = spaces.map(async (space) => {
-        const queryRequest: QueryRequest = {
-            filter_shortnames: [],
-            type: QueryType.subpath,
-            space_name: space,
-            subpath: "/",
-            exact_subpath: false,
-            sort_by: "shortname",
-            sort_type: SortType.ascending,
-            search: search,
-            retrieve_json_payload: true,
-            retrieve_attachments: true,
-        };
-
-        const response: ApiQueryResponse = (await Dmart.query(queryRequest))!;
-        return response?.records ?? [];
-    });
-
-    const allRecordsArrays = await Promise.all(promises);
-
-    return allRecordsArrays.flat();
-}
-
 export type StreamEntitiesOptions = {
     // Restrict the fan-out to a single space (matches the "Current space:" tag chip).
     spaceFilter?: string;
@@ -55,16 +28,25 @@ export type StreamEntitiesOptions = {
     // Per-space row cap. Defaults to 50 to keep the dropdown DOM bounded
     // when a space contains many entries.
     limitPerSpace?: number;
+    // Cap on simultaneous in-flight per-space queries. Without this, every
+    // keystroke against a tenant with many spaces fires N concurrent
+    // requests; 6 keeps both client connection budget and server load
+    // bounded while still feeling instant on typical setups.
+    maxConcurrent?: number;
 };
 
 /**
- * Same query fan-out as `getEntities`, but invokes `onBatch` as each space's
- * query resolves so callers can render results progressively. Returns a
- * `cancel` handle so a newer search can ignore stale in-flight batches.
+ * Fans a search out across spaces, invoking `onBatch` as each space's query
+ * resolves so callers can render results progressively. Returns a `cancel`
+ * handle so a newer search can ignore stale in-flight batches.
  *
  * Per-space queries are isolated: if one space's query rejects, the failure
  * is logged and the rest of the fan-out continues. The aggregate `done`
  * promise still resolves so callers can flip their loading state.
+ *
+ * Concurrency is capped at `maxConcurrent` (default 6). Queries beyond the
+ * cap queue and start as earlier ones resolve, so a tenant with 50 spaces
+ * doesn't open 50 simultaneous HTTP connections per keystroke.
  */
 export function streamEntitiesAcrossSpaces(
     search: string,
@@ -73,6 +55,7 @@ export function streamEntitiesAcrossSpaces(
 ): { done: Promise<void>; cancel: () => void } {
     let cancelled = false;
     const limit = options.limitPerSpace ?? 50;
+    const maxConcurrent = Math.max(1, options.maxConcurrent ?? 6);
 
     const done = (async () => {
         let spaces: string[];
@@ -91,33 +74,44 @@ export function streamEntitiesAcrossSpaces(
             : "/";
         const exactSubpath = !!options.subpathFilter;
 
-        await Promise.all(
-            spaces.map(async (space) => {
+        // Pull-based concurrency limiter: spawn `maxConcurrent` workers,
+        // each draining the same `cursor` index so no global queue
+        // bookkeeping is needed. When all workers exit, fan-out is done.
+        let cursor = 0;
+        const querySpace = async (space: string) => {
+            if (cancelled) return;
+            const queryRequest: QueryRequest = {
+                filter_shortnames: [],
+                type: QueryType.subpath,
+                space_name: space,
+                subpath,
+                exact_subpath: exactSubpath,
+                sort_by: "shortname",
+                sort_type: SortType.ascending,
+                search,
+                limit,
+                retrieve_json_payload: true,
+                retrieve_attachments: true,
+            };
+            try {
+                const response: ApiQueryResponse = (await Dmart.query(queryRequest))!;
                 if (cancelled) return;
-                const queryRequest: QueryRequest = {
-                    filter_shortnames: [],
-                    type: QueryType.subpath,
-                    space_name: space,
-                    subpath,
-                    exact_subpath: exactSubpath,
-                    sort_by: "shortname",
-                    sort_type: SortType.ascending,
-                    search,
-                    limit,
-                    retrieve_json_payload: true,
-                    retrieve_attachments: true,
-                };
-                try {
-                    const response: ApiQueryResponse = (await Dmart.query(queryRequest))!;
-                    if (cancelled) return;
-                    onBatch(response?.records ?? [], space);
-                } catch (error) {
-                    if (cancelled) return;
-                    log.error(`Search failed for space "${space}":`, error);
-                    onBatch([], space);
-                }
-            })
-        );
+                onBatch(response?.records ?? [], space);
+            } catch (error) {
+                if (cancelled) return;
+                log.error(`Search failed for space "${space}":`, error);
+                onBatch([], space);
+            }
+        };
+        const worker = async () => {
+            while (!cancelled) {
+                const i = cursor++;
+                if (i >= spaces.length) return;
+                await querySpace(spaces[i]);
+            }
+        };
+        const workerCount = Math.min(maxConcurrent, spaces.length);
+        await Promise.all(Array.from({ length: workerCount }, () => worker()));
     })();
 
     return {

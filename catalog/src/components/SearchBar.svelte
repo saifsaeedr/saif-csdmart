@@ -68,7 +68,30 @@
     }
   }
 
+  let isMac = $state(false);
+
   function handleKeydown(e: KeyboardEvent) {
+    // Cmd/Ctrl+K — focus the search input from anywhere in the app. Skip
+    // when the user is already typing in another input/textarea/contentEditable
+    // so the shortcut doesn't fight a form being filled out elsewhere.
+    if ((e.key === "k" || e.key === "K") && (e.metaKey || e.ctrlKey)) {
+      const target = e.target as HTMLElement | null;
+      const inEditable =
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable);
+      if (inEditable && target !== searchInput) return;
+      e.preventDefault();
+      if (showDropdown && document.activeElement === searchInput) {
+        showDropdown = false;
+        searchInput?.blur();
+      } else {
+        showDropdown = true;
+        searchInput?.focus();
+      }
+      return;
+    }
     if (e.key === "Escape" && showDropdown) {
       showDropdown = false;
       searchInput?.blur();
@@ -181,6 +204,7 @@
   }
 
   onMount(() => {
+    isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPod|iPad/i.test(navigator.platform);
     document.addEventListener("click", handleDocumentClick);
     document.addEventListener("keydown", handleKeydown);
   });
@@ -237,6 +261,10 @@
       onfocus={openDropdown}
       class="search-trigger-input"
     />
+
+    <kbd class="search-trigger-kbd" aria-hidden="true">
+      {isMac ? "⌘" : "Ctrl"}<span class="kbd-sep">+</span>K
+    </kbd>
   </div>
 
   {#if showDropdown}
@@ -568,5 +596,31 @@
     color: var(--color-gray-500);
     flex-shrink: 0;
     white-space: nowrap;
+  }
+
+  .search-trigger-kbd {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.125rem;
+    padding: 0.125rem 0.375rem;
+    margin-inline-start: 0.25rem;
+    border: 1px solid var(--color-gray-200);
+    border-radius: var(--radius-sm);
+    background: var(--surface-card);
+    color: var(--color-gray-500);
+    font-size: 0.6875rem;
+    font-family: var(--font-sans);
+    font-weight: var(--font-weight-medium);
+    line-height: 1;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .kbd-sep {
+    opacity: 0.6;
+  }
+
+  @media (max-width: 640px) {
+    .search-trigger-kbd { display: none; }
   }
 </style>

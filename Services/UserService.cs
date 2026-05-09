@@ -18,7 +18,8 @@ public sealed class UserService(
     InvitationJwt invitationJwt,
     InvitationRepository invitations,
     HistoryRepository history,
-    IOptions<DmartSettings> settings)
+    IOptions<DmartSettings> settings,
+    ILogger<UserService> log)
 {
     // Management space name — comes from DmartSettings.ManagementSpace so the
     // caller can rename it uniformly via config. Default is "management".
@@ -902,10 +903,23 @@ public sealed class UserService(
     public async Task LogoutAsync(string? shortname, string? token, CancellationToken ct = default)
     {
         // Python: db.remove_user_session() — delete the specific session row.
-        // Hashed-token storage means we need the shortname to narrow the
-        // candidate set before Argon2-verifying which row to drop.
+        // The repository hashes the raw JWT and looks up the row by
+        // (shortname, hashed_token); both inputs must be non-empty for the
+        // lookup to identify a single row, so a missing actor or token is a
+        // silent no-op rather than a wildcard delete.
         if (!string.IsNullOrEmpty(token) && !string.IsNullOrEmpty(shortname))
+        {
             await users.DeleteSessionAsync(shortname, token, ct);
+            return;
+        }
+        // Surface the silent-skip path so an expired-cookie /user/logout
+        // (where the JWT principal didn't validate) doesn't disappear from
+        // the trace. Token-without-actor shouldn't happen in normal flow —
+        // JwtBearer would have rejected the call before we got here.
+        log.LogInformation(
+            "logout: no-op (actor={ActorPresent}, token={TokenPresent})",
+            !string.IsNullOrEmpty(shortname),
+            !string.IsNullOrEmpty(token));
     }
 
     private async Task<User?> ResolveUserAsync(UserLoginRequest req, CancellationToken ct)

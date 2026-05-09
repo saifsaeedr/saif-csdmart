@@ -339,6 +339,27 @@ public class FilterFieldsValuesMergeTests
         result.Search.ShouldContain("@status:active");
     }
 
+    [Fact]
+    public void Merge_PermKeyWithLeadingSlash_StillMatches_PolicyWithoutSlash()
+    {
+        // Regression: GenerateUserPermissionsAsync stores subpath verbatim
+        // from `permissions.subpaths`, while BuildUserQueryPoliciesAsync
+        // emits policies with the subpath TrimStart('/')'d. Without the
+        // dual-form match the FFV silently never fires for any permission
+        // whose stored subpath has a leading slash — the common storage
+        // convention for csdmart, caught by the FFV→SQL integration test.
+        var perms = Perms(("ffv_space:/sp_xx:content", "@state:active"));
+        var q = new Query { Type = QueryType.Subpath, SpaceName = "ffv_space", Subpath = "/sp_xx" };
+        var result = QueryService.MergeFilterFieldsValues(
+            q, new() { "ffv_space:sp_xx:content:*" }, perms);
+
+        result.Search.ShouldNotBeNull();
+        result.Search.ShouldContain("@state:active");
+        // The emitted @subpath clause uses the normalised (slash-stripped)
+        // form so the SQL parser sees a single canonical leading slash.
+        result.Search.ShouldContain("@subpath:/sp_xx");
+    }
+
     // ── filter_types narrowing ─────────────────────────────────────────
 
     [Fact]

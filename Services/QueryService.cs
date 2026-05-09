@@ -1103,6 +1103,19 @@ public sealed class QueryService(
     // resolved query policies, and merge the resulting clauses into
     // q.Search alongside the @space_name / @subpath / @resource_type
     // restriction so the SQL layer narrows the page accordingly.
+    //
+    // TRUST MODEL: filter_fields_values strings are admin-managed input —
+    // they come from rows in the `permissions` table (only writable by
+    // admin paths) and are concatenated verbatim into the search clause.
+    // Any future code path that lets a non-admin influence a permission
+    // row's filter_fields_values would open a search-clause-injection
+    // hole. Don't add such a path without escaping.
+    //
+    // Per-request cost: GenerateUserPermissionsAsync hits userpermissionscache
+    // (single indexed SELECT on user_shortname). The role-walk cold path is
+    // rare; the warm path is one PG round-trip. No in-memory cache layer
+    // sits above it — high-QPS deployments could add one if this becomes
+    // a profile hot spot.
     private async Task<Query> MergeFilterFieldsValuesAsync(
         Query q, List<string> policies, string? actor, CancellationToken ct)
     {
@@ -1126,8 +1139,16 @@ public sealed class QueryService(
         List<string> filteredPolicies;
         if (q.FilterTypes is { Count: > 0 } fts)
         {
-            // Python's loop reassigns `filtered_policies` on each iteration,
-            // so only the LAST filter_type's matches survive. Preserve that.
+            // PYTHON-BUG PARITY: upstream's loop reassigns `filtered_policies`
+            // on each iteration instead of accumulating, so only the LAST
+            // filter_type's matches contribute the FFV restriction. A query
+            // for FilterTypes=[User, Role] applies the Role permission's FFV
+            // only — the User permission's FFV is dropped on the floor.
+            // We mirror that here for wire compatibility; release notes call
+            // it out so consumers don't structure queries assuming the
+            // logical-union behavior they'd expect.
+            // TODO(parity): file an upstream fix; once Python lands the
+            // accumulating version, switch to .Concat() here in lockstep.
             filteredPolicies = new();
             foreach (var ft in fts)
             {
@@ -1155,17 +1176,31 @@ public sealed class QueryService(
         {
             foreach (var (permKey, permEntry) in userPermissions)
             {
-                if (!policy.StartsWith(permKey, StringComparison.Ordinal)) continue;
+                // BuildUserQueryPoliciesAsync emits policies with the subpath
+                // segment TrimStart('/')'d, but GenerateUserPermissionsAsync
+                // stores whatever was in `permissions.subpaths` — typically
+                // WITH a leading slash. Without normalisation a permission
+                // stored as "/sp" never matches a policy keyed "sp", and
+                // FFV silently no-ops. Try the raw permKey first (preserves
+                // any deployment whose storage already aligns), then the
+                // slash-stripped form. The @subpath:/{…} clause below
+                // emits the normalised value so the SQL parser sees a
+                // single canonical leading slash regardless of storage.
+                var keyParts = permKey.Split(':');
+                if (keyParts.Length < 3) continue;
+                var permSubpathNorm = keyParts[1].TrimStart('/');
+                var normalizedKey = $"{keyParts[0]}:{permSubpathNorm}:{keyParts[2]}";
+                var matches = policy.StartsWith(permKey, StringComparison.Ordinal)
+                    || policy.StartsWith(normalizedKey, StringComparison.Ordinal);
+                if (!matches) continue;
 
                 var ffv = ExtractFilterFieldsValues(permEntry);
                 if (string.IsNullOrEmpty(ffv)) continue;
 
                 if (!ffvQuery.Contains(ffv)) ffvQuery.Add(ffv);
-                var parts = permKey.Split(':');
-                if (parts.Length < 3) continue;
-                ffvSpaces.Add(parts[0]);
-                ffvSubpaths.Add(parts[1]);
-                ffvResourceTypes.Add(parts[2]);
+                ffvSpaces.Add(keyParts[0]);
+                ffvSubpaths.Add(permSubpathNorm);
+                ffvResourceTypes.Add(keyParts[2]);
             }
         }
 
@@ -1184,6 +1219,12 @@ public sealed class QueryService(
         return DedupeSearchTokens(q with { Search = newSearch });
     }
 
+    // Tokenises q.Search on plain ASCII space and dedupes — good enough
+    // for the @field:value tokens dmart's permission FFV strings actually
+    // produce, none of which contain whitespace. RediSearch's quoted
+    // alternative — `@field:"hello world"` — would split incorrectly here,
+    // but that shape is not generated anywhere in the FFV path; if it ever
+    // is, this function needs a quote-aware tokenizer.
     internal static Query DedupeSearchTokens(Query q)
     {
         if (string.IsNullOrEmpty(q.Search)) return q;
