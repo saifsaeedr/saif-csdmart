@@ -64,12 +64,23 @@ public static unsafe class NativePluginCallbacks
         //   1 — initial release (LoadEntry…DmartFree)
         //   2 — Query, GetMediaAttachment appended; Query was ACL-free
         //   3 — Query honors caller's actor by default; "as_actor" override
+        //   4 — Log appended (plugin → ILogger pipeline)
         public int Version;
+
+        // Plugin → host structured logging. Routes the message through
+        // dmart's ILogger (so it lands in the JSONL file sink, honors
+        // configured log-level filters, etc.) instead of stderr.
+        // Args: (level, category, message). `level` is the int value of
+        // Microsoft.Extensions.Logging.LogLevel (0 Trace … 5 Critical, 6
+        // None). `category` is appended to "plugin.<shortname>" by the
+        // host — pass NULL for the default. `message` is required.
+        // APPENDED in V4.
+        public delegate* unmanaged[Cdecl]<int, byte*, byte*, void> Log;
     }
 
     // Single source of truth for the version number written into every
     // DmartCallbacks struct. Matches the comment in the field above.
-    public const int CurrentVersion = 3;
+    public const int CurrentVersion = 4;
 
     // Allocated once, stays alive for the process lifetime. Plugins keep
     // the pointer we hand them in their `init()` and dereference it as
@@ -81,6 +92,15 @@ public static unsafe class NativePluginCallbacks
     // below. Program.cs sets this right after `app.Build()`. The methods
     // resolve scoped services with CreateScope() on each call.
     public static IServiceProvider? Services { get; set; }
+
+    // ILoggerFactory is a singleton in the container, so resolving it once
+    // is fine — and logging is on the hot path, so we want to avoid the
+    // CreateScope/Resolve cost per call. Concurrent readers either both
+    // see null (resolving to the same DI singleton, which we publish
+    // atomically via Interlocked.CompareExchange) or both see the cached
+    // reference. Reference reads are atomic on all .NET-supported CPUs,
+    // so a Volatile.Read isn't strictly necessary.
+    private static ILoggerFactory? _loggerFactoryCache;
 
     // Fills the struct with function pointers and returns a stable pointer
     // that can be handed to every plugin's init() export.
@@ -100,6 +120,7 @@ public static unsafe class NativePluginCallbacks
             Query = &QueryCb,
             GetMediaAttachment = &GetMediaAttachmentCb,
             Version = CurrentVersion,
+            Log = &LogCb,
         };
         // Copy into unmanaged memory so the pointer doesn't move under the
         // GC. The struct is small and ABI-stable; the pointer lives until
@@ -358,6 +379,92 @@ public static unsafe class NativePluginCallbacks
             return null;
         }
     }
+
+    // Plugin → host structured log. The plugin's shortname (set by the
+    // dispatcher in PluginInvocationContext.CurrentShortname) is prefixed
+    // onto the category so a plugin can't impersonate "Microsoft.AspNetCore"
+    // or "Dmart.Startup" to escape the operator's log-level filter config.
+    //   category = null/empty → "plugin.<shortname>"
+    //   category = "events"   → "plugin.<shortname>.events"
+    // Messages are clamped to 16 KB to bound a runaway plugin's log volume;
+    // when truncation occurs the recorded line is 16 KB + the literal
+    // "…[truncated]" suffix (~12 bytes), so downstream consumers should
+    // budget for "16 KB + suffix" rather than treating 16 KB as a hard cap.
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static void LogCb(int level, byte* category, byte* message)
+    {
+        try
+        {
+            // Marshal-only here; the real work lives in EmitPluginLog so
+            // tests can drive the full pipeline (category prefix, truncation,
+            // level mapping, ILogger dispatch, LogSink write) without
+            // synthesizing UTF-8 byte buffers.
+            EmitPluginLog(level, PtrToString(category), PtrToString(message));
+        }
+        catch
+        {
+            // Logging must never propagate an exception across the C ABI
+            // boundary — a managed throw in an [UnmanagedCallersOnly] would
+            // tear down the plugin's hook with no recourse.
+        }
+    }
+
+    // internal for testing via dmart.Tests. Holds all the policy LogCb
+    // applies once the byte* args have been decoded.
+    internal static void EmitPluginLog(int level, string? sub, string? msg)
+    {
+        var factory = GetLoggerFactory();
+        if (factory is null) return;
+        if (string.IsNullOrEmpty(msg)) return;
+        if (msg.Length > 16384) msg = string.Concat(msg.AsSpan(0, 16384), "…[truncated]");
+
+        var shortname = PluginInvocationContext.CurrentShortname ?? "unknown";
+        var fullCategory = string.IsNullOrEmpty(sub)
+            ? $"plugin.{shortname}"
+            : $"plugin.{shortname}.{sub}";
+
+        var lvl = ClampLevel(level);
+        var logger = factory.CreateLogger(fullCategory);
+        if (logger.IsEnabled(lvl)) logger.Log(lvl, "{Message}", msg);
+    }
+
+    // internal for testing — lets tests inject a fake ILoggerFactory or
+    // clear the cache between cases without going through DI.
+    internal static void SetServicesForTesting(IServiceProvider? services)
+    {
+        Services = services;
+        _loggerFactoryCache = null;
+    }
+
+    private static ILoggerFactory? GetLoggerFactory()
+    {
+        // Volatile.Read is defensive — reference reads are already atomic on
+        // .NET-supported CPUs, but Volatile guarantees we see a fully
+        // initialized factory after the publishing thread's CompareExchange,
+        // not a torn or stale view on weakly ordered architectures.
+        var cached = Volatile.Read(ref _loggerFactoryCache);
+        if (cached is not null) return cached;
+        var resolved = Services?.GetService<ILoggerFactory>();
+        if (resolved is null) return null;
+        // CompareExchange publishes our reference atomically and yields to
+        // any racing thread that already wrote one. Either way we return
+        // whatever ended up cached, so all callers see the same instance.
+        Interlocked.CompareExchange(ref _loggerFactoryCache, resolved, null);
+        return Volatile.Read(ref _loggerFactoryCache);
+    }
+
+    // internal for testing via dmart.Tests.
+    internal static LogLevel ClampLevel(int raw) => raw switch
+    {
+        0 => LogLevel.Trace,
+        1 => LogLevel.Debug,
+        2 => LogLevel.Information,
+        3 => LogLevel.Warning,
+        4 => LogLevel.Error,
+        5 => LogLevel.Critical,
+        6 => LogLevel.None,
+        _ => LogLevel.Information,
+    };
 
     // ========================================================================
     // Helpers

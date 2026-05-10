@@ -15,10 +15,20 @@ internal sealed class NativeHookPlugin(NativePluginHandle handle, string shortna
         var json = JsonSerializer.Serialize(e, DmartJsonContext.Default.Event);
 
         // Expose the calling actor to host callbacks (e.g. QueryCb) so plugin
-        // queries default to the user's permissions. Restore the previous
-        // value rather than nulling it to keep nested invocations safe.
+        // queries default to the user's permissions, and the plugin's
+        // shortname so LogCb can prefix log categories. Restore previous
+        // values rather than nulling to keep nested invocations safe.
+        //
+        // Both context fields are [ThreadStatic]. That's safe here because
+        // handle.CallHook is a synchronous P/Invoke — no await between set
+        // and restore — so the native code (and any LogCb it triggers) runs
+        // on the same thread that set the values. If this ever moves to an
+        // async-bridge model (e.g. Task.Run for native dispatch), switch to
+        // AsyncLocal<T> or the values will leak across awaits.
         var previousActor = PluginInvocationContext.CurrentActor;
+        var previousShortname = PluginInvocationContext.CurrentShortname;
         PluginInvocationContext.CurrentActor = e.UserShortname;
+        PluginInvocationContext.CurrentShortname = shortname;
         string? result;
         try
         {
@@ -27,6 +37,7 @@ internal sealed class NativeHookPlugin(NativePluginHandle handle, string shortna
         finally
         {
             PluginInvocationContext.CurrentActor = previousActor;
+            PluginInvocationContext.CurrentShortname = previousShortname;
         }
 
         if (!string.IsNullOrEmpty(result))
