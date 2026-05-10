@@ -948,6 +948,18 @@ public sealed class ImportExportService(
         value = ""; return false;
     }
 
+    // Text-ish content types whose body file is safe to inline into the
+    // jsonb meta. Anything else (image / media / binary blobs) stays as the
+    // filename string in payload.body — Postgres jsonb cannot store the
+    //   bytes that a raw PNG/MP3/PDF would produce when round-tripped
+    // through StreamReader, and inlining them gives the user nothing they
+    // can use anyway (the body is meant to be fetched from the filesystem).
+    private static readonly HashSet<string> InlinableContentTypes =
+        new(StringComparer.OrdinalIgnoreCase)
+    {
+        "json", "text", "html", "markdown", "csv", "jsonl",
+    };
+
     // Re-inline the externalized payload.body from a sibling body file.
     // Mutates `metaNode` in place.
     private static void InlinePayloadBody(
@@ -956,14 +968,15 @@ public sealed class ImportExportService(
         if (metaNode["payload"] is not JsonObject payload) return;
         if (payload["body"] is not JsonValue bodyVal) return;
         if (!bodyVal.TryGetValue<string>(out var filename) || string.IsNullOrEmpty(filename)) return;
+        var contentType = (payload["content_type"]?.GetValue<string>() ?? "").ToLowerInvariant();
+        if (!InlinableContentTypes.Contains(contentType)) return;
         // Python stores the filename relative to the entry's subpath directory.
         var bodyPath = $"{baseDir}/{filename}".Replace("//", "/");
         if (!bodies.TryGetValue(bodyPath, out var ze)) return;
-        var contentType = (payload["content_type"]?.GetValue<string>() ?? "").ToLowerInvariant();
         using var s = ze.Open();
         using var sr = new StreamReader(s);
         var raw = sr.ReadToEnd();
-        if (contentType == "json")
+        if (string.Equals(contentType, "json", StringComparison.OrdinalIgnoreCase))
         {
             try { payload["body"] = JsonNode.Parse(raw); }
             catch { payload["body"] = raw; /* leave as string if the file isn't JSON */ }
@@ -980,6 +993,8 @@ public sealed class ImportExportService(
         if (metaNode["payload"] is not JsonObject payload) return;
         if (payload["body"] is not JsonValue bodyVal) return;
         if (!bodyVal.TryGetValue<string>(out var filename) || string.IsNullOrEmpty(filename)) return;
+        var contentType = (payload["content_type"]?.GetValue<string>() ?? "").ToLowerInvariant();
+        if (!InlinableContentTypes.Contains(contentType)) return;
         var bodyPath = $"{baseDir}/{filename}".Replace("//", "/");
         var archive = metaZe.Archive!;
         var bodyZe = archive.GetEntry(bodyPath);
@@ -987,8 +1002,7 @@ public sealed class ImportExportService(
         await using var s = bodyZe.Open();
         using var sr = new StreamReader(s);
         var raw = await sr.ReadToEndAsync(ct);
-        var contentType = (payload["content_type"]?.GetValue<string>() ?? "").ToLowerInvariant();
-        if (contentType == "json")
+        if (string.Equals(contentType, "json", StringComparison.OrdinalIgnoreCase))
         {
             try { payload["body"] = JsonNode.Parse(raw); }
             catch { payload["body"] = raw; }
