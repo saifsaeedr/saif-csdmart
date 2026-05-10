@@ -950,10 +950,36 @@ public sealed class ImportExportService(
 
     // Text-ish content types whose body file is safe to inline into the
     // jsonb meta. Anything else (image / media / binary blobs) stays as the
-    // filename string in payload.body — Postgres jsonb cannot store the
-    //   bytes that a raw PNG/MP3/PDF would produce when round-tripped
+    // filename string in payload.body — Postgres jsonb cannot store
+    // the bytes that a raw PNG/MP3/PDF would produce when round-tripped
     // through StreamReader, and inlining them gives the user nothing they
     // can use anyway (the body is meant to be fetched from the filesystem).
+    //
+    // The set must be the union of:
+    //   1. What MaybeExternalizePayloadBodyAsync (this file) writes out:
+    //        json, html, text, markdown
+    //      Round-trip parity for our own export → import path.
+    //   2. What dmart Python's exporter is known to externalize for
+    //      text-ish bodies it ships: csv, jsonl.
+    //      We accept Python-exported zips on the import side, so the
+    //      C# importer must know how to re-inline what Python wrote.
+    //
+    // Deliberately excluded text-ish ContentType members (see
+    // Dmart.Models.Enums.ContentType):
+    //   comment, reaction — bodies are tiny strings stored inline in
+    //                       meta. No exporter externalizes them, so a
+    //                       sibling body file never exists; including
+    //                       them here would be dead code.
+    //   python            — source code; current importer keeps `.py`
+    //                       files as on-disk attachments referenced by
+    //                       name rather than inlining into jsonb. Add
+    //                       here only when MaybeExternalizePayloadBodyAsync
+    //                       grows a `case "python"` branch.
+    //
+    // Invariant: if you add a `case` to MaybeExternalizePayloadBodyAsync's
+    // switch, add the matching content_type here too — otherwise the
+    // round-trip silently drops the body (file written on export, ignored
+    // on import).
     private static readonly HashSet<string> InlinableContentTypes =
         new(StringComparer.OrdinalIgnoreCase)
     {

@@ -341,21 +341,7 @@ switch (subcommand)
         }
 
         var (s, dbInst) = CliBootstrap.BuildOrExit(dotenvPath, dotenvValues);
-
-        var nlog = Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance;
-        var refresher = new AuthzCacheRefresher();
-        var entryRepo = new EntryRepository(dbInst);
-        var userRepo = new UserRepository(dbInst, refresher, new Dmart.Auth.SessionTokenHasher(s));
-        var accessRepo = new AccessRepository(dbInst, refresher, userRepo);
-        var exportService = new ImportExportService(entryRepo,
-            new AttachmentRepository(dbInst),
-            userRepo,
-            accessRepo,
-            new SpaceRepository(dbInst),
-            new HistoryRepository(dbInst),
-            new PermissionService(userRepo, accessRepo, refresher),
-            Microsoft.Extensions.Options.Options.Create(s),
-            nlog.CreateLogger<ImportExportService>());
+        var exportService = CliBootstrap.BuildImportExportService(s, dbInst);
 
         // Same call path as the HTTP /managed/export handler — but with
         // actor: null so the row-level ACL filter is skipped. The API gate
@@ -395,33 +381,7 @@ switch (subcommand)
         }
 
         var (s, dbInst) = CliBootstrap.BuildOrExit(dotenvPath, dotenvValues);
-
-        var nlog = Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance;
-        var refresher = new AuthzCacheRefresher();
-        var entryRepo = new EntryRepository(dbInst);
-        var userRepo = new UserRepository(dbInst, refresher, new Dmart.Auth.SessionTokenHasher(s));
-        var accessRepo = new AccessRepository(dbInst, refresher, userRepo);
-        var entryService = new EntryService(entryRepo,
-            new AttachmentRepository(dbInst),
-            new HistoryRepository(dbInst),
-            new PermissionService(userRepo, accessRepo, refresher),
-            new PluginManager(Array.Empty<IHookPlugin>(), Array.Empty<IApiPlugin>(),
-                new SpaceRepository(dbInst),
-                new SpaceEventLogger(Microsoft.Extensions.Options.Options.Create(s),
-                    nlog.CreateLogger<SpaceEventLogger>()),
-                nlog.CreateLogger<PluginManager>()),
-            new SchemaValidator(entryRepo, nlog.CreateLogger<SchemaValidator>()),
-            new WorkflowEngine(entryRepo, nlog.CreateLogger<WorkflowEngine>()),
-            nlog.CreateLogger<EntryService>());
-        var importService = new ImportExportService(entryRepo,
-            new AttachmentRepository(dbInst),
-            userRepo,
-            accessRepo,
-            new SpaceRepository(dbInst),
-            new HistoryRepository(dbInst),
-            new PermissionService(userRepo, accessRepo, refresher),
-            Microsoft.Extensions.Options.Options.Create(s),
-            nlog.CreateLogger<ImportExportService>());
+        var importService = CliBootstrap.BuildImportExportService(s, dbInst);
 
         await using var zipStream = File.OpenRead(zipPath);
         // The actor argument is accepted for API stability but unused — every
@@ -737,21 +697,7 @@ switch (subcommand)
             }
 
             var (s, dbInst) = CliBootstrap.BuildOrExit(dotenvPath, dotenvValues);
-
-            var nlog = Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance;
-            var refresher = new AuthzCacheRefresher();
-            var entryRepo = new EntryRepository(dbInst);
-            var userRepo = new UserRepository(dbInst, refresher, new Dmart.Auth.SessionTokenHasher(s));
-            var accessRepo = new AccessRepository(dbInst, refresher, userRepo);
-            var importService = new ImportExportService(entryRepo,
-                new AttachmentRepository(dbInst),
-                userRepo,
-                accessRepo,
-                new SpaceRepository(dbInst),
-                new HistoryRepository(dbInst),
-                new PermissionService(userRepo, accessRepo, refresher),
-                Microsoft.Extensions.Options.Options.Create(s),
-                nlog.CreateLogger<ImportExportService>());
+            var importService = CliBootstrap.BuildImportExportService(s, dbInst);
 
             // ImportZipAsync expects a zip stream whose entries are rooted at
             // {space}/...  — build one in-memory from the on-disk tree so we
