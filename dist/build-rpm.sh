@@ -220,9 +220,12 @@ if [ -z "$VERSION" ]; then
 fi
 echo "Building dmart-${VERSION} RPM..."
 
-# Step 1: Build binaries
+# Step 1: Build binaries.
+# RPM ships a self-contained native binary, so opt into the AOT publish
+# path explicitly — build.sh defaults to a JIT framework-dependent
+# apphost (good for dev iteration, wrong for distribution).
 echo "=== Building binaries ==="
-./build.sh
+./build.sh --aot
 
 # Step 2: Assemble source tarball for rpmbuild
 STAGING=$(mktemp -d)

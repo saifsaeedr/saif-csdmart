@@ -242,12 +242,13 @@ full development guide with working examples.
 ```
 # Development
 dotnet run -- serve
+./build.sh                   # fast JIT build (~5-50s), bin/dmart -> apphost
 
 # Production (AOT native binary)
-./build.sh
-# Output: bin/dmart (~35MB single binary)
+./build.sh --aot
+# Output: bin/dmart (~40MB self-contained native binary)
 
-# RPM packages
+# RPM packages (always AOT)
 ./dist/build-rpm.sh          # Fedora
 ./dist/build-rpm.sh el9      # RHEL 9 via podman
 ./dist/build-rpm.sh srpm     # Source RPM

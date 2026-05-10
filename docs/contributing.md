@@ -119,7 +119,7 @@ Minimal APIs expose OpenAPI automatically. Add `.WithTags("Managed").WithName("M
 ```bash
 dotnet build -c Release -nologo
 dotnet test dmart.Tests/ -c Release --nologo --filter "FullyQualifiedName~MyNewHandler"
-./build.sh  # AOT publish must succeed
+./build.sh --aot  # AOT publish must succeed (build.sh defaults to fast JIT)
 ```
 
 ## Add a new repository method
@@ -324,7 +324,7 @@ If the scenario depends on optional components (a plugin, CXB), use the
 ## Checklist before PR
 
 - [ ] `dotnet build -c Release -nologo` succeeds with 0 warnings.
-- [ ] `./build.sh` succeeds (AOT publish). 0 warnings.
+- [ ] `./build.sh --aot` succeeds (AOT publish). 0 warnings.
 - [ ] `dotnet test dmart.Tests/ -c Release` — all green, new tests added.
 - [ ] `./curl.sh` — all green against a fresh server.
 - [ ] `dmart settings` still produces valid JSON (new config keys are

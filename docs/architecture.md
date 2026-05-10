@@ -191,7 +191,7 @@ dmart/
 ├── Program.cs                          CLI dispatcher + web host wiring
 ├── GlobalUsings.cs                     [InternalsVisibleTo("dmart.Tests")]
 ├── dmart.csproj                        PublishAot=true; sourcegen JSON
-├── build.sh                            ./build.sh → bin/dmart (native)
+├── build.sh                            ./build.sh → bin/dmart (JIT, fast) / --aot → native
 ├── run.sh                              ./run.sh → bin/dmart serve
 ├── curl.sh                             90 end-to-end HTTP scenarios
 ├── config.env.sample                   Template for $BACKEND_ENV / ~/.dmart/config.env

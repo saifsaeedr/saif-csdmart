@@ -40,13 +40,13 @@ DMART_URL=http://127.0.0.1:5099 DMART_ADMIN=dmart DMART_PWD='Test1234' ./curl.sh
 A helper that boots + smokes + kills in one session:
 
 ```bash
-./build.sh
+./build.sh                              # fast JIT — bin/dmart symlinks the apphost
 PGPASSWORD=tramd psql -h localhost -U dmart -d dmart \
   -c "UPDATE users SET attempt_count = 0 WHERE shortname = 'dmart';" >/dev/null
 
 Dmart__PostgresConnection='Host=localhost;Username=dmart;Password=tramd;Database=dmart' \
   ASPNETCORE_URLS=http://127.0.0.1:5099 \
-  ./bin/Release/net10.0/linux-x64/publish/dmart > /tmp/dmart.log 2>&1 &
+  ./bin/dmart serve > /tmp/dmart.log 2>&1 &
 SERVER=$!
 for i in $(seq 1 50); do
   if curl -s --connect-timeout 0.1 --max-time 0.2 http://127.0.0.1:5099/ >/dev/null 2>&1; then break; fi
