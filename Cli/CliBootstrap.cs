@@ -1,5 +1,8 @@
+using Dmart.Auth;
 using Dmart.Config;
 using Dmart.DataAdapters.Sql;
+using Dmart.Services;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
 namespace Dmart.Cli;
@@ -42,5 +45,39 @@ internal static class CliBootstrap
             Environment.Exit(1);
         }
         return (s, db);
+    }
+
+    // Build the ImportExportService with the same null-logger / null-plugin
+    // wiring the CLI subcommands need. Used by `export`, `import`, and `seed`
+    // — three sites that historically each constructed an identical 9-line
+    // graph (entry/user/access repos + refresher + permission svc + service).
+    // Centralizing here means a new ImportExportService dependency lands in
+    // one place instead of three. The helper does not need the intermediate
+    // repositories because none of the callers reuse them outside the
+    // service construction.
+    //
+    // LIFECYCLE: builds an ephemeral object graph — a fresh
+    // AuthzCacheRefresher, fresh repositories, fresh PermissionService — every
+    // call. Intended for short-lived CLI invocations where the process exits
+    // before any cache invalidation matters. DO NOT call from long-running
+    // code paths (HTTP handlers, hosted services); cache invalidations on
+    // the dedicated DI graph would not propagate to instances built here.
+    public static ImportExportService BuildImportExportService(DmartSettings s, Db db)
+    {
+        var nlog = NullLoggerFactory.Instance;
+        var refresher = new AuthzCacheRefresher();
+        var entryRepo = new EntryRepository(db);
+        var userRepo = new UserRepository(db, refresher, new SessionTokenHasher(s));
+        var accessRepo = new AccessRepository(db, refresher, userRepo);
+        return new ImportExportService(
+            entryRepo,
+            new AttachmentRepository(db),
+            userRepo,
+            accessRepo,
+            new SpaceRepository(db),
+            new HistoryRepository(db),
+            new PermissionService(userRepo, accessRepo, refresher),
+            Options.Create(s),
+            nlog.CreateLogger<ImportExportService>());
     }
 }

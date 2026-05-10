@@ -3,7 +3,9 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using Dmart.Config;
+using Dmart.DataAdapters.Sql;
 using Dmart.Models.Api;
+using Dmart.Models.Enums;
 using Dmart.Models.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
@@ -76,23 +78,50 @@ public class PublicSubmitTests : IClassFixture<DmartFactory>
         var body = new StringContent("{\"data\":42}", Encoding.UTF8, "application/json");
         var resp = await client.PostAsync("/public/submit/test/content/admin_profile/anon_submits", body);
 
-        // The happy path returns success with the generated shortname in attributes.
-        if (resp.StatusCode == HttpStatusCode.OK)
+        string? createdShortname = null;
+        try
         {
-            var payload = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
-            payload!.Status.ShouldBe(Status.Success);
-            payload.Attributes.ShouldNotBeNull();
-            payload.Attributes!.ShouldContainKey("shortname");
-            var shortname = payload.Attributes["shortname"]?.ToString();
-            shortname.ShouldNotBeNullOrEmpty();
-            shortname!.Length.ShouldBeGreaterThanOrEqualTo(6);
+            // The happy path returns success with the generated shortname in attributes.
+            if (resp.StatusCode == HttpStatusCode.OK)
+            {
+                var payload = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
+                payload!.Status.ShouldBe(Status.Success);
+                payload.Attributes.ShouldNotBeNull();
+                payload.Attributes!.ShouldContainKey("shortname");
+                createdShortname = payload.Attributes["shortname"]?.ToString();
+                createdShortname.ShouldNotBeNullOrEmpty();
+                createdShortname!.Length.ShouldBeGreaterThanOrEqualTo(6);
+            }
+            // If the schema doesn't exist or validation fails, we still expect a
+            // structured failure, not an unhandled exception.
+            else
+            {
+                var text = await resp.Content.ReadAsStringAsync();
+                text.ShouldNotBeNullOrEmpty();
+            }
         }
-        // If the schema doesn't exist or validation fails, we still expect a
-        // structured failure, not an unhandled exception.
-        else
+        finally
         {
-            var text = await resp.Content.ReadAsStringAsync();
-            text.ShouldNotBeNullOrEmpty();
+            // Clean up the entry we just created. owner_shortname="anonymous"
+            // (set by SubmitHandler) creates an FK reference from entries to
+            // the anonymous user row — leaving the entry behind blocks any
+            // later DELETE FROM users WHERE shortname='anonymous', which
+            // breaks WorldScopeHarness teardown in PublicQueryAnonymousTests
+            // and curl.sh §71's anonymous-user create. See PublicQueryAnonymousTests
+            // WorldScopeHarness.DisposeAsync for the related defensive reset.
+            if (createdShortname is not null)
+            {
+                var entries = _factory.Services.GetRequiredService<EntryRepository>();
+                try
+                {
+                    await entries.DeleteAsync(
+                        spaceName: "test",
+                        subpath: "/anon_submits",
+                        shortname: createdShortname,
+                        type: ResourceType.Content);
+                }
+                catch { /* best-effort */ }
+            }
         }
     }
 }

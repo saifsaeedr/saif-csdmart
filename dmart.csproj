@@ -131,6 +131,17 @@
          CopyToOutputDirectory via Update rather than Include to avoid duplicates. -->
     <Content Update="plugins/**/*.json" CopyToOutputDirectory="PreserveNewest" />
     <Content Update="config.env.sample" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Bundled sample spaces baked INTO the binary so `dmart seed` works
+         on a relocated single-file binary (the Release publish ships in
+         bin/.../publish/, but operators commonly copy just `dmart` to /usr/
+         local/bin or similar — Content next to it would get left behind).
+         Mirrors the same EmbeddedResource + ManifestEmbeddedFileProvider
+         pattern used for cxb/catalog SPAs. The implicit Web SDK Content
+         glob would otherwise claim seed/**/*.json — strip it out first so
+         the file isn't both Content AND EmbeddedResource (NETSDK1022). -->
+    <Content Remove="seed/**" />
+    <None Remove="seed/**" />
+    <EmbeddedResource Include="seed/**" LinkBase="seed" />
   </ItemGroup>
 
   <ItemGroup>
