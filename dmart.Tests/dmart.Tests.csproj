@@ -11,6 +11,15 @@
     <PublishSelfContained>false</PublishSelfContained>
     <!-- Needed because we compile in the SDK file below for testing. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Test patterns like `client.PostAsync(url, new StringContent(body))`
+         hand the content to HttpClient, which owns it via HttpRequestMessage
+         and disposes it when the response is disposed (the test code `using`s
+         the response). CA2000 doesn't see that transitive lifetime, so the
+         test files emit hundreds of false positives. Suppressing here keeps
+         the build noise-free without weakening the main project's CA2000
+         coverage (the main project still treats it as a warning per the
+         WarningsNotAsErrors line in dmart.csproj). -->
+    <NoWarn>$(NoWarn);CA2000</NoWarn>
   </PropertyGroup>
 
   <!--

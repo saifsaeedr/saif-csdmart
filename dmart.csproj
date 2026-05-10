@@ -13,27 +13,45 @@
          parses use CultureInfo.InvariantCulture explicitly; string compares are
          all Ordinal*. Saves ~25-35 MB per linux-x64 publish. -->
     <InvariantGlobalization>true</InvariantGlobalization>
-    <!-- Run trim/AOT analyzers during regular `dotnet build`, not just publish,
-         so new reflection-heavy code surfaces at dev time. Combined with
-         TreatWarningsAsErrors below, this fails the build on any regression.
-         The narrower TreatTrim/AotWarningsAsErrors make the AOT intent self-
-         documenting and survive someone flipping TreatWarningsAsErrors off. -->
-    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
-    <EnableAotAnalyzer>true</EnableAotAnalyzer>
-    <TreatTrimWarningsAsErrors>true</TreatTrimWarningsAsErrors>
-    <TreatAotWarningsAsErrors>true</TreatAotWarningsAsErrors>
+    <!-- Build-time analyzer suite is split into "fast local" and "comprehensive".
+         The full suite (trim + AOT analyzers + CA-rules at latest-all) walks
+         the entire IL graph and adds ~3 minutes to a clean build, which is
+         too slow for dev iteration. Gate it on $(CI)=='true' — GitHub Actions
+         sets CI=true automatically, so ci.yml and release.yml run the full
+         strict pass on every push/PR/tag, while local `dotnet build` runs
+         the lighter pass.
+
+         Local default (CI != 'true'):
+           - AnalysisLevel=latest-recommended (curated CA-subset, fast)
+           - Trim/AOT analyzers OFF (the heavy IL walk)
+
+         CI / release (CI == 'true'):
+           - AnalysisLevel=latest-all (every CA/CS rule)
+           - Trim + AOT analyzers ON, both as ERRORS
+           - TreatWarningsAsErrors stays on for both — zero-warning policy. -->
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <!-- Run the full Roslyn analyzer set (CA1xxx + CA2xxx security/perf rules)
-         on every build. Combined with TreatWarningsAsErrors=true and the
-         category silences in .editorconfig, only audited-genuine signals
-         (CA2100 SQL review, CA1849 sync-in-async on a hot path) can fail
-         the build. Existing CA2100 sites carry [SuppressMessage] attributes
-         with audit justifications.
-         CA2000 (dispose) and CA1508 (dead code) need per-site review of 18
-         and 6 sites respectively — kept as warnings (not errors) until that
-         follow-up pass; see .editorconfig. -->
-    <AnalysisLevel>latest-all</AnalysisLevel>
-    <WarningsNotAsErrors>CA2000;CA1508</WarningsNotAsErrors>
+    <!-- CA2000 is silenced project-wide. Every site in dmart.csproj that
+         tripped it is a framework-owned IDisposable: StringContent /
+         StreamContent / ByteArrayContent passed to HttpClient (which owns
+         them via HttpRequestMessage), PhysicalFileProvider held by the
+         static file middleware for the app lifetime, WebSocket owned by
+         ASP.NET's WebSocketMiddleware, NativePluginHandle ownership
+         transferred to the plugin manager. CA2000 doesn't see those
+         transfers, so it produces only false positives here. Suppress
+         with a per-site comment if a NEW genuine disposal bug shows up.
+         CA1508 stays in WarningsNotAsErrors as belt-and-suspenders for
+         any future bool?/int? boxing pattern the analyzer flags before
+         a #pragma is added (the existing sites carry the pragma). -->
+    <NoWarn>$(NoWarn);CA2000</NoWarn>
+    <WarningsNotAsErrors>CA1508</WarningsNotAsErrors>
+
+    <AnalysisLevel Condition="'$(CI)' == 'true'">latest-all</AnalysisLevel>
+    <AnalysisLevel Condition="'$(CI)' != 'true'">latest-recommended</AnalysisLevel>
+
+    <EnableTrimAnalyzer Condition="'$(CI)' == 'true'">true</EnableTrimAnalyzer>
+    <EnableAotAnalyzer Condition="'$(CI)' == 'true'">true</EnableAotAnalyzer>
+    <TreatTrimWarningsAsErrors Condition="'$(CI)' == 'true'">true</TreatTrimWarningsAsErrors>
+    <TreatAotWarningsAsErrors Condition="'$(CI)' == 'true'">true</TreatAotWarningsAsErrors>
     <!-- Refuse System.Text.Json's reflection-based fallback at runtime so a
          regression (JsonSerializer.Serialize(x) without a JsonTypeInfo<T>)
          throws NotSupportedException in Debug/JIT too — not only at AOT

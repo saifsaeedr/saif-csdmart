@@ -12,6 +12,11 @@
     <RootNamespace>Dmart.Client</RootNamespace>
     <AssemblyName>Dmart.Client</AssemblyName>
     <LangVersion>latest</LangVersion>
+    <!-- Same CA2000 false-positive class as dmart.csproj — every site
+         passes new StringContent / ByteArrayContent to HttpClient, which
+         owns and disposes them via HttpRequestMessage. See the longer
+         comment in dmart.csproj for the rationale. -->
+    <NoWarn>$(NoWarn);CA2000</NoWarn>
 
     <!-- NuGet metadata -->
     <IsPackable>true</IsPackable>

@@ -569,8 +569,15 @@ public sealed class EntryService(
             Tags = PatchTags(existing.Tags),
             // PatchBool returns bool? (since the IsOpen caller above needs a
             // nullable result); Entry.IsActive is non-nullable, so the ??
-            // unwraps the always-non-null result back to bool.
+            // unwraps the always-non-null result back to bool. The analyzer
+            // sees the fallback path through PatchBool always returning
+            // non-null when given a non-null fallback and flags the ?? as
+            // dead — keep it as a defensive belt-and-suspenders so a future
+            // PatchBool refactor that introduces a null-returning branch
+            // can't silently flip IsActive to false.
+#pragma warning disable CA1508
             IsActive = PatchBool("is_active", existing.IsActive) ?? existing.IsActive,
+#pragma warning restore CA1508
             // Python parity: `acl` lives in Meta.restricted_fields and is only
             // writable through the dedicated update_acl path. Regular update
             // ignores it; DispatchUpdateAclAsync opts in via

@@ -55,7 +55,7 @@ public sealed class RequestRegexValidationTests : IClassFixture<DmartFactory>
     [InlineData("foo/bar")]                    // slash
     [InlineData("foo\tbar")]                   // tab
     [InlineData("foo\nbar")]                   // newline
-    [InlineData("foo bar")]                  // null byte
+    [InlineData("foo\0bar")]                   // null byte
     [InlineData("foo\"bar")]                   // double quote
     [InlineData("<script>")]                   // HTML
     [InlineData("../etc/passwd")]              // path traversal

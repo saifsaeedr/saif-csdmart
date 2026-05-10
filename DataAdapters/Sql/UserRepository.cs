@@ -156,7 +156,9 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
         cmd.Parameters.Add(new() { Value = (object?)u.GoogleId ?? DBNull.Value });
         cmd.Parameters.Add(new() { Value = (object?)u.FacebookId ?? DBNull.Value });
         cmd.Parameters.Add(new() { Value = (object?)u.SocialAvatarUrl ?? DBNull.Value });
+#pragma warning disable CA1508 // Analyzer limitation: int? boxed via (object?) cast IS null when source is null; the ?? is load-bearing.
         cmd.Parameters.Add(new() { Value = (object?)u.AttemptCount ?? DBNull.Value });
+#pragma warning restore CA1508
         AddJsonb(cmd, JsonbHelpers.ToJsonb(u.LastLogin));
         cmd.Parameters.Add(new() { Value = (object?)u.Notes ?? DBNull.Value });
         cmd.Parameters.Add(new()

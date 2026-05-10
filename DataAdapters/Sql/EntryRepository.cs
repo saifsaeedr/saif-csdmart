@@ -148,7 +148,9 @@ public sealed class EntryRepository(Db db)
         cmd.Parameters.Add(new() { Value = (object?)e.LastChecksumHistory ?? DBNull.Value });
         cmd.Parameters.Add(new() { Value = JsonbHelpers.EnumMember(e.ResourceType) });
         cmd.Parameters.Add(new() { Value = (object?)e.State ?? DBNull.Value });
+#pragma warning disable CA1508 // Analyzer limitation: bool? boxed via (object?) cast IS null when source is null; the ?? is load-bearing.
         cmd.Parameters.Add(new() { Value = (object?)e.IsOpen ?? DBNull.Value });
+#pragma warning restore CA1508
         AddJsonb(cmd, JsonbHelpers.ToJsonb(e.Reporter));
         cmd.Parameters.Add(new() { Value = (object?)e.WorkflowShortname ?? DBNull.Value });
         AddJsonb(cmd, JsonbHelpers.ToJsonb(e.Collaborators));

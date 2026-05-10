@@ -27,6 +27,7 @@ public class JqRunnerTests
     public void ValidateFilter_Rejects_Blocked_Builtins(string filter)
     {
         JqRunner.ValidateFilter(filter, out var reason).ShouldBeFalse();
+        reason.ShouldNotBeNull();
         reason.ShouldContain("disallowed builtins");
     }
 
@@ -35,6 +36,7 @@ public class JqRunnerTests
     {
         var bigFilter = new string('.', JqRunner.MaxFilterLength + 1);
         JqRunner.ValidateFilter(bigFilter, out var reason).ShouldBeFalse();
+        reason.ShouldNotBeNull();
         reason.ShouldContain("character limit");
     }
 
