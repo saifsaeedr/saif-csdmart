@@ -17,13 +17,20 @@ namespace Dmart;
 // so lines are durable without an explicit flush per message; format is
 // always JSON lines (matches Python `.ljson.log`).
 //
-// Size-based rotation mirrors Python upstream's
-// concurrent_log_handler.ConcurrentRotatingFileHandler: when adding the
-// current line would push file size past `LogMaxBytes`, the stream is
-// closed, "{file}.{N-1}" is renamed to "{file}.{N}" down the chain, the
-// active file is renamed to "{file}.1", and a fresh file is opened. With
-// `LogBackupCount=0` the file is truncated in place instead (Python
-// parity). With `LogMaxBytes<=0` rotation is disabled entirely.
+// Size-based rotation. When adding the current line would push file size
+// past `LogMaxBytes`, the active stream is closed and one of three modes
+// runs based on `LogBackupCount`:
+//   < 0  — unlimited (default): scan the directory for existing
+//          "{file}.<N>" archives, pick the next free index, rename current
+//          → "{file}.<N+1>", reopen. Archives accumulate forever; oldest
+//          has the lowest N, newest has the highest. Operators handle
+//          retention out of band (logrotate, journald, external archival).
+//   = 0  — truncate in place on rollover, no archives kept.
+//   > 0  — Python parity (RotatingFileHandler.doRollover): shift
+//          "{file}.{i}" → "{file}.{i+1}" from i=N-1 down to 1, rename
+//          active → "{file}.1", reopen. "{file}.1" is always newest,
+//          "{file}.N" is oldest.
+// With `LogMaxBytes<=0` rotation is disabled entirely.
 //
 // Records are serialized with a hand-rolled Utf8JsonWriter walk so the
 // writer stays AOT-safe — request/response bodies are captured as nested
@@ -61,7 +68,9 @@ public sealed class LogSink : IDisposable
         var s = settings.Value;
         _path = s.LogFile ?? "";
         _maxBytes = s.LogMaxBytes;
-        _backupCount = Math.Max(0, s.LogBackupCount);
+        // Negatives (other than -1) collapse to -1 so the rollover branches
+        // only need to test "< 0", "== 0", "> 0".
+        _backupCount = s.LogBackupCount < 0 ? -1 : s.LogBackupCount;
         if (string.IsNullOrWhiteSpace(_path)) return;
 
         var dir = Path.GetDirectoryName(_path);
@@ -116,7 +125,12 @@ public sealed class LogSink : IDisposable
             // When the next record would cross the limit we rotate before
             // writing, so each rotated file is at most maxBytes (last line
             // may push slightly over, matching Python's behavior).
-            if (_maxBytes > 0 && _currentSize + bytes.Length > _maxBytes)
+            //
+            // The `_currentSize > 0` guard avoids rotating an empty file —
+            // happens when the very first write is itself larger than
+            // maxBytes (only realistic with absurdly small limits in tests),
+            // and would otherwise emit a useless empty `.1` archive.
+            if (_maxBytes > 0 && _currentSize > 0 && _currentSize + bytes.Length > _maxBytes)
                 Rollover();
             _stream!.Write(bytes, 0, bytes.Length);
             _stream.Flush();
@@ -124,10 +138,7 @@ public sealed class LogSink : IDisposable
         }
     }
 
-    // Mirrors logging.handlers.RotatingFileHandler.doRollover(): close active
-    // stream, shift "{file}.{i}" → "{file}.{i+1}" from i=backupCount-1 down to
-    // 1, rename "{file}" → "{file}.1", reopen. With backupCount=0 the file is
-    // simply truncated — Python's behavior when no backups are kept.
+    // Branches by _backupCount (see class doc-comment for the three modes).
     // Caller MUST hold _lock.
     private void Rollover()
     {
@@ -135,8 +146,17 @@ public sealed class LogSink : IDisposable
         _stream.Dispose();
         _stream = null;
 
-        if (_backupCount > 0)
+        if (_backupCount < 0)
         {
+            // Unlimited: append-numbering. Find the highest existing
+            // "{file}.<N>" and rename current → "{file}.<N+1>". Survives
+            // process restart because the scan reads disk state.
+            var next = NextUnboundedArchiveIndex();
+            if (File.Exists(_path)) File.Move(_path, $"{_path}.{next}");
+        }
+        else if (_backupCount > 0)
+        {
+            // Bounded shift (Python parity).
             for (var i = _backupCount - 1; i >= 1; i--)
             {
                 var src = $"{_path}.{i}";
@@ -157,6 +177,27 @@ public sealed class LogSink : IDisposable
 
         _stream = new FileStream(_path, FileMode.Append, FileAccess.Write, FileShare.Read);
         _currentSize = 0;
+    }
+
+    // Returns N+1 where N is the highest numeric suffix found among
+    // "{filename}.<digits>" entries in the log directory. Starts at 1 when
+    // no archives exist yet. We rescan on every rollover instead of caching
+    // a counter so behavior is correct after restart and after operator
+    // intervention (manual rename/delete of archives).
+    private int NextUnboundedArchiveIndex()
+    {
+        var dir = Path.GetDirectoryName(_path);
+        if (string.IsNullOrEmpty(dir)) dir = ".";
+        var prefix = Path.GetFileName(_path) + ".";
+        var max = 0;
+        foreach (var entry in Directory.EnumerateFiles(dir, prefix + "*"))
+        {
+            var name = Path.GetFileName(entry);
+            if (!name.StartsWith(prefix, StringComparison.Ordinal)) continue;
+            var suffix = name.Substring(prefix.Length);
+            if (int.TryParse(suffix, out var n) && n > max) max = n;
+        }
+        return max + 1;
     }
 
     private static void WriteValue(Utf8JsonWriter w, object? value)

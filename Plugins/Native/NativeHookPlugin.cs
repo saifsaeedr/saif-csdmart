@@ -18,6 +18,13 @@ internal sealed class NativeHookPlugin(NativePluginHandle handle, string shortna
         // queries default to the user's permissions, and the plugin's
         // shortname so LogCb can prefix log categories. Restore previous
         // values rather than nulling to keep nested invocations safe.
+        //
+        // Both context fields are [ThreadStatic]. That's safe here because
+        // handle.CallHook is a synchronous P/Invoke — no await between set
+        // and restore — so the native code (and any LogCb it triggers) runs
+        // on the same thread that set the values. If this ever moves to an
+        // async-bridge model (e.g. Task.Run for native dispatch), switch to
+        // AsyncLocal<T> or the values will leak across awaits.
         var previousActor = PluginInvocationContext.CurrentActor;
         var previousShortname = PluginInvocationContext.CurrentShortname;
         PluginInvocationContext.CurrentActor = e.UserShortname;

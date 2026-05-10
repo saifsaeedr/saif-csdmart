@@ -95,9 +95,11 @@ public static unsafe class NativePluginCallbacks
 
     // ILoggerFactory is a singleton in the container, so resolving it once
     // is fine — and logging is on the hot path, so we want to avoid the
-    // CreateScope/Resolve cost per call. Race-tolerant: concurrent readers
-    // either both see null (and both resolve to the same instance) or
-    // both see the cached value.
+    // CreateScope/Resolve cost per call. Concurrent readers either both
+    // see null (resolving to the same DI singleton, which we publish
+    // atomically via Interlocked.CompareExchange) or both see the cached
+    // reference. Reference reads are atomic on all .NET-supported CPUs,
+    // so a Volatile.Read isn't strictly necessary.
     private static ILoggerFactory? _loggerFactoryCache;
 
     // Fills the struct with function pointers and returns a stable pointer
@@ -390,22 +392,11 @@ public static unsafe class NativePluginCallbacks
     {
         try
         {
-            var factory = GetLoggerFactory();
-            if (factory is null) return;
-
-            var msg = PtrToString(message);
-            if (string.IsNullOrEmpty(msg)) return;
-            if (msg.Length > 16384) msg = string.Concat(msg.AsSpan(0, 16384), "…[truncated]");
-
-            var sub = PtrToString(category);
-            var shortname = PluginInvocationContext.CurrentShortname ?? "unknown";
-            var fullCategory = string.IsNullOrEmpty(sub)
-                ? $"plugin.{shortname}"
-                : $"plugin.{shortname}.{sub}";
-
-            var lvl = ClampLevel(level);
-            var logger = factory.CreateLogger(fullCategory);
-            if (logger.IsEnabled(lvl)) logger.Log(lvl, "{Message}", msg);
+            // Marshal-only here; the real work lives in EmitPluginLog so
+            // tests can drive the full pipeline (category prefix, truncation,
+            // level mapping, ILogger dispatch, LogSink write) without
+            // synthesizing UTF-8 byte buffers.
+            EmitPluginLog(level, PtrToString(category), PtrToString(message));
         }
         catch
         {
@@ -415,10 +406,43 @@ public static unsafe class NativePluginCallbacks
         }
     }
 
+    // internal for testing via dmart.Tests. Holds all the policy LogCb
+    // applies once the byte* args have been decoded.
+    internal static void EmitPluginLog(int level, string? sub, string? msg)
+    {
+        var factory = GetLoggerFactory();
+        if (factory is null) return;
+        if (string.IsNullOrEmpty(msg)) return;
+        if (msg.Length > 16384) msg = string.Concat(msg.AsSpan(0, 16384), "…[truncated]");
+
+        var shortname = PluginInvocationContext.CurrentShortname ?? "unknown";
+        var fullCategory = string.IsNullOrEmpty(sub)
+            ? $"plugin.{shortname}"
+            : $"plugin.{shortname}.{sub}";
+
+        var lvl = ClampLevel(level);
+        var logger = factory.CreateLogger(fullCategory);
+        if (logger.IsEnabled(lvl)) logger.Log(lvl, "{Message}", msg);
+    }
+
+    // internal for testing — lets tests inject a fake ILoggerFactory or
+    // clear the cache between cases without going through DI.
+    internal static void SetServicesForTesting(IServiceProvider? services)
+    {
+        Services = services;
+        _loggerFactoryCache = null;
+    }
+
     private static ILoggerFactory? GetLoggerFactory()
     {
-        if (_loggerFactoryCache is not null) return _loggerFactoryCache;
-        _loggerFactoryCache = Services?.GetService<ILoggerFactory>();
+        var cached = _loggerFactoryCache;
+        if (cached is not null) return cached;
+        var resolved = Services?.GetService<ILoggerFactory>();
+        if (resolved is null) return null;
+        // CompareExchange publishes our reference atomically and yields to
+        // any racing thread that already wrote one. Either way we return
+        // whatever ended up cached, so all callers see the same instance.
+        Interlocked.CompareExchange(ref _loggerFactoryCache, resolved, null);
         return _loggerFactoryCache;
     }
 
