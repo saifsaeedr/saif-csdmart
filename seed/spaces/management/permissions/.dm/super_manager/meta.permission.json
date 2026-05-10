@@ -44,7 +44,9 @@
     "query",
     "create",
     "view",
-    "attach"
+    "attach",
+    "assign",
+    "progress_ticket"
   ],
   "conditions": [],
   "restricted_fields": [],
