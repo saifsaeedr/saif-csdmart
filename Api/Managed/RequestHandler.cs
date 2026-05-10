@@ -1048,6 +1048,14 @@ public static class RequestHandler
             // acl, so tickets persisted with Acl=null and the fetch response
             // omitted it (Entry.Acl serializer skips nulls).
             Acl = ParseAcl(attrs),
+            // Python parity: relationships is a Meta field too. Without this
+            // line MaterializeEntry silently dropped record.attributes
+            // ["relationships"] on the floor — the column landed NULL even
+            // when the client supplied a list, and the RI gate in EntryService
+            // had nothing to validate against. Round-tripping through the
+            // source-gen typeinfo keeps shapes consistent with what
+            // JsonbHelpers.FromRelationships produces on read.
+            Relationships = ExtractRelationships(attrs),
             // Ticket-specific fields — Python reads these from record.attributes
             // via Meta.from_record → Ticket.__init__. C# was dropping them.
             State = attrs.TryGetValue("state", out var st) ? ConvertToString(st) : null,
@@ -1275,6 +1283,22 @@ public static class RequestHandler
         if (raw is List<string> stringList) return stringList;
         if (raw is IEnumerable<object> objs)
             return objs.Select(o => o?.ToString() ?? "").ToList();
+        return null;
+    }
+
+    // Extracts attrs["relationships"] into the same `List<Dictionary<string, object>>`
+    // shape JsonbHelpers.FromRelationships produces on read. Going through
+    // GetRawText + FromRelationships keeps every relationship dict's nested
+    // values as JsonElement — the form EntryService.ValidateRelationshipsAsync
+    // and the SQL writer both already handle. Returning null when the key is
+    // absent or the wire shape isn't an array preserves the prior behavior of
+    // "no relationships" rather than silently turning a malformed input into [].
+    internal static List<Dictionary<string, object>>? ExtractRelationships(Dictionary<string, object> attrs)
+    {
+        if (!attrs.TryGetValue("relationships", out var raw) || raw is null) return null;
+        if (raw is List<Dictionary<string, object>> already) return already;
+        if (raw is JsonElement el && el.ValueKind == JsonValueKind.Array)
+            return JsonbHelpers.FromRelationships(el.GetRawText());
         return null;
     }
 

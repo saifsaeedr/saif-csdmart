@@ -91,7 +91,16 @@ public static class JsonStripEmptiesMiddleware
                 foreach (var kv in obj)
                 {
                     if (kv.Value is not null) StripEmpties(kv.Value);
-                    if (kv.Key == "payload") continue;
+                    // Keys preserved even when empty:
+                    //   * payload — Python emits {} for entries without bodies;
+                    //     clients branch on schema_shortname inside it.
+                    //   * relationships — Python parity (Meta.model_dump emits
+                    //     []); the empty-vs-absent distinction matters here
+                    //     because relationships is part of the documented
+                    //     Meta shape, not an optional add-on. EntryMapper and
+                    //     EntryToJsonNode both materialize this as [] when
+                    //     unset; the middleware must not undo their work.
+                    if (kv.Key is "payload" or "relationships") continue;
                     if (IsEmpty(kv.Value))
                         (toRemove ??= new List<string>()).Add(kv.Key);
                 }

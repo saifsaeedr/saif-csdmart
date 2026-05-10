@@ -84,6 +84,17 @@ public sealed class EntryService(
         if (validationError is not null)
             return Result<Entry>.Fail(InternalErrorCode.INVALID_DATA, validationError, ErrorTypes.Request);
 
+        // Referential integrity: every relationship's related_to locator must
+        // resolve to a live entry before we persist this row. Without this gate
+        // a caller could create dangling references that read paths would later
+        // surface as 404s. Mirrors Python adapter.py::_validate_referential_integrity
+        // but for entries-table types (Python only gates user/role/permission/group;
+        // the parity here is the *pattern*, not the scope — content entries also
+        // benefit from refusing to land orphans).
+        var relError = await ValidateRelationshipsAsync(entry.Relationships, ct);
+        if (relError is not null)
+            return Result<Entry>.Fail(InternalErrorCode.INVALID_DATA, relError, ErrorTypes.Request);
+
         // Folder-level compound-key uniqueness (Python parity:
         // adapter.py::validate_uniqueness). Runs before plugins so a
         // before-create hook can rely on the constraint having been checked.
@@ -156,6 +167,118 @@ public sealed class EntryService(
         return "payload failed schema validation: " + string.Join("; ", errors);
     }
 
+    // Walks the relationships list and verifies each related_to locator
+    // resolves to a row in `entries`. Returns null on success, a single-line
+    // error message (containing the literal "relationship target not found"
+    // anchor the integration tests pin on) on the first miss so callers can
+    // surface a structured INVALID_DATA without leaking full locator dumps.
+    //
+    // Scope: user/role/permission/space live in their own tables, so we
+    // can't probe them via EntryRepository.GetAsync; skipping those keeps the
+    // gate honest (no false positives on cross-table refs) while still
+    // catching the common case — relationships from content entries to other
+    // content entries, tickets, folders, schemas, posts, etc.
+    private async Task<string?> ValidateRelationshipsAsync(
+        List<Dictionary<string, object>>? relationships, CancellationToken ct)
+    {
+        if (relationships is null || relationships.Count == 0) return null;
+        foreach (var rel in relationships)
+        {
+            if (rel is null) continue;
+            if (!rel.TryGetValue("related_to", out var rawTarget) || rawTarget is null) continue;
+            var target = ParseLocator(rawTarget);
+            if (target is null) continue;  // malformed shape — let schema validation surface it, not RI.
+            // Out-of-table targets pass through. EntryRepository.GetAsync only
+            // probes `entries`, so probing user/role/permission/space here
+            // would always 404 even when the target exists elsewhere.
+            if (target.Type is ResourceType.User or ResourceType.Role
+                or ResourceType.Permission or ResourceType.Space) continue;
+            var hit = await entries.GetAsync(target.SpaceName, target.Subpath, target.Shortname, target.Type, ct);
+            if (hit is null)
+                return $"relationship target not found: {target.SpaceName}{target.Subpath}/{target.Shortname} ({JsonbHelpers.EnumMember(target.Type)})";
+        }
+        return null;
+    }
+
+    // Parses one related_to dict into a Locator. Tolerates both shapes the
+    // dict can land in: nested Dictionary<string, object> (in-process plugin
+    // callers) and JsonElement of Object kind (HTTP callers — source-gen
+    // deserializes nested object values as JsonElement). Returns null when
+    // any required field (space_name / subpath / shortname / type) is
+    // missing or unparseable — the caller treats that as "skip" rather
+    // than "fail" since the schema validator owns shape errors.
+    private static Locator? ParseLocator(object raw)
+    {
+        string? type = null, spaceName = null, subpath = null, shortname = null;
+        if (raw is Dictionary<string, object> dict)
+        {
+            type = TryReadString(dict, "type");
+            spaceName = TryReadString(dict, "space_name");
+            subpath = TryReadString(dict, "subpath");
+            shortname = TryReadString(dict, "shortname");
+        }
+        else if (raw is JsonElement el && el.ValueKind == JsonValueKind.Object)
+        {
+            type = TryReadJsonString(el, "type");
+            spaceName = TryReadJsonString(el, "space_name");
+            subpath = TryReadJsonString(el, "subpath");
+            shortname = TryReadJsonString(el, "shortname");
+        }
+        if (string.IsNullOrEmpty(type) || string.IsNullOrEmpty(spaceName)
+            || string.IsNullOrEmpty(shortname)) return null;
+        ResourceType rt;
+        try { rt = JsonbHelpers.ParseEnumMember<ResourceType>(type); }
+        catch { return null; }  // unknown type → shape error, skip.
+        return new Locator(rt, spaceName, subpath ?? "/", shortname);
+    }
+
+    private static string? TryReadString(Dictionary<string, object> d, string key)
+    {
+        if (!d.TryGetValue(key, out var v) || v is null) return null;
+        if (v is string s) return s;
+        if (v is JsonElement je && je.ValueKind == JsonValueKind.String) return je.GetString();
+        return v.ToString();
+    }
+
+    private static string? TryReadJsonString(JsonElement el, string key)
+        => el.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+    // Returns the subset of `next` whose related_to locator did NOT appear in
+    // `prev`. Compared by the four locator fields (type / space_name /
+    // subpath / shortname) — uuid/domain/attributes are ignored because they
+    // don't move the row. Both lists may contain JsonElement-boxed or
+    // Dictionary-typed values; ParseLocator normalizes the comparison key
+    // either way. Used by UpdateAsync to validate only freshly added refs.
+    private static List<Dictionary<string, object>>? DiffNewRelationships(
+        List<Dictionary<string, object>>? prev, List<Dictionary<string, object>>? next)
+    {
+        if (next is null || next.Count == 0) return null;
+        if (prev is null || prev.Count == 0) return next;
+        var prevKeys = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var rel in prev)
+        {
+            if (rel is null) continue;
+            if (rel.TryGetValue("related_to", out var t) && t is not null)
+            {
+                var loc = ParseLocator(t);
+                if (loc is not null) prevKeys.Add(LocatorKey(loc));
+            }
+        }
+        var added = new List<Dictionary<string, object>>();
+        foreach (var rel in next)
+        {
+            if (rel is null) continue;
+            if (!rel.TryGetValue("related_to", out var t) || t is null) { added.Add(rel); continue; }
+            var loc = ParseLocator(t);
+            if (loc is null) { added.Add(rel); continue; }
+            if (!prevKeys.Contains(LocatorKey(loc))) added.Add(rel);
+        }
+        return added.Count > 0 ? added : null;
+    }
+
+    private static string LocatorKey(Locator l)
+        => $"{JsonbHelpers.EnumMember(l.Type)}|{l.SpaceName}|{l.Subpath}|{l.Shortname}";
+
     // Static field-sets for the two dispatchers that need to bypass
     // ApplyPatch's restricted-field gate. Naming a set per dispatcher is
     // clearer than a global bool — each call site declares exactly which
@@ -197,6 +320,20 @@ public sealed class EntryService(
         var validationError = await ValidatePayloadAsync(merged, ct);
         if (validationError is not null)
             return Result<Entry>.Fail(InternalErrorCode.INVALID_DATA, validationError, ErrorTypes.Request);
+
+        // Same RI gate as Create, but scoped to relationships the patch
+        // ADDS — refs that already existed pre-patch get a pass even if
+        // their targets have since vanished. Without that scoping, deleting
+        // a content entry would silently weaponize every existing entry
+        // that still points at it: their next unrelated update (a tag bump,
+        // a displayname tweak) would re-run the gate over stale rows and
+        // fail. We catch typos at insert time while leaving historical
+        // dangling refs to be cleaned up explicitly, not via accidental
+        // breakage.
+        var addedRels = DiffNewRelationships(existing.Relationships, merged.Relationships);
+        var relError = await ValidateRelationshipsAsync(addedRels, ct);
+        if (relError is not null)
+            return Result<Entry>.Fail(InternalErrorCode.INVALID_DATA, relError, ErrorTypes.Request);
 
         // Folder-level compound-key uniqueness — same as Create, but the
         // existing entry is excluded from the conflict set (matching
@@ -306,6 +443,27 @@ public sealed class EntryService(
         var ctx = existing is not null ? PermissionService.FromEntry(existing) : null;
         if (!await perms.CanDeleteAsync(actor, locator, ctx, ct))
             return Result<bool>.Fail(InternalErrorCode.NOT_ALLOWED, "no delete access", ErrorTypes.Auth);
+
+        // Reverse referential-integrity: deleting an entry that other entries
+        // still point at would leave dangling refs behind. Block with a
+        // diagnostic that names the first blocker so the caller can decide to
+        // fix-up or force the chain manually. Folder cascade is intentionally
+        // skipped — auditing every descendant for external incoming refs is
+        // structurally different (would need a subtree-aware query) and the
+        // current users.delete-a-folder flow already accepts internal-only
+        // refs disappearing along with the folder. Filed as a follow-up if
+        // anyone needs symmetric folder-scoped checking.
+        if (existing is not null && locator.Type != ResourceType.Folder)
+        {
+            var referencer = await entries.FindFirstReferencerAsync(
+                locator.SpaceName, locator.Subpath, locator.Shortname, locator.Type,
+                excludeSpace: locator.SpaceName, excludeSubpath: locator.Subpath,
+                excludeShortname: locator.Shortname, ct);
+            if (referencer is { } r)
+                return Result<bool>.Fail(InternalErrorCode.CANNT_DELETE,
+                    $"entry has incoming relationships from {r.SpaceName}{r.Subpath}/{r.Shortname}",
+                    ErrorTypes.Request);
+        }
 
         // Build a delete Event from whatever we know (prefer the loaded entry so
         // plugin filters on resource_type/schema_shortname see real values).
@@ -526,6 +684,22 @@ public sealed class EntryService(
             return fallback;
         }
 
+        // Relationships are a full-list replacement on patch, not a deep
+        // merge — clients that want to add one relationship send the whole
+        // list. The wire shape lands as a JsonElement array (source-gen);
+        // route through the same FromRelationships path MaterializeEntry
+        // uses so the SQL writer sees identical structure regardless of
+        // entry-point. Patch with `relationships: null` clears the column.
+        List<Dictionary<string, object>>? PatchRelationships()
+        {
+            if (!patch.TryGetValue("relationships", out var raw)) return existing.Relationships;
+            if (raw is null) return null;
+            if (raw is List<Dictionary<string, object>> direct) return direct;
+            if (raw is JsonElement el && el.ValueKind == JsonValueKind.Array)
+                return JsonbHelpers.FromRelationships(el.GetRawText());
+            return existing.Relationships;
+        }
+
         // Payload body merge: mirrors Python's deep_update(old_body, patch_body)
         // followed by remove_none_dict(). Sending a property as null removes it.
         var payload = existing.Payload;
@@ -585,6 +759,7 @@ public sealed class EntryService(
             Acl = RestrictedAllowed("acl") && patch.ContainsKey("acl")
                 ? ParsePatchAcl(patch)
                 : existing.Acl,
+            Relationships = PatchRelationships(),
             Payload = payload,
             UpdatedAt = TimeUtils.Now(),
         };
