@@ -1406,8 +1406,16 @@ curl -s -H "$CT" -H "$AUTH_HEADER" "$API_URL/managed/request" -d "{
   ]
 }" > /dev/null 2>&1
 
-# Create the world permission, anonymous role, and anonymous user.
+# Create the world permission, anonymous role, and (idempotently) anonymous user.
 # Admin privilege required — we have $AUTH_HEADER from the earlier login.
+#
+# The anonymous user must be handled separately because dmart's request_type
+# has no upsert. If a prior run/test (e.g. integration suite) left the row in
+# place — common when /public/submit-style tests created anon-owned entries
+# whose FK references blocked the cleanup delete — a plain `create` here
+# fails silently and the row keeps its stale (likely empty) roles, which
+# makes the subsequent /public/query return 0 rows. We try delete-then-create
+# first, then fall back to `update` if delete was FK-blocked.
 curl -s -H "$CT" -H "$AUTH_HEADER" "$API_URL/managed/request" -d "{
   \"space_name\":\"management\",\"request_type\":\"create\",\"records\":[
     {\"resource_type\":\"permission\",\"subpath\":\"/permissions\",\"shortname\":\"$WPERM\",
@@ -1417,11 +1425,32 @@ curl -s -H "$CT" -H "$AUTH_HEADER" "$API_URL/managed/request" -d "{
                     \"actions\":[\"view\",\"query\"],
                     \"conditions\":[\"is_active\"]}},
     {\"resource_type\":\"role\",\"subpath\":\"/roles\",\"shortname\":\"$WROLE\",
-     \"attributes\":{\"is_active\":true,\"permissions\":[\"$WPERM\"]}},
+     \"attributes\":{\"is_active\":true,\"permissions\":[\"$WPERM\"]}}
+  ]
+}" > /dev/null 2>&1
+
+# Best-effort delete any pre-existing anonymous row (FK-blocked is fine).
+curl -s -H "$CT" -H "$AUTH_HEADER" "$API_URL/managed/request" -d "{
+  \"space_name\":\"management\",\"request_type\":\"delete\",\"records\":[
+    {\"resource_type\":\"user\",\"subpath\":\"/users\",\"shortname\":\"anonymous\"}
+  ]
+}" > /dev/null 2>&1
+
+# Try create; if it fails because the row survived (FK), use update.
+ANON_RESP=$(curl -s -H "$CT" -H "$AUTH_HEADER" "$API_URL/managed/request" -d "{
+  \"space_name\":\"management\",\"request_type\":\"create\",\"records\":[
     {\"resource_type\":\"user\",\"subpath\":\"/users\",\"shortname\":\"anonymous\",
      \"attributes\":{\"is_active\":true,\"roles\":[\"$WROLE\"],\"type\":\"web\"}}
   ]
-}" > /dev/null 2>&1
+}")
+if ! echo "$ANON_RESP" | jq -e '.status == "success"' > /dev/null 2>&1; then
+    curl -s -H "$CT" -H "$AUTH_HEADER" "$API_URL/managed/request" -d "{
+      \"space_name\":\"management\",\"request_type\":\"update\",\"records\":[
+        {\"resource_type\":\"user\",\"subpath\":\"/users\",\"shortname\":\"anonymous\",
+         \"attributes\":{\"is_active\":true,\"roles\":[\"$WROLE\"],\"type\":\"web\"}}
+      ]
+    }" > /dev/null 2>&1
+fi
 curl -s -H "$AUTH_HEADER" "$API_URL/managed/reload-security-data" > /dev/null 2>&1
 
 # 72. Query /public/query as anonymous (no Authorization header).

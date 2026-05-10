@@ -104,13 +104,22 @@ public sealed class SpaceRepository(Db db)
         AddJsonb(cmd, JsonbHelpers.ToJsonb(space.Relationships));
         cmd.Parameters.Add(new() { Value = (object?)space.LastChecksumHistory ?? DBNull.Value });
         cmd.Parameters.Add(new() { Value = JsonbHelpers.EnumMember(space.ResourceType) });
-        cmd.Parameters.Add(new() { Value = space.RootRegistrationSignature });
-        cmd.Parameters.Add(new() { Value = space.PrimaryWebsite });
+        // The `?? ""` backstops are load-bearing despite the C# property
+        // initializers (`= ""`). When STJ source-gen deserializes a record
+        // with `required` members (Shortname/SpaceName/Subpath/Uuid/
+        // OwnerShortname here), it uses the parameterized-constructor code
+        // path and SKIPS the field initializers for non-required members.
+        // So a Space loaded from JSON that omits e.g. `primary_website`
+        // arrives here with the property null, even though the C# default
+        // is `""`. The matching DB columns are NOT NULL DEFAULT '', so an
+        // empty string is the right value either way.
+        cmd.Parameters.Add(new() { Value = space.RootRegistrationSignature ?? "" });
+        cmd.Parameters.Add(new() { Value = space.PrimaryWebsite ?? "" });
         cmd.Parameters.Add(new() { Value = space.IndexingEnabled });
         cmd.Parameters.Add(new() { Value = space.CaptureMisses });
         cmd.Parameters.Add(new() { Value = space.CheckHealth });
         AddJsonbNotNull(cmd, JsonbHelpers.ToJsonbLanguagesNotNull(space.Languages));
-        cmd.Parameters.Add(new() { Value = space.Icon });
+        cmd.Parameters.Add(new() { Value = space.Icon ?? "" });
         AddJsonb(cmd, JsonbHelpers.ToJsonb(space.Mirrors));
         AddJsonb(cmd, JsonbHelpers.ToJsonb(space.HideFolders));
 #pragma warning disable CA1508 // Analyzer limitation: bool?/int? boxed via (object?) cast IS null when source is null; the ?? is load-bearing.

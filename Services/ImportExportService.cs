@@ -948,6 +948,47 @@ public sealed class ImportExportService(
         value = ""; return false;
     }
 
+    // Text-ish content types whose body file is safe to inline into the
+    // jsonb meta. Anything else (image / media / binary blobs) stays as the
+    // filename string in payload.body — Postgres jsonb cannot store
+    // the bytes that a raw PNG/MP3/PDF would produce when round-tripped
+    // through StreamReader, and inlining them gives the user nothing they
+    // can use anyway (the body is meant to be fetched from the filesystem).
+    //
+    // The set must be the union of:
+    //   1. What MaybeExternalizePayloadBodyAsync (this file) writes out:
+    //        json, html, text, markdown
+    //      Round-trip parity for our own export → import path.
+    //   2. What dmart Python's exporter is known to externalize for
+    //      text-ish bodies it ships: csv, jsonl.
+    //      We accept Python-exported zips on the import side, so the
+    //      C# importer must know how to re-inline what Python wrote.
+    //
+    // Deliberately excluded text-ish ContentType members (see
+    // Dmart.Models.Enums.ContentType):
+    //   comment, reaction — bodies are tiny strings stored inline in
+    //                       meta. No exporter externalizes them, so a
+    //                       sibling body file never exists; including
+    //                       them here would be dead code.
+    //   python            — source code; current importer keeps `.py`
+    //                       files as on-disk attachments referenced by
+    //                       name rather than inlining into jsonb. Add
+    //                       here only when MaybeExternalizePayloadBodyAsync
+    //                       grows a `case "python"` branch.
+    //
+    // Invariant: if you add a `case` to MaybeExternalizePayloadBodyAsync's
+    // switch, add the matching content_type here too — otherwise the
+    // round-trip silently drops the body (file written on export, ignored
+    // on import).
+    // internal for unit tests in dmart.Tests so the policy (which
+    // content types round-trip through the externalize/inline path) can
+    // be asserted without spinning up the full DI graph.
+    internal static readonly HashSet<string> InlinableContentTypes =
+        new(StringComparer.OrdinalIgnoreCase)
+    {
+        "json", "text", "html", "markdown", "csv", "jsonl",
+    };
+
     // Re-inline the externalized payload.body from a sibling body file.
     // Mutates `metaNode` in place.
     private static void InlinePayloadBody(
@@ -956,14 +997,15 @@ public sealed class ImportExportService(
         if (metaNode["payload"] is not JsonObject payload) return;
         if (payload["body"] is not JsonValue bodyVal) return;
         if (!bodyVal.TryGetValue<string>(out var filename) || string.IsNullOrEmpty(filename)) return;
+        var contentType = (payload["content_type"]?.GetValue<string>() ?? "").ToLowerInvariant();
+        if (!InlinableContentTypes.Contains(contentType)) return;
         // Python stores the filename relative to the entry's subpath directory.
         var bodyPath = $"{baseDir}/{filename}".Replace("//", "/");
         if (!bodies.TryGetValue(bodyPath, out var ze)) return;
-        var contentType = (payload["content_type"]?.GetValue<string>() ?? "").ToLowerInvariant();
         using var s = ze.Open();
         using var sr = new StreamReader(s);
         var raw = sr.ReadToEnd();
-        if (contentType == "json")
+        if (string.Equals(contentType, "json", StringComparison.OrdinalIgnoreCase))
         {
             try { payload["body"] = JsonNode.Parse(raw); }
             catch { payload["body"] = raw; /* leave as string if the file isn't JSON */ }
@@ -980,6 +1022,8 @@ public sealed class ImportExportService(
         if (metaNode["payload"] is not JsonObject payload) return;
         if (payload["body"] is not JsonValue bodyVal) return;
         if (!bodyVal.TryGetValue<string>(out var filename) || string.IsNullOrEmpty(filename)) return;
+        var contentType = (payload["content_type"]?.GetValue<string>() ?? "").ToLowerInvariant();
+        if (!InlinableContentTypes.Contains(contentType)) return;
         var bodyPath = $"{baseDir}/{filename}".Replace("//", "/");
         var archive = metaZe.Archive!;
         var bodyZe = archive.GetEntry(bodyPath);
@@ -987,8 +1031,7 @@ public sealed class ImportExportService(
         await using var s = bodyZe.Open();
         using var sr = new StreamReader(s);
         var raw = await sr.ReadToEndAsync(ct);
-        var contentType = (payload["content_type"]?.GetValue<string>() ?? "").ToLowerInvariant();
-        if (contentType == "json")
+        if (string.Equals(contentType, "json", StringComparison.OrdinalIgnoreCase))
         {
             try { payload["body"] = JsonNode.Parse(raw); }
             catch { payload["body"] = raw; }
