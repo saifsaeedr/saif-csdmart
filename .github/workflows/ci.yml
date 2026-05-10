@@ -48,20 +48,28 @@ jobs:
         # lookup miss the file at the repo root.
         run: BACKEND_ENV=$(pwd)/config.env DMART_TEST_PWD=dmart dotnet test dmart.Tests/dmart.Tests.csproj -c Release --nologo --logger "trx;LogFileName=results.trx"
 
-      - name: AOT publish
-        run: |
-          rm -rf bin obj
-          dotnet publish dmart.csproj -r linux-x64 -p:PublishAot=true -p:StripSymbols=true -c Release
-          PUBLISH_DIR="bin/Release/net10.0/linux-x64/publish"
-          rm -f "$PUBLISH_DIR"/*.dbg "$PUBLISH_DIR"/*.pdb "$PUBLISH_DIR"/*.Development.json "$PUBLISH_DIR"/*.staticwebassets* "$PUBLISH_DIR"/*.deps.json
+      # AOT publish lives in release.yml (build-fedora-rpm, build-el9-rpm,
+      # build-windows, build-container — all exercise `dotnet publish
+      # -p:PublishAot=true` on their respective RIDs). Running it again on
+      # every push cost ~3 min per CI run for the smallest of incremental
+      # signals: the trim/AOT analyzers (gated on `$(CI)=='true'` in
+      # dmart.csproj) already fire during the regular `dotnet build` step
+      # above and catch the analyzer-detectable subset. What's only caught
+      # at native-link time (deep trimmer + ILC errors) is acceptable to
+      # defer to release.yml as long as releases keep going out regularly.
 
       - name: E2E smoke tests (curl.sh)
         run: |
-          PUBLISH_DIR="bin/Release/net10.0/linux-x64/publish"
+          # Smoke against the JIT apphost from the Build step's output.
+          # That binary still exercises every HTTP handler, JSON
+          # serializer, and middleware path — what it doesn't exercise
+          # is the native-trimmed binary shape, which release.yml covers.
+          BUILD_DIR="bin/Release/net10.0"
           # config.env already populated in the "Copy host config" step.
-          cp config.env "$PUBLISH_DIR/"
-          # Start server from the publish directory
-          (cd "$PUBLISH_DIR" && ./dmart serve) &
+          cp config.env "$BUILD_DIR/"
+          # Start server from the build output directory (apphost
+          # finds its DLL + deps next to itself).
+          (cd "$BUILD_DIR" && ./dmart serve) &
           SERVER_PID=$!
           # Wait for server to come up — try both common ports
           sleep 3
