@@ -77,7 +77,10 @@ internal sealed class NativeApiPlugin : IApiPlugin
 
         // Expose the calling actor to host callbacks (QueryCb) and the
         // plugin's shortname (LogCb). Same set/restore discipline as
-        // NativeHookPlugin.HookAsync.
+        // NativeHookPlugin.HookAsync, and same [ThreadStatic] safety
+        // invariant: handle.CallHandleRequest is a synchronous P/Invoke,
+        // so the native code reads these values on the same thread that
+        // set them — no await intervenes.
         var previousActor = PluginInvocationContext.CurrentActor;
         var previousShortname = PluginInvocationContext.CurrentShortname;
         PluginInvocationContext.CurrentActor = ctx.Actor();

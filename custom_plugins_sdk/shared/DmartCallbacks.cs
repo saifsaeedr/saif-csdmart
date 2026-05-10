@@ -268,6 +268,13 @@ public static unsafe class DmartSdk
     //
     // Plugins compiled against this V4 SDK and running on a V3 host will
     // silently fall back to Console.Error — no crash, no error.
+    //
+    // SECURITY: dmart's Log* path does NOT redact secrets in the message
+    // string — that pipeline only runs on framework access records, not on
+    // arbitrary plugin output. Plugin authors are responsible for keeping
+    // PII, passwords, tokens, OTPs, and session cookies out of the message
+    // text. Log identifiers (user shortname, request id) instead of raw
+    // credentials.
     public static void Log(in DmartCallbacks cb, int level, string? category, string message)
     {
         if (cb.Version < 4 || cb.Log == null)

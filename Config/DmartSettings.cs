@@ -259,16 +259,22 @@ public sealed class DmartSettings
     // Python default: "../logs/dmart.ljson.log"
     public string LogFile { get; set; } = "";
 
-    // Log rotation: max bytes per file before rollover. Default 268435456
-    // (256 MB) matches Python upstream's ConcurrentRotatingFileHandler
-    // maxBytes=0x10000000. Set to 0 to disable rotation entirely (file grows
-    // unbounded — same semantics as Python's maxBytes=0).
-    public long LogMaxBytes { get; set; } = 268_435_456;
-    // Log rotation: how many rotated backups to keep ("file.1" .. "file.N").
-    // Default 5 matches Python upstream's backupCount=5 — at most ~1.3 GB on
-    // disk per log file at the default LogMaxBytes. Set to 0 to disable
-    // rotation (file is truncated on rollover instead, matching Python).
-    public int LogBackupCount { get; set; } = 5;
+    // Log rotation: max bytes per file before rollover. Default 1073741824
+    // (1 GB). Python upstream uses 256 MB but our deployments value larger
+    // contiguous slices for grep/jq workflows. Set to 0 to disable rotation
+    // entirely (file grows unbounded — same semantics as Python's maxBytes=0).
+    public long LogMaxBytes { get; set; } = 1_073_741_824;
+    // Log rotation: how many rotated backups to keep.
+    //   < 0  — unlimited (default): every rollover appends a new
+    //          "file.<N+1>"; oldest archive has the lowest N, newest has
+    //          the highest. Operators are expected to manage retention via
+    //          logrotate, journald, or external archival.
+    //   = 0  — truncate in place on rollover (no archives).
+    //   > 0  — keep most recent N archives, named "file.1" (newest) ..
+    //          "file.N" (oldest), shifted on each rollover. Matches
+    //          Python upstream's RotatingFileHandler.
+    // Negative values other than -1 are treated as -1 (unlimited).
+    public int LogBackupCount { get; set; } = -1;
 
     // Filesystem root for per-space audit log files. When set, every
     // after-action event is appended to "{SpacesFolder}/{space}/.dm/events.jsonl.log"
