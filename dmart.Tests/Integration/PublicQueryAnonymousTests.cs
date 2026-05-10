@@ -545,7 +545,28 @@ internal sealed class WorldScopeHarness : IAsyncDisposable
         {
             try { await _entries.DeleteAsync(Space, Subpath, shortname, ResourceType.Content); } catch { }
         }
-        try { await _users.DeleteAsync(_anonUser); } catch { }
+        // The anonymous user delete can be FK-blocked by entries this run
+        // didn't create — e.g. /public/submit tests that ran in parallel
+        // (PublicSubmitTests is NOT in AnonymousWorldCollection) leave content
+        // rows with owner_shortname="anonymous". Without a fallback, a swallowed
+        // delete leaves the anonymous user in the DB with Roles=[_anonRole],
+        // and the role itself gets deleted below — yielding a dead-role
+        // reference. Subsequent anonymous /public/query calls then resolve
+        // user.Roles=[deadRole] → access.GetRolesAsync returns []
+        // → roles.Count==0 → world-permission gate at PermissionService.cs:141
+        // is skipped → empty policy list → 0 results. curl.sh §71-74 catches
+        // this leakage every time it runs after the integration suite on a
+        // shared DB.
+        var deletedAnon = false;
+        try { await _users.DeleteAsync(_anonUser); deletedAnon = true; } catch { }
+        if (!deletedAnon)
+        {
+            // Couldn't delete (FK constraint). Reset to a known empty state
+            // so we don't leak this run's role reference.
+            var current = await _users.GetByShortnameAsync(_anonUser);
+            if (current is not null)
+                await _users.UpsertAsync(current with { Roles = new(), Groups = new() });
+        }
         try { await _access.DeleteRoleAsync(_anonRole); } catch { }
         try { await _access.DeletePermissionAsync(_worldPerm); } catch { }
         if (_priorAnon is not null)  await _users.UpsertAsync(_priorAnon);
