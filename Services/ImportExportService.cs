@@ -980,7 +980,10 @@ public sealed class ImportExportService(
     // switch, add the matching content_type here too — otherwise the
     // round-trip silently drops the body (file written on export, ignored
     // on import).
-    private static readonly HashSet<string> InlinableContentTypes =
+    // internal for unit tests in dmart.Tests so the policy (which
+    // content types round-trip through the externalize/inline path) can
+    // be asserted without spinning up the full DI graph.
+    internal static readonly HashSet<string> InlinableContentTypes =
         new(StringComparer.OrdinalIgnoreCase)
     {
         "json", "text", "html", "markdown", "csv", "jsonl",
