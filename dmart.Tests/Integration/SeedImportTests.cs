@@ -82,30 +82,32 @@ public class SeedImportTests : IClassFixture<DmartFactory>
         var io = sp.GetRequiredService<ImportExportService>();
         var entryRepo = sp.GetRequiredService<EntryRepository>();
 
-        // Build a minimal, isolated zip with one schema in a fresh space.
-        // Using a unique space name keeps this test independent of the
-        // shipped seed/ tree and any other concurrent test that might be
-        // touching `applications` / `management` / `personal`.
+        // Build a minimal, isolated zip: one space + one Content entry at root
+        // subpath. Content under root is the simplest layout DecodeEntryPath
+        // accepts — `{space}/.dm/{shortname}/meta.content.json` parses as
+        // (subpath="/", shortname=`{shortname}`). A unique space name per
+        // run keeps this independent of the shipped seed/ tree and of any
+        // concurrent test that might be touching `applications` etc.
         var spaceName = $"force_upsert_{Guid.NewGuid():N}";
-        const string schemaName = "thing";
+        const string entryName = "thing";
         const string originalDesc = "original-description";
         const string updatedDesc = "updated-description";
 
         await io.ImportZipAsync(
-            BuildSingleSchemaZip(spaceName, schemaName, originalDesc),
+            BuildSingleEntryZip(spaceName, entryName, originalDesc),
             actor: null, preserveExisting: true);
 
         // Sanity: the row landed.
-        var afterFirst = await entryRepo.GetAsync(spaceName, "/schema", schemaName, ResourceType.Schema);
-        afterFirst.ShouldNotBeNull("first import did not land the schema row");
+        var afterFirst = await entryRepo.GetAsync(spaceName, "/", entryName, ResourceType.Content);
+        afterFirst.ShouldNotBeNull("first import did not land the content row");
         afterFirst.Description?.En.ShouldBe(originalDesc);
 
         // Re-import same content with a CHANGED description, preserveExisting:true.
         // Skip path: the existing row must NOT change.
         await io.ImportZipAsync(
-            BuildSingleSchemaZip(spaceName, schemaName, updatedDesc),
+            BuildSingleEntryZip(spaceName, entryName, updatedDesc),
             actor: null, preserveExisting: true);
-        var afterSkip = await entryRepo.GetAsync(spaceName, "/schema", schemaName, ResourceType.Schema);
+        var afterSkip = await entryRepo.GetAsync(spaceName, "/", entryName, ResourceType.Content);
         afterSkip.ShouldNotBeNull();
         afterSkip.Description?.En.ShouldBe(originalDesc,
             "preserveExisting:true must NOT overwrite the existing description");
@@ -113,25 +115,24 @@ public class SeedImportTests : IClassFixture<DmartFactory>
         // Re-import with preserveExisting:false (the --force path).
         // Upsert must replace the description.
         await io.ImportZipAsync(
-            BuildSingleSchemaZip(spaceName, schemaName, updatedDesc),
+            BuildSingleEntryZip(spaceName, entryName, updatedDesc),
             actor: null, preserveExisting: false);
-        var afterForce = await entryRepo.GetAsync(spaceName, "/schema", schemaName, ResourceType.Schema);
+        var afterForce = await entryRepo.GetAsync(spaceName, "/", entryName, ResourceType.Content);
         afterForce.ShouldNotBeNull();
         afterForce.Description?.En.ShouldBe(updatedDesc,
             "preserveExisting:false must overwrite the existing description");
     }
 
-    // Builds a self-contained zip with one space + one schema entry. Mirrors
-    // the on-disk shape `dmart export` produces and `dmart seed`/`dmart import`
-    // consume. Description is the only mutable field we vary across imports
-    // — it round-trips cleanly through the JSON columns without needing a
-    // schema-validation cycle.
+    // Builds a self-contained zip with one space + one Content entry directly
+    // under root subpath. Description is the only mutable field we vary
+    // across imports — it round-trips through the JSON columns without
+    // needing schema validation.
     //
-    // Using JsonObject rather than raw-string interpolation: the schema meta
+    // Using JsonObject rather than raw-string interpolation: the meta
     // contains nested `{}` literals (empty payload body) that confuse $$
     // raw-string brace matching, and a typed builder is easier to mutate
     // safely if more fields are added later.
-    private static MemoryStream BuildSingleSchemaZip(string spaceName, string schemaName, string description)
+    private static MemoryStream BuildSingleEntryZip(string spaceName, string entryName, string description)
     {
         var ms = new MemoryStream();
         using (var ar = new ZipArchive(ms, ZipArchiveMode.Create, leaveOpen: true))
@@ -147,13 +148,12 @@ public class SeedImportTests : IClassFixture<DmartFactory>
             };
             WriteEntry(ar, $"{spaceName}/.dm/meta.space.json", spaceMeta.ToJsonString());
 
-            // Schema meta with a description we can mutate to assert upsert.
-            // Empty payload object — the importer accepts schemas with no
-            // body file (round-trip parity with `dmart export`).
-            var schemaMeta = new JsonObject
+            // Content meta at root subpath: `{space}/.dm/{name}/meta.content.json`
+            // → DecodeEntryPath returns (subpath="/", shortname=`{name}`).
+            var contentMeta = new JsonObject
             {
                 ["uuid"] = Guid.NewGuid().ToString(),
-                ["shortname"] = schemaName,
+                ["shortname"] = entryName,
                 ["is_active"] = true,
                 ["owner_shortname"] = "dmart",
                 ["description"] = new JsonObject { ["en"] = description },
@@ -163,8 +163,8 @@ public class SeedImportTests : IClassFixture<DmartFactory>
                     ["body"] = new JsonObject(),
                 },
             };
-            WriteEntry(ar, $"{spaceName}/.dm/schema/{schemaName}/meta.schema.json",
-                schemaMeta.ToJsonString());
+            WriteEntry(ar, $"{spaceName}/.dm/{entryName}/meta.content.json",
+                contentMeta.ToJsonString());
         }
         ms.Position = 0;
         return ms;
