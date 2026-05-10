@@ -2,8 +2,10 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 
+// SDK header version: V4 (Log callback). Tracks
+// NativePluginCallbacks.CurrentVersion in lock-step.
 namespace Dmart.Sdk;
-// V4
+
 // C# view of the DmartCallbacks struct dmart hands each native plugin via
 // `init(const DmartCallbacks*)`. Layout MUST match the host definition in
 // Plugins/Native/NativePluginCallbacks.cs — append fields only, never

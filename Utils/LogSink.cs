@@ -32,6 +32,16 @@ namespace Dmart;
 //          "{file}.N" is oldest.
 // With `LogMaxBytes<=0` rotation is disabled entirely.
 //
+// Concurrency assumptions:
+//   - Single-process: `LogFile` MUST NOT be shared across dmart processes.
+//     Two processes rotating the same file race the rename/delete cascade
+//     and can drop or duplicate archives. dmart deploys one `dmart serve`
+//     per host, mirroring Python's single-handler model.
+//   - In-process: rotation runs while holding `_lock`. Slow filesystem
+//     renames (NFS, encrypted volumes) therefore stall every concurrent
+//     write for the duration — acceptable for local-disk deployments,
+//     surfaces as a wedge if logs are pointed at a network mount.
+//
 // Records are serialized with a hand-rolled Utf8JsonWriter walk so the
 // writer stays AOT-safe — request/response bodies are captured as nested
 // Dictionary<string, object?> / List<object?> trees, which the default
@@ -47,6 +57,10 @@ public sealed class LogSink : IDisposable
     private readonly int _backupCount;
     private readonly bool _active;
     private long _currentSize;
+    // Latches the first time a rollover leaves _stream null (e.g. disk full,
+    // permission flip mid-rotation). Subsequent writes silently no-op — we
+    // only emit one stderr line so a runaway loop can't drown the operator.
+    private bool _rollFailureReported;
 
     // UnsafeRelaxedJsonEscaping keeps non-ASCII content (Arabic, emoji) as-is
     // rather than escaping each char — readable logs, and matches Python's
@@ -175,8 +189,27 @@ public sealed class LogSink : IDisposable
             if (File.Exists(_path)) File.Delete(_path);
         }
 
-        _stream = new FileStream(_path, FileMode.Append, FileAccess.Write, FileShare.Read);
-        _currentSize = 0;
+        try
+        {
+            _stream = new FileStream(_path, FileMode.Append, FileAccess.Write, FileShare.Read);
+            _currentSize = 0;
+        }
+        catch (Exception ex)
+        {
+            // Disk full, permission flip, parent directory removed mid-
+            // rotation, etc. Logging is best-effort by design (the
+            // `if (_stream is null) return;` guard at the WriteObject lock
+            // keeps subsequent writes from throwing), but a silent failure
+            // hides the moment the disk became unwritable. Emit ONE stderr
+            // line so an operator notices, then go quiet.
+            if (!_rollFailureReported)
+            {
+                _rollFailureReported = true;
+                Console.Error.WriteLine(
+                    $"[LogSink] rollover failed for '{_path}': {ex.GetType().Name}: {ex.Message}. "
+                    + "Subsequent log writes will silently no-op until the next process restart.");
+            }
+        }
     }
 
     // Returns N+1 where N is the highest numeric suffix found among
@@ -184,6 +217,13 @@ public sealed class LogSink : IDisposable
     // no archives exist yet. We rescan on every rollover instead of caching
     // a counter so behavior is correct after restart and after operator
     // intervention (manual rename/delete of archives).
+    //
+    // Cost is O(n) in the number of files matching the prefix glob. With
+    // the default 1 GiB rollover this is amortized to near-zero (rotations
+    // happen on the order of hours, not seconds). Tiny LogMaxBytes values
+    // (e.g. 1 MB in tests or accidentally in prod) compound this into
+    // O(n²) total work over a process's lifetime — keep an eye on it if
+    // you set LogMaxBytes much below 100 MB.
     private int NextUnboundedArchiveIndex()
     {
         var dir = Path.GetDirectoryName(_path);

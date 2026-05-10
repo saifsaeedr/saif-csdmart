@@ -386,7 +386,10 @@ public static unsafe class NativePluginCallbacks
     // or "Dmart.Startup" to escape the operator's log-level filter config.
     //   category = null/empty → "plugin.<shortname>"
     //   category = "events"   → "plugin.<shortname>.events"
-    // Messages are clamped to 16 KB to bound a runaway plugin's log volume.
+    // Messages are clamped to 16 KB to bound a runaway plugin's log volume;
+    // when truncation occurs the recorded line is 16 KB + the literal
+    // "…[truncated]" suffix (~12 bytes), so downstream consumers should
+    // budget for "16 KB + suffix" rather than treating 16 KB as a hard cap.
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     private static void LogCb(int level, byte* category, byte* message)
     {
@@ -435,7 +438,11 @@ public static unsafe class NativePluginCallbacks
 
     private static ILoggerFactory? GetLoggerFactory()
     {
-        var cached = _loggerFactoryCache;
+        // Volatile.Read is defensive — reference reads are already atomic on
+        // .NET-supported CPUs, but Volatile guarantees we see a fully
+        // initialized factory after the publishing thread's CompareExchange,
+        // not a torn or stale view on weakly ordered architectures.
+        var cached = Volatile.Read(ref _loggerFactoryCache);
         if (cached is not null) return cached;
         var resolved = Services?.GetService<ILoggerFactory>();
         if (resolved is null) return null;
@@ -443,7 +450,7 @@ public static unsafe class NativePluginCallbacks
         // any racing thread that already wrote one. Either way we return
         // whatever ended up cached, so all callers see the same instance.
         Interlocked.CompareExchange(ref _loggerFactoryCache, resolved, null);
-        return _loggerFactoryCache;
+        return Volatile.Read(ref _loggerFactoryCache);
     }
 
     // internal for testing via dmart.Tests.
