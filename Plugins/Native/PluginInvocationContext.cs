@@ -32,4 +32,17 @@ internal static class PluginInvocationContext
         get => _currentActor;
         set => _currentActor = value;
     }
+
+    // Shortname of the plugin currently executing on this thread. Read by
+    // NativePluginCallbacks.LogCb to prefix the log category as
+    // `plugin.<shortname>[.<sub>]` — prevents a plugin from impersonating
+    // unrelated categories.
+    [ThreadStatic]
+    private static string? _currentShortname;
+
+    public static string? CurrentShortname
+    {
+        get => _currentShortname;
+        set => _currentShortname = value;
+    }
 }
