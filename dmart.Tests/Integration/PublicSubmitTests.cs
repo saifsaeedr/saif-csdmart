@@ -118,7 +118,7 @@ public class PublicSubmitTests : IClassFixture<DmartFactory>
                         spaceName: "test",
                         subpath: "/anon_submits",
                         shortname: createdShortname,
-                        resourceType: ResourceType.Content);
+                        type: ResourceType.Content);
                 }
                 catch { /* best-effort */ }
             }
