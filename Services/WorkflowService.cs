@@ -60,7 +60,7 @@ public sealed class WorkflowService(
             if (reasonObj is not null) patch["resolution_reason"] = reasonObj;
         }
 
-        var result = await entryService.UpdateAsync(ticket, patch, actor, ct);
+        var result = await entryService.UpdateAsync(ticket, patch, actor, ct, actionOverride: "progress_ticket");
         return result.IsOk
             ? Response.Ok(attributes: new()
             {
