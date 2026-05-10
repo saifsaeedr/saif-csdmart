@@ -3,7 +3,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 
 namespace Dmart.Sdk;
-
+// V4
 // C# view of the DmartCallbacks struct dmart hands each native plugin via
 // `init(const DmartCallbacks*)`. Layout MUST match the host definition in
 // Plugins/Native/NativePluginCallbacks.cs — append fields only, never
@@ -62,7 +62,20 @@ public unsafe struct DmartCallbacks
     //   1 — initial release (LoadEntry…DmartFree)
     //   2 — Query, GetMediaAttachment appended; Query was ACL-free
     //   3 — Query honors caller's actor by default; "as_actor" override
+    //   4 — Log appended (plugin → ILogger pipeline)
     public int Version;
+
+    // Plugin → host structured logging. Routes the message through dmart's
+    // ILogger pipeline so it lands in the JSONL log file (when configured)
+    // and honors the operator's log-level filters. Args:
+    //   level    — Microsoft.Extensions.Logging.LogLevel int (0 Trace … 5 Critical)
+    //   category — UTF-8 NUL-terminated; appended to "plugin.<shortname>"
+    //              by the host. NULL means "use default (no subcategory)".
+    //   message  — UTF-8 NUL-terminated, required.
+    // Returns void; logging never fails to the plugin.
+    // APPENDED in V4 — check Version >= 4 before calling, or use the
+    // DmartSdk.Log* wrappers below which fall back to stderr.
+    public delegate* unmanaged[Cdecl]<int, byte*, byte*, void> Log;
 }
 
 // Ergonomic wrappers that handle UTF-8 marshaling, null pointers, and
@@ -235,6 +248,72 @@ public static unsafe class DmartSdk
             Marshal.FreeHGlobal((IntPtr)snBuf);
         }
     }
+
+    // ========================================================================
+    // Logging
+    // ========================================================================
+
+    // Match Microsoft.Extensions.Logging.LogLevel int values exactly.
+    public const int LogLevelTrace = 0;
+    public const int LogLevelDebug = 1;
+    public const int LogLevelInfo = 2;
+    public const int LogLevelWarn = 3;
+    public const int LogLevelError = 4;
+    public const int LogLevelCritical = 5;
+
+    // Emit a log line through dmart's ILogger pipeline (V4+ host) or fall
+    // back to stderr (older host or callback null). The host prefixes the
+    // category with "plugin.<shortname>"; pass `category` as e.g. "events"
+    // to land under "plugin.<shortname>.events", or null for the default.
+    //
+    // Plugins compiled against this V4 SDK and running on a V3 host will
+    // silently fall back to Console.Error — no crash, no error.
+    public static void Log(in DmartCallbacks cb, int level, string? category, string message)
+    {
+        if (cb.Version < 4 || cb.Log == null)
+        {
+            // V3 host — stderr fallback. Format mirrors what plugins
+            // already do today, so log scrapers don't have to change.
+            Console.Error.WriteLine(
+                $"[{LevelName(level)}]"
+                + (string.IsNullOrEmpty(category) ? "" : $" [{category}]")
+                + $" {message}");
+            return;
+        }
+
+        var catBuf = string.IsNullOrEmpty(category) ? null : StringToUtf8(category);
+        var msgBuf = StringToUtf8(message);
+        try { cb.Log(level, catBuf, msgBuf); }
+        finally
+        {
+            if (catBuf != null) Marshal.FreeHGlobal((IntPtr)catBuf);
+            Marshal.FreeHGlobal((IntPtr)msgBuf);
+        }
+    }
+
+    public static void LogTrace(in DmartCallbacks cb, string message, string? category = null)
+        => Log(in cb, LogLevelTrace, category, message);
+    public static void LogDebug(in DmartCallbacks cb, string message, string? category = null)
+        => Log(in cb, LogLevelDebug, category, message);
+    public static void LogInfo(in DmartCallbacks cb, string message, string? category = null)
+        => Log(in cb, LogLevelInfo, category, message);
+    public static void LogWarn(in DmartCallbacks cb, string message, string? category = null)
+        => Log(in cb, LogLevelWarn, category, message);
+    public static void LogError(in DmartCallbacks cb, string message, string? category = null)
+        => Log(in cb, LogLevelError, category, message);
+    public static void LogCritical(in DmartCallbacks cb, string message, string? category = null)
+        => Log(in cb, LogLevelCritical, category, message);
+
+    private static string LevelName(int level) => level switch
+    {
+        LogLevelTrace => "TRACE",
+        LogLevelDebug => "DEBUG",
+        LogLevelInfo => "INFO",
+        LogLevelWarn => "WARN",
+        LogLevelError => "ERROR",
+        LogLevelCritical => "CRITICAL",
+        _ => "INFO",
+    };
 
     // ========================================================================
     // Helpers

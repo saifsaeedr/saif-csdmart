@@ -259,6 +259,17 @@ public sealed class DmartSettings
     // Python default: "../logs/dmart.ljson.log"
     public string LogFile { get; set; } = "";
 
+    // Log rotation: max bytes per file before rollover. Default 268435456
+    // (256 MB) matches Python upstream's ConcurrentRotatingFileHandler
+    // maxBytes=0x10000000. Set to 0 to disable rotation entirely (file grows
+    // unbounded — same semantics as Python's maxBytes=0).
+    public long LogMaxBytes { get; set; } = 268_435_456;
+    // Log rotation: how many rotated backups to keep ("file.1" .. "file.N").
+    // Default 5 matches Python upstream's backupCount=5 — at most ~1.3 GB on
+    // disk per log file at the default LogMaxBytes. Set to 0 to disable
+    // rotation (file is truncated on rollover instead, matching Python).
+    public int LogBackupCount { get; set; } = 5;
+
     // Filesystem root for per-space audit log files. When set, every
     // after-action event is appended to "{SpacesFolder}/{space}/.dm/events.jsonl.log"
     // — one JSON object per line — for parity with Python dmart's

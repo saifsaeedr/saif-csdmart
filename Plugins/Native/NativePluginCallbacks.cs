@@ -64,12 +64,23 @@ public static unsafe class NativePluginCallbacks
         //   1 — initial release (LoadEntry…DmartFree)
         //   2 — Query, GetMediaAttachment appended; Query was ACL-free
         //   3 — Query honors caller's actor by default; "as_actor" override
+        //   4 — Log appended (plugin → ILogger pipeline)
         public int Version;
+
+        // Plugin → host structured logging. Routes the message through
+        // dmart's ILogger (so it lands in the JSONL file sink, honors
+        // configured log-level filters, etc.) instead of stderr.
+        // Args: (level, category, message). `level` is the int value of
+        // Microsoft.Extensions.Logging.LogLevel (0 Trace … 5 Critical, 6
+        // None). `category` is appended to "plugin.<shortname>" by the
+        // host — pass NULL for the default. `message` is required.
+        // APPENDED in V4.
+        public delegate* unmanaged[Cdecl]<int, byte*, byte*, void> Log;
     }
 
     // Single source of truth for the version number written into every
     // DmartCallbacks struct. Matches the comment in the field above.
-    public const int CurrentVersion = 3;
+    public const int CurrentVersion = 4;
 
     // Allocated once, stays alive for the process lifetime. Plugins keep
     // the pointer we hand them in their `init()` and dereference it as
@@ -81,6 +92,13 @@ public static unsafe class NativePluginCallbacks
     // below. Program.cs sets this right after `app.Build()`. The methods
     // resolve scoped services with CreateScope() on each call.
     public static IServiceProvider? Services { get; set; }
+
+    // ILoggerFactory is a singleton in the container, so resolving it once
+    // is fine — and logging is on the hot path, so we want to avoid the
+    // CreateScope/Resolve cost per call. Race-tolerant: concurrent readers
+    // either both see null (and both resolve to the same instance) or
+    // both see the cached value.
+    private static ILoggerFactory? _loggerFactoryCache;
 
     // Fills the struct with function pointers and returns a stable pointer
     // that can be handed to every plugin's init() export.
@@ -100,6 +118,7 @@ public static unsafe class NativePluginCallbacks
             Query = &QueryCb,
             GetMediaAttachment = &GetMediaAttachmentCb,
             Version = CurrentVersion,
+            Log = &LogCb,
         };
         // Copy into unmanaged memory so the pointer doesn't move under the
         // GC. The struct is small and ABI-stable; the pointer lives until
@@ -358,6 +377,63 @@ public static unsafe class NativePluginCallbacks
             return null;
         }
     }
+
+    // Plugin → host structured log. The plugin's shortname (set by the
+    // dispatcher in PluginInvocationContext.CurrentShortname) is prefixed
+    // onto the category so a plugin can't impersonate "Microsoft.AspNetCore"
+    // or "Dmart.Startup" to escape the operator's log-level filter config.
+    //   category = null/empty → "plugin.<shortname>"
+    //   category = "events"   → "plugin.<shortname>.events"
+    // Messages are clamped to 16 KB to bound a runaway plugin's log volume.
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static void LogCb(int level, byte* category, byte* message)
+    {
+        try
+        {
+            var factory = GetLoggerFactory();
+            if (factory is null) return;
+
+            var msg = PtrToString(message);
+            if (string.IsNullOrEmpty(msg)) return;
+            if (msg.Length > 16384) msg = string.Concat(msg.AsSpan(0, 16384), "…[truncated]");
+
+            var sub = PtrToString(category);
+            var shortname = PluginInvocationContext.CurrentShortname ?? "unknown";
+            var fullCategory = string.IsNullOrEmpty(sub)
+                ? $"plugin.{shortname}"
+                : $"plugin.{shortname}.{sub}";
+
+            var lvl = ClampLevel(level);
+            var logger = factory.CreateLogger(fullCategory);
+            if (logger.IsEnabled(lvl)) logger.Log(lvl, "{Message}", msg);
+        }
+        catch
+        {
+            // Logging must never propagate an exception across the C ABI
+            // boundary — a managed throw in an [UnmanagedCallersOnly] would
+            // tear down the plugin's hook with no recourse.
+        }
+    }
+
+    private static ILoggerFactory? GetLoggerFactory()
+    {
+        if (_loggerFactoryCache is not null) return _loggerFactoryCache;
+        _loggerFactoryCache = Services?.GetService<ILoggerFactory>();
+        return _loggerFactoryCache;
+    }
+
+    // internal for testing via dmart.Tests.
+    internal static LogLevel ClampLevel(int raw) => raw switch
+    {
+        0 => LogLevel.Trace,
+        1 => LogLevel.Debug,
+        2 => LogLevel.Information,
+        3 => LogLevel.Warning,
+        4 => LogLevel.Error,
+        5 => LogLevel.Critical,
+        6 => LogLevel.None,
+        _ => LogLevel.Information,
+    };
 
     // ========================================================================
     // Helpers

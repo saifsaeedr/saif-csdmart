@@ -22,6 +22,7 @@ internal sealed class NativeApiPlugin : IApiPlugin
 
     public void MapRoutes(RouteGroupBuilder group)
     {
+        var sn = Shortname;
         foreach (var route in _routes)
         {
             var method = route.Method.ToUpperInvariant();
@@ -29,11 +30,11 @@ internal sealed class NativeApiPlugin : IApiPlugin
 
             switch (method)
             {
-                case "GET":    group.MapGet(route.Path, async (HttpContext ctx) => await HandleNative(ctx, h)); break;
-                case "POST":   group.MapPost(route.Path, async (HttpContext ctx) => await HandleNative(ctx, h)); break;
-                case "PUT":    group.MapPut(route.Path, async (HttpContext ctx) => await HandleNative(ctx, h)); break;
-                case "DELETE": group.MapDelete(route.Path, async (HttpContext ctx) => await HandleNative(ctx, h)); break;
-                default:       group.MapGet(route.Path, async (HttpContext ctx) => await HandleNative(ctx, h)); break;
+                case "GET":    group.MapGet(route.Path, async (HttpContext ctx) => await HandleNative(ctx, h, sn)); break;
+                case "POST":   group.MapPost(route.Path, async (HttpContext ctx) => await HandleNative(ctx, h, sn)); break;
+                case "PUT":    group.MapPut(route.Path, async (HttpContext ctx) => await HandleNative(ctx, h, sn)); break;
+                case "DELETE": group.MapDelete(route.Path, async (HttpContext ctx) => await HandleNative(ctx, h, sn)); break;
+                default:       group.MapGet(route.Path, async (HttpContext ctx) => await HandleNative(ctx, h, sn)); break;
             }
         }
 
@@ -41,11 +42,11 @@ internal sealed class NativeApiPlugin : IApiPlugin
         if (_routes.Count == 0)
         {
             var h = _handle;
-            group.MapGet("/", async (HttpContext ctx) => await HandleNative(ctx, h));
+            group.MapGet("/", async (HttpContext ctx) => await HandleNative(ctx, h, sn));
         }
     }
 
-    private static async Task HandleNative(HttpContext ctx, NativePluginHandle handle)
+    private static async Task HandleNative(HttpContext ctx, NativePluginHandle handle, string shortname)
     {
         var query = new Dictionary<string, string>();
         foreach (var q in ctx.Request.Query)
@@ -74,11 +75,13 @@ internal sealed class NativeApiPlugin : IApiPlugin
 
         var requestJson = JsonSerializer.Serialize(envelope, DmartJsonContext.Default.NativeApiRequest);
 
-        // Expose the calling actor to host callbacks (QueryCb) so plugin
-        // queries default to the user's permissions. Same set/restore
-        // discipline as NativeHookPlugin.HookAsync.
+        // Expose the calling actor to host callbacks (QueryCb) and the
+        // plugin's shortname (LogCb). Same set/restore discipline as
+        // NativeHookPlugin.HookAsync.
         var previousActor = PluginInvocationContext.CurrentActor;
+        var previousShortname = PluginInvocationContext.CurrentShortname;
         PluginInvocationContext.CurrentActor = ctx.Actor();
+        PluginInvocationContext.CurrentShortname = shortname;
         string resultJson;
         try
         {
@@ -87,6 +90,7 @@ internal sealed class NativeApiPlugin : IApiPlugin
         finally
         {
             PluginInvocationContext.CurrentActor = previousActor;
+            PluginInvocationContext.CurrentShortname = previousShortname;
         }
 
         // Binary-response opt-in: a plugin that needs to return non-JSON
