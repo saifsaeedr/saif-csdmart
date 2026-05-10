@@ -14,6 +14,7 @@
         EditOutline,
         EyeSolid,
         FloppyDiskOutline,
+        LinkOutline,
         ListOutline,
         PaperClipOutline,
         RectangleListOutline,
@@ -28,6 +29,7 @@
     import Prism from "@/components/Prism.svelte";
     import Table2Cols from "@/components/management/Table2Cols.svelte";
     import Attachments from "@/components/management/renderers/Attachments.svelte";
+    import RelationshipsPanel from "@/components/management/renderers/RelationshipsPanel.svelte";
     import BreadCrumbLite from "@/components/management/BreadCrumbLite.svelte";
     import {
         currentEntry,
@@ -75,6 +77,7 @@
         diagram: 5,
         roles_explorer: 6,
         permissions_explorer: 7,
+        relationships: 8,
     };
 
     let {
@@ -292,6 +295,7 @@
 
     let openDeleteModal = $state(false);
     function deleteCurrentEntryModal() {
+        errorMessage = null;
         openDeleteModal = true;
     }
     async function deleteCurrentEntry() {
@@ -682,6 +686,27 @@
             <li role="presentation">
                 <button
                         class="inline-flex items-center p-4 border-b-2 rounded-t-lg {activeTab ===
+                    TabMode.relationships
+                        ? 'text-blue-600 border-blue-600'
+                        : 'border-transparent hover:text-gray-600 hover:border-gray-300'}"
+                        type="button"
+                        role="tab"
+                        aria-selected={activeTab === TabMode.relationships}
+                        onclick={() => (activeTab = TabMode.relationships)}
+                >
+                    <div class="flex items-center gap-2">
+                        <LinkOutline size="md" />
+                        <p>
+                            Relationships {entryRelationships.length
+                                ? `(${entryRelationships.length})`
+                                : ""}
+                        </p>
+                    </div>
+                </button>
+            </li>
+            <li role="presentation">
+                <button
+                        class="inline-flex items-center p-4 border-b-2 rounded-t-lg {activeTab ===
                     TabMode.history
                         ? 'text-blue-600 border-blue-600'
                         : 'border-transparent hover:text-gray-600 hover:border-gray-300'}"
@@ -938,7 +963,6 @@
                     {subpath}
                     parent_shortname={entry.shortname}
                     attachments={$state.snapshot(entry).attachments}
-                    bind:relationships={entryRelationships}
                     {refreshEntry}
             />
         </div>
@@ -962,6 +986,19 @@
                 <PermissionsExplorer permissions={jeContent.json.permissions} />
             </div>
         {/if}
+
+        <div
+                class={activeTab === TabMode.relationships ? "" : "hidden"}
+                role="tabpanel"
+        >
+            <RelationshipsPanel
+                    {resource_type}
+                    {space_name}
+                    {subpath}
+                    parent_shortname={entry.shortname}
+                    bind:relationships={entryRelationships}
+            />
+        </div>
 
         <div
                 class={activeTab === TabMode.history ? "" : "hidden"}
@@ -992,6 +1029,15 @@
         ({resource_type})?<br />
         This action cannot be undone.
     </p>
+
+    {#if errorMessage}
+        <div class="mt-4">
+            <p class="text-red-600 font-medium mb-2">Error:</p>
+            <div class="max-h-60 overflow-auto">
+                <Prism code={errorMessage} />
+            </div>
+        </div>
+    {/if}
 
     <div class="flex justify-center gap-3 w-full">
         <Button

@@ -125,7 +125,7 @@ export async function deleteEntry(
         return { success: true };
     } catch (error: any) {
         showToast(Level.warn, `Failed to delete the entry!`);
-        return { success: false, errorMessage: error.message };
+        return { success: false, errorMessage: error.response?.data?.error };
     }
 }
 

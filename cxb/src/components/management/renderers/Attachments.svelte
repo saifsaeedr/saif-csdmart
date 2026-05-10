@@ -32,33 +32,28 @@
     PenSolid,
     TrashBinSolid,
     UploadOutline,
-    LinkOutline,
   } from "flowbite-svelte-icons";
   import ModalViewAttachments from "@/components/management/Modals/ModalViewAttachments.svelte";
   import { getFileExtension } from "@/utils/getFileExtension";
   import ModalCreateAttachments from "@/components/management/Modals/ModalCreateAttachments.svelte";
-  import RelationshipModal from "@/components/management/Modals/RelationshipModal.svelte";
+  import Prism from "@/components/Prism.svelte";
   import { currentEntry } from "@/stores/global";
   import { untrack } from "svelte";
 
   let {
     attachments = [],
-    relationships = $bindable([]),
     resource_type,
     space_name,
     subpath,
     parent_shortname,
   }: {
     attachments: any;
-    relationships: any[];
     resource_type: ResourceType;
     space_name: string;
     subpath: string;
     parent_shortname: string;
     refreshEntry: any;
   } = $props();
-
-  let openRelationshipModal = $state(false);
 
   async function fetchDataAssetsForAttachments() {
     for (const attachment of filteredAttachments) {
@@ -124,6 +119,7 @@
   });
 
   let isDeleteLoading = $state(false);
+  let modelError: any = $state(null);
   async function handleDelete(item: {
     shortname: string;
     subpath: string;
@@ -143,6 +139,7 @@
     };
     try {
       isDeleteLoading = true;
+      modelError = null;
       const response = await Dmart.request(request_dict);
       if (response.status === "success") {
         showToast(
@@ -151,14 +148,16 @@
         );
         $currentEntry?.refreshEntry();
         openCreateAttachmentModal = false;
+        openDeleteModal = false;
       } else {
         showToast(Level.warn);
+        modelError = response;
       }
-    } catch (e) {
+    } catch (error: any) {
+      modelError = error.response?.data?.error;
       showToast(Level.warn);
     } finally {
       isDeleteLoading = false;
-      openDeleteModal = false;
     }
   }
 
@@ -201,6 +200,7 @@
 
   function confirmDelete(attachment) {
     selectedAttachment = attachment;
+    modelError = null;
     openDeleteModal = true;
   }
 
@@ -353,19 +353,6 @@
 
       <!-- Keep the upload button as is -->
       <div class="flex items-center gap-2">
-        <Button
-          class="text-primary cursor-pointer hover:bg-primary hover:text-white"
-          outline
-          onclick={() => {
-            openRelationshipModal = true;
-          }}
-        >
-          <LinkOutline size="md" class="mr-2" />
-          <strong>RELATIONSHIP</strong>
-          {#if relationships && relationships.length > 0}
-            <span class="ml-1">({relationships.length})</span>
-          {/if}
-        </Button>
         <Button
           class="text-primary cursor-pointer hover:bg-primary hover:text-white"
           outline
@@ -525,6 +512,15 @@
     </p>
   {/if}
 
+  {#if modelError}
+    <div class="mt-4">
+      <p class="text-red-600 font-medium mb-2">Error:</p>
+      <div class="max-h-60 overflow-auto">
+        <Prism code={modelError} />
+      </div>
+    </div>
+  {/if}
+
   <div class="flex justify-between w-full">
     <Button color="alternative" onclick={() => (openDeleteModal = false)}
       >Cancel</Button
@@ -538,11 +534,3 @@
   </div>
 </Modal>
 
-<RelationshipModal
-  bind:isOpen={openRelationshipModal}
-  bind:relationships
-  {space_name}
-  {subpath}
-  {resource_type}
-  {parent_shortname}
-/>
