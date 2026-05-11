@@ -1,6 +1,9 @@
+using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 
 // SDK header version: V4 (Log callback). Tracks
 // NativePluginCallbacks.CurrentVersion in lock-step.
@@ -263,41 +266,121 @@ public static unsafe class DmartSdk
     public const int LogLevelError = 4;
     public const int LogLevelCritical = 5;
 
-    // Emit a log line through dmart's ILogger pipeline (V4+ host) or fall
-    // back to stderr (older host or callback null). The host prefixes the
-    // category with "plugin.<shortname>"; pass `category` as e.g. "events"
-    // to land under "plugin.<shortname>.events", or null for the default.
+    // Plugins now own their log file: SetShortname opens
+    // `$DMART_PLUGIN_LOG_DIR/<shortname>.ljson.log` (append) and every Log*
+    // call writes a JSON line directly to it. No round-trip through the
+    // host's V4 cb.Log callback — the cb argument is retained for source
+    // compatibility with V4 plugins, but its Log field is not invoked.
     //
-    // Plugins compiled against this V4 SDK and running on a V3 host will
-    // silently fall back to Console.Error — no crash, no error.
+    // When the env var is unset, the file can't be opened, or SetShortname
+    // hasn't been called, Log* falls back to stderr so plugins never crash
+    // on a logging call.
     //
-    // SECURITY: dmart's Log* path does NOT redact secrets in the message
-    // string — that pipeline only runs on framework access records, not on
-    // arbitrary plugin output. Plugin authors are responsible for keeping
-    // PII, passwords, tokens, OTPs, and session cookies out of the message
-    // text. Log identifiers (user shortname, request id) instead of raw
-    // credentials.
+    // SECURITY: the file-write path does NOT redact secrets. Plugin authors
+    // are responsible for keeping PII, passwords, tokens, OTPs, and session
+    // cookies out of the message text. Log identifiers (user shortname,
+    // request id) instead of raw credentials.
+
+    // Allowlist for the shortname segment that goes into the log file name.
+    // Lowercase letter or digit lead, then letters/digits/underscores/hyphens.
+    // Rejects "..", "/", "\", "..\", etc. — anything that would let a
+    // malicious or buggy plugin write outside the configured log dir.
+    private static readonly Regex SafeShortname = new(
+        @"^[a-z0-9][a-z0-9_-]{0,62}$", RegexOptions.Compiled);
+
+    private static readonly object _logLock = new();
+    private static FileStream? _logStream;
+    private static string? _shortname;
+
+    // Absolute path of the currently open plugin log file, or null when
+    // file logging is inactive (env unset, SetShortname not called, name
+    // rejected, or open failed). Tests rely on this to discover the path.
+    public static string? LogPath { get; private set; }
+
+    // Register this plugin's shortname. Opens
+    // `$DMART_PLUGIN_LOG_DIR/<shortname>.ljson.log` for append. Calling it
+    // again closes the prior stream and reopens against the new shortname.
+    // Safe to call from `init` even when the host hasn't set the env var —
+    // LogPath simply stays null and Log* writes go to stderr.
+    public static void SetShortname(string shortname)
+    {
+        lock (_logLock)
+        {
+            _logStream?.Dispose();
+            _logStream = null;
+            _shortname = null;
+            LogPath = null;
+
+            if (string.IsNullOrEmpty(shortname)) return;
+            if (!SafeShortname.IsMatch(shortname)) return;
+
+            var dir = Environment.GetEnvironmentVariable("DMART_PLUGIN_LOG_DIR");
+            if (string.IsNullOrEmpty(dir)) return;
+
+            var path = Path.Combine(dir, $"{shortname}.ljson.log");
+            try
+            {
+                Directory.CreateDirectory(dir);
+                _logStream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read);
+                _shortname = shortname;
+                LogPath = path;
+            }
+            catch
+            {
+                _logStream?.Dispose();
+                _logStream = null;
+                _shortname = null;
+                LogPath = null;
+            }
+        }
+    }
+
     public static void Log(in DmartCallbacks cb, int level, string? category, string message)
     {
-        if (cb.Version < 4 || cb.Log == null)
+        lock (_logLock)
         {
-            // V3 host — stderr fallback. Format mirrors what plugins
-            // already do today, so log scrapers don't have to change.
-            Console.Error.WriteLine(
-                $"[{LevelName(level)}]"
-                + (string.IsNullOrEmpty(category) ? "" : $" [{category}]")
-                + $" {message}");
-            return;
+            if (_logStream is not null)
+            {
+                try
+                {
+                    WritePluginLogLine(_logStream, level, category, message);
+                    return;
+                }
+                catch
+                {
+                    // Disk full, IO failure: fall through to stderr so the
+                    // plugin keeps running. Don't drop the stream — a
+                    // transient ENOSPC may clear and subsequent writes
+                    // could succeed.
+                }
+            }
         }
 
-        var catBuf = string.IsNullOrEmpty(category) ? null : StringToUtf8(category);
-        var msgBuf = StringToUtf8(message);
-        try { cb.Log(level, catBuf, msgBuf); }
-        finally
+        // Stderr fallback. Format mirrors the prior V4 SDK so log scrapers
+        // built against older releases keep working.
+        Console.Error.WriteLine(
+            $"[{LevelName(level)}]"
+            + (string.IsNullOrEmpty(category) ? "" : $" [{category}]")
+            + $" {message}");
+    }
+
+    private static void WritePluginLogLine(FileStream stream, int level, string? category, string message)
+    {
+        using var ms = new MemoryStream(message.Length + 96);
+        using (var w = new Utf8JsonWriter(ms, new JsonWriterOptions { Indented = false }))
         {
-            if (catBuf != null) Marshal.FreeHGlobal((IntPtr)catBuf);
-            Marshal.FreeHGlobal((IntPtr)msgBuf);
+            w.WriteStartObject();
+            w.WriteString("time", DateTimeOffset.UtcNow.ToString("o", CultureInfo.InvariantCulture));
+            w.WriteString("level", LevelName(level));
+            if (!string.IsNullOrEmpty(category)) w.WriteString("category", category);
+            w.WriteString("message", message);
+            w.WriteNumber("process", Environment.ProcessId);
+            w.WriteEndObject();
         }
+        ms.WriteByte((byte)'\n');
+        var bytes = ms.GetBuffer();
+        stream.Write(bytes, 0, (int)ms.Length);
+        stream.Flush();
     }
 
     public static void LogTrace(in DmartCallbacks cb, string message, string? category = null)

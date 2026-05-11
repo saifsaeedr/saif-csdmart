@@ -16,6 +16,11 @@ namespace Dmart.Tests.Unit.Plugins;
 // these tests mutate shared state. xUnit serializes tests in a single
 // class, but each test must reset the state in Dispose to keep the suite
 // hermetic.
+// `DMART_PLUGIN_LOG_DIR` and the DmartSdk._logStream/_shortname statics
+// are process-global. xUnit runs different test classes in parallel by
+// default, so isolate this class into its own collection to prevent a
+// concurrent test from observing or clobbering the shared state.
+[Collection("PluginSdkLogging")]
 public sealed class DmartSdkLoggingTests : IDisposable
 {
     private readonly string _dir;
