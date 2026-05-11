@@ -639,8 +639,10 @@ public static class QueryHelper
                 var sqlOp = compOp switch { "!" => "!=", ">" => ">", ">=" => ">=", "<" => "<", "<=" => "<=", _ => "=" };
                 args.Add(new() { Value = double.Parse(value, CultureInfo.InvariantCulture) });
                 var pNum = args.Count;
-                var castCol = hasSubPath ? $"({elementJsonb})::float" : "e::float";
-                predicate = $"{castCol} {sqlOp} CAST(${pNum} AS float)";
+                if (hasSubPath)
+                    predicate = $"(jsonb_typeof({elementJsonb}) = 'number' AND ({elementJsonb})::float {sqlOp} CAST(${pNum} AS float))";
+                else
+                    predicate = $"e::float {sqlOp} CAST(${pNum} AS float)";
             }
             else if (data.Negative || compOp == "!")
             {
@@ -649,10 +651,20 @@ public static class QueryHelper
             }
             else if (isNum)
             {
-                args.Add(new() { Value = double.Parse(value, CultureInfo.InvariantCulture) });
-                var pNum = args.Count;
-                var castCol = hasSubPath ? $"({elementJsonb})::float" : "e::float";
-                predicate = $"{castCol} = CAST(${pNum} AS float)";
+                if (hasSubPath)
+                {
+                    args.Add(new() { Value = double.Parse(value, CultureInfo.InvariantCulture) });
+                    var pNum = args.Count;
+                    args.Add(new() { Value = value });
+                    var pStr = args.Count;
+                    predicate = $"((jsonb_typeof({elementJsonb}) = 'number' AND ({elementJsonb})::float = CAST(${pNum} AS float)) OR {elementText} = ${pStr})";
+                }
+                else
+                {
+                    args.Add(new() { Value = double.Parse(value, CultureInfo.InvariantCulture) });
+                    var pNum = args.Count;
+                    predicate = $"e::float = CAST(${pNum} AS float)";
+                }
             }
             else
             {
