@@ -66,7 +66,7 @@ public sealed class ResourceFoldersCreationPlugin(
                 // Missing parent space (especially the "personal" space for user
                 // follow-ups) is the most common cause of failure here. Log + skip
                 // so one broken space doesn't take down user creation.
-                log.LogWarning(ex, "resource_folders_creation: failed to create folder {Space}/{Sub}/{Name}",
+                log.LogWarning(ex, "failed to create folder {Space}/{Sub}/{Name}",
                     spaceName, subpath, shortname);
             }
         }

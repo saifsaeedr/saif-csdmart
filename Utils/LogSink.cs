@@ -1,4 +1,3 @@
-using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using Dmart.Config;
@@ -97,9 +96,19 @@ public sealed class LogSink : IDisposable
     // Generic ILogger → one JSONL line per event. Shape mirrors Python's
     // base JsonFormatter output so operators see a uniform schema whether
     // the line came from a plugin log or a request handler.
+    //
+    // Tagging: when the category identifies a plugin we prepend
+    // `[<shortname>] ` to the message. Lets operators grep "[audit]" /
+    // "[oodi_sync]" without parsing the JSON category. Skipped if the
+    // message already starts with `[` to keep this idempotent across
+    // sources that already self-tag (e.g. native plugins writing directly
+    // to the file).
     public void WriteLog(string category, LogLevel level, string message)
     {
         if (!_active) return;
+        var tag = PluginTagForCategory(category);
+        if (tag is not null && !string.IsNullOrEmpty(message) && message[0] != '[')
+            message = $"[{tag}] {message}";
         var record = new Dictionary<string, object?>
         {
             ["hostname"] = Environment.MachineName,
@@ -111,6 +120,42 @@ public sealed class LogSink : IDisposable
             ["process"] = Environment.ProcessId,
         };
         WriteObject(record);
+    }
+
+    // Two recognized plugin-category shapes:
+    //   1. `plugin.<shortname>[.sub]` — V4 native plugins via EmitPluginLog.
+    //      Extracted directly from the category string.
+    //   2. Built-in C# plugin types — looked up in the type→shortname map
+    //      populated by `RegisterBuiltinPlugin` at startup. We use the
+    //      plugin's own `Shortname` property rather than guessing from the
+    //      class name (avoids brittle PascalCase→snake_case heuristics that
+    //      mis-handle abbreviations like `OAuth`).
+    // Anything else returns null and the message is written unmodified.
+    internal static string? PluginTagForCategory(string category)
+    {
+        if (string.IsNullOrEmpty(category)) return null;
+        if (_builtinPlugins.TryGetValue(category, out var sn)) return sn;
+        const string nativePrefix = "plugin.";
+        if (category.StartsWith(nativePrefix, StringComparison.Ordinal))
+        {
+            var rest = category.AsSpan(nativePrefix.Length);
+            var dot = rest.IndexOf('.');
+            return (dot < 0 ? rest : rest[..dot]).ToString();
+        }
+        return null;
+    }
+
+    // Populated at startup from the DI container so PluginTagForCategory can
+    // map ILogger<TPlugin> categories (= full type name) to the plugin's
+    // declared shortname. ConcurrentDictionary because log entries from
+    // background threads may run during the registration loop.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _builtinPlugins =
+        new(StringComparer.Ordinal);
+
+    public static void RegisterBuiltinPlugin(Type pluginType, string shortname)
+    {
+        if (pluginType.FullName is null || string.IsNullOrEmpty(shortname)) return;
+        _builtinPlugins[pluginType.FullName] = shortname;
     }
 
     // Per-request access record. Already-built dictionary so the middleware

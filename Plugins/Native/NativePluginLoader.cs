@@ -168,6 +168,14 @@ public static class NativePluginLoader
                 if (wrapper is not null)
                 {
                     wrapper.Shortname = Path.GetFileName(dir);
+                    // Gated to avoid leaking config.json contents (potential
+                    // secrets) on every startup. Set DMART_DEBUG_PLUGIN_CONFIG=1
+                    // when debugging plugin load. Parallel to the LogDebug
+                    // path in PluginManager, but native loads happen during
+                    // DI build before the logger is wired up — hence stderr.
+                    if (Environment.GetEnvironmentVariable("DMART_DEBUG_PLUGIN_CONFIG") == "1")
+                        Console.Error.WriteLine(
+                            $"PLUGIN_CONFIG: {wrapper.Shortname} from {configPath} {JsonUtil.Compact(json)}");
                     configs.Add(wrapper);
                 }
             }

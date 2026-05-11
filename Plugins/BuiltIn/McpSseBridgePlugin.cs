@@ -62,13 +62,13 @@ public sealed class McpSseBridgePlugin(
             }
             catch (Exception ex)
             {
-                log.LogWarning(ex, "mcp_sse_bridge: CanRead failed for {Session}", session.Id);
+                log.LogWarning(ex, "CanRead failed for {Session}", session.Id);
                 continue;
             }
             if (!allowed) continue;
 
             if (!session.TryEnqueue(payload))
-                log.LogDebug("mcp_sse_bridge: outbox full for session {Session} — frame dropped",
+                log.LogDebug("outbox full for session {Session} — frame dropped",
                     session.Id);
         }
     }

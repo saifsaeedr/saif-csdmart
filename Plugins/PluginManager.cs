@@ -104,6 +104,12 @@ public sealed class PluginManager(
                     wrapper.Shortname = Path.GetFileName(dir);
                     // Skip duplicates (first occurrence wins)
                     if (configs.Any(c => c.Shortname == wrapper.Shortname)) continue;
+                    // Debug-level: config.json may contain secrets (API keys,
+                    // tokens) for plugin-specific integrations. Operators
+                    // who need this for plugin debugging can lower LOG_LEVEL
+                    // to "debug" temporarily.
+                    log.LogDebug("PLUGIN_CONFIG: {Shortname} from {Path} {Config}",
+                        wrapper.Shortname, configPath, JsonUtil.Compact(bytes));
                     configs.Add(wrapper);
                 }
                 catch (Exception ex)

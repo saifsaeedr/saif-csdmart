@@ -8,10 +8,23 @@ using Xunit;
 
 namespace Dmart.Tests.Unit.Plugins;
 
-// Covers the V4 plugin-logging contract:
+// Covers the plugin-logging contract:
 //   - NativePluginCallbacks.ClampLevel maps int → LogLevel safely
-//   - DmartSdk.Log* falls back to stderr on a V3 host (Version<4 or Log==null)
-//   - DmartSdk.Log* invokes the callback on a V4 host with the right args
+//   - DmartSdk.Log* writes to stderr when no plugin log file is open
+//     (DMART_PLUGIN_LOG_DIR unset, or SetShortname not called)
+//
+// The host's V4 cb.Log callback is no longer invoked by DmartSdk.Log* —
+// plugins now own their log file via DmartSdk.SetShortname (see
+// DmartSdkLoggingTests). The cb argument stays in the SDK signatures for
+// source-compat with V4 plugins, but its Log field is intentionally
+// unused. These tests confirm the stderr fallback fires regardless of
+// whether cb.Version is 3 or 4, and regardless of whether cb.Log is null
+// or set.
+//
+// Both this class and DmartSdkLoggingTests mutate DmartSdk's process-
+// global _logStream/_shortname statics, so they share a collection to
+// serialize execution under xUnit's default parallel-across-classes runner.
+[Collection("PluginSdkLogging")]
 public class PluginLoggingTests
 {
     [Theory]
@@ -54,76 +67,40 @@ public class PluginLoggingTests
     }
 
     [Fact]
-    public unsafe void Sdk_Log_V4_Host_Invokes_Callback_With_Marshalled_Strings()
+    public unsafe void Sdk_Log_V4_Host_With_Live_Callback_Still_Falls_Back_To_Stderr()
     {
-        ResetCapture();
-        var cb = new DmartCallbacks { Version = 4, Log = &CaptureCb };
-        DmartSdk.LogInfo(in cb, "hello-from-test", category: "smoke");
-        _capturedLevel.ShouldBe(DmartSdk.LogLevelInfo);
-        _capturedCategory.ShouldBe("smoke");
-        _capturedMessage.ShouldBe("hello-from-test");
+        // The new SDK contract ignores cb.Log entirely. Even when a host
+        // supplies a non-null V4 callback, DmartSdk.Log* writes to stderr
+        // (when no plugin log file is open) instead of invoking the cb.
+        var cb = new DmartCallbacks { Version = 4, Log = &NoopCb };
+        var captured = CaptureStderr(() =>
+            DmartSdk.LogInfo(in cb, "hello-from-test", category: "smoke"));
+        captured.ShouldContain("[INFO]");
+        captured.ShouldContain("[smoke]");
+        captured.ShouldContain("hello-from-test");
     }
 
     [Fact]
-    public unsafe void Sdk_Log_V4_Host_Passes_Null_Category_When_Not_Specified()
+    public unsafe void Sdk_Log_All_Level_Helpers_Emit_Correct_Level_Tag()
     {
-        ResetCapture();
-        var cb = new DmartCallbacks { Version = 4, Log = &CaptureCb };
-        DmartSdk.LogWarn(in cb, "default-category");
-        _capturedLevel.ShouldBe(DmartSdk.LogLevelWarn);
-        _capturedCategory.ShouldBeNull();
-        _capturedMessage.ShouldBe("default-category");
+        // With no plugin file open, every level helper must emit its own
+        // tag on the stderr fallback line. Confirms the level → string
+        // mapping is wired into the helpers, not lost in the cb.Log shift.
+        var cb = new DmartCallbacks { Version = 4, Log = &NoopCb };
+        CaptureStderr(() => DmartSdk.LogTrace(in cb, "t")).ShouldContain("[TRACE]");
+        CaptureStderr(() => DmartSdk.LogDebug(in cb, "d")).ShouldContain("[DEBUG]");
+        CaptureStderr(() => DmartSdk.LogInfo(in cb, "i")).ShouldContain("[INFO]");
+        CaptureStderr(() => DmartSdk.LogWarn(in cb, "w")).ShouldContain("[WARN]");
+        CaptureStderr(() => DmartSdk.LogError(in cb, "e")).ShouldContain("[ERROR]");
+        CaptureStderr(() => DmartSdk.LogCritical(in cb, "c")).ShouldContain("[CRITICAL]");
     }
 
-    [Fact]
-    public unsafe void Sdk_Log_All_Level_Helpers_Pass_Correct_Level()
-    {
-        var cb = new DmartCallbacks { Version = 4, Log = &CaptureCb };
-
-        ResetCapture(); DmartSdk.LogTrace(in cb, "t");
-        _capturedLevel.ShouldBe(DmartSdk.LogLevelTrace);
-
-        ResetCapture(); DmartSdk.LogDebug(in cb, "d");
-        _capturedLevel.ShouldBe(DmartSdk.LogLevelDebug);
-
-        ResetCapture(); DmartSdk.LogInfo(in cb, "i");
-        _capturedLevel.ShouldBe(DmartSdk.LogLevelInfo);
-
-        ResetCapture(); DmartSdk.LogWarn(in cb, "w");
-        _capturedLevel.ShouldBe(DmartSdk.LogLevelWarn);
-
-        ResetCapture(); DmartSdk.LogError(in cb, "e");
-        _capturedLevel.ShouldBe(DmartSdk.LogLevelError);
-
-        ResetCapture(); DmartSdk.LogCritical(in cb, "c");
-        _capturedLevel.ShouldBe(DmartSdk.LogLevelCritical);
-    }
-
-    // ------------------------------------------------------------------
-    // Capture harness for the V4 callback path
-    // ------------------------------------------------------------------
-    //
-    // The SDK frees the marshalled UTF-8 buffers in a `finally` after the
-    // callback returns, so we copy the strings out into managed memory
-    // inside the callback rather than holding the raw pointers.
-
-    private static int _capturedLevel;
-    private static string? _capturedCategory;
-    private static string? _capturedMessage;
-
-    private static void ResetCapture()
-    {
-        _capturedLevel = -1;
-        _capturedCategory = null;
-        _capturedMessage = null;
-    }
-
+    // A do-nothing cb.Log so we can construct a "live V4 host" and verify
+    // the SDK still bypasses it. The signature matches DmartCallbacks.Log.
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
-    private static unsafe void CaptureCb(int level, byte* category, byte* message)
+    private static unsafe void NoopCb(int level, byte* category, byte* message)
     {
-        _capturedLevel = level;
-        _capturedCategory = category == null ? null : Marshal.PtrToStringUTF8((IntPtr)category);
-        _capturedMessage = message == null ? null : Marshal.PtrToStringUTF8((IntPtr)message);
+        // intentionally empty — the SDK must not invoke this.
     }
 
     private static string CaptureStderr(Action action)

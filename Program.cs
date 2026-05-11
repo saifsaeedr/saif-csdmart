@@ -1053,6 +1053,27 @@ builder.Services.AddOpenApi(options =>
     if (!string.IsNullOrEmpty(logFile))
         logFormat = "json";
 
+    // Publish the log directory to plugins via env. Each plugin is
+    // responsible for opening its own `<shortname>.ljson.log` under this
+    // path — the host does not intercept, format, or rotate plugin-emitted
+    // lines. Subprocess plugins inherit the env from the dmart process;
+    // in-process .so plugins read it with Environment.GetEnvironmentVariable.
+    // The value is absolutized because subprocess plugins run with their own
+    // working directory (the plugin's own folder), so a relative path would
+    // resolve to the wrong place. Empty LogFile = no env exported, and the
+    // plugin-side helper skips file logging on its own.
+    //
+    // dmart owns DMART_PLUGIN_LOG_DIR: a pre-existing value from the parent
+    // env is overwritten so plugins always agree with the host on the log
+    // directory. Operators who want a different location should set LogFile
+    // in dmart's config rather than exporting this env var directly.
+    if (!string.IsNullOrEmpty(logFile))
+    {
+        var dir = Path.GetDirectoryName(logFile);
+        if (!string.IsNullOrEmpty(dir))
+            Environment.SetEnvironmentVariable("DMART_PLUGIN_LOG_DIR", Path.GetFullPath(dir));
+    }
+
     // Set minimum log level from config.env.
     if (Enum.TryParse<LogLevel>(logLevelStr, ignoreCase: true, out var minLevel))
         builder.Logging.SetMinimumLevel(minLevel);
@@ -1461,6 +1482,15 @@ app.Services.GetRequiredService<LanguageLoader>().Load();
 
 // Load plugins + mount API plugin routes
 {
+    // Register plugin type → shortname mappings so LogSink and the console
+    // formatter can prepend `[<shortname>]` to log lines emitted via
+    // ILogger<TPlugin>. Done before LoadAsync so any startup log lines from
+    // a plugin's constructor or hook registration are already tagged.
+    foreach (var p in app.Services.GetServices<IHookPlugin>())
+        LogSink.RegisterBuiltinPlugin(p.GetType(), p.Shortname);
+    foreach (var p in app.Services.GetServices<IApiPlugin>())
+        LogSink.RegisterBuiltinPlugin(p.GetType(), p.Shortname);
+
     var pluginManager = app.Services.GetRequiredService<PluginManager>();
     await pluginManager.LoadAsync();
     foreach (var apiPlugin in pluginManager.ActiveApiPlugins)

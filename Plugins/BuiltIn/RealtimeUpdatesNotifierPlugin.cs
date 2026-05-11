@@ -62,7 +62,7 @@ public sealed class RealtimeUpdatesNotifierPlugin(
             try { await wsMgr.BroadcastToChannelAsync(channel, message); }
             catch (Exception ex)
             {
-                log.LogWarning(ex, "realtime_updates_notifier: broadcast to {Channel} failed", channel);
+                log.LogWarning(ex, "broadcast to {Channel} failed", channel);
             }
         }
     }
