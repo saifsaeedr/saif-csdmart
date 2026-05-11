@@ -351,6 +351,12 @@ public static class SqlSchema
         ON entries USING GIN (tags jsonb_path_ops);
     CREATE INDEX IF NOT EXISTS idx_entries_acl_gin
         ON entries USING GIN (acl jsonb_path_ops);
+    -- Reverse referential-integrity probe in EntryService.DeleteAsync uses
+    -- `relationships @> $1::jsonb`. Without this index it's a sequential scan
+    -- over every entry; with it, jsonb_path_ops degrades the lookup to an
+    -- index range scan and the gate stays cheap on large entry tables.
+    CREATE INDEX IF NOT EXISTS idx_entries_relationships_gin
+        ON entries USING GIN (relationships jsonb_path_ops);
     CREATE INDEX IF NOT EXISTS idx_users_roles_gin
         ON users USING GIN (roles jsonb_path_ops);
     CREATE INDEX IF NOT EXISTS idx_users_groups_gin

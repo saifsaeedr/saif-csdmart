@@ -168,6 +168,16 @@ internal static class EntryToJsonNode
         node.Remove("subpath");
         node.Remove("resource_type");
 
+        // Python parity (and parity with QueryService.EntryMapper.ToRecord):
+        // relationships is always present in the response, defaulting to an
+        // empty array. The Entry record's nullable List + the global
+        // WhenWritingNull policy would drop the key, and the
+        // JsonStripEmptiesMiddleware exempts "relationships" so the [] we
+        // materialize here survives all the way to the wire. Clients can
+        // branch on length instead of needing a "is the key even there"
+        // probe.
+        if (node["relationships"] is null) node["relationships"] = new JsonArray();
+
         // Strip payload.body if not requested.
         if (!includePayloadBody && node["payload"] is JsonObject payload)
             payload.Remove("body");

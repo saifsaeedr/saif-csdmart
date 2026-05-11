@@ -21,6 +21,7 @@
     import ModalCSVUpload from "@/components/management/Modals/ModalCSVUpload.svelte";
     import ModalCSVDownload from "@/components/management/Modals/ModalCSVDownload.svelte";
     import ModalBulkMoveCopy from "@/components/management/Modals/ModalBulkMoveCopy.svelte";
+    import Prism from "@/components/Prism.svelte";
     import { onMount } from "svelte";
     import { checkAccess } from "@/utils/checkAccess";
     import {
@@ -99,13 +100,16 @@
 
     let isActionLoading = $state(false);
     let openDeleteModal = $state(false);
+    let modelError: any = $state(null);
     function deleteCurrentEntry() {
+        modelError = null;
         openDeleteModal = true;
     }
     async function handleBulkDelete() {
         if ($bulkBucket.length) {
             try {
                 isActionLoading = true;
+                modelError = null;
                 const records = $bulkBucket.map((b) => ({
                     resource_type: b.resource_type as ResourceType,
                     shortname: b.shortname,
@@ -122,19 +126,21 @@
 
                 if (response?.status === "success") {
                     showToast(Level.info);
+                    await $currentListView?.fetchPageRecords();
+                    bulkBucket.set([]);
+                    openDeleteModal = false;
                 } else {
                     showToast(Level.warn);
+                    modelError = response;
                 }
-                await $currentListView?.fetchPageRecords();
-                bulkBucket.set([]);
-            } catch (e) {
+            } catch (error: any) {
+                modelError = error.response?.data?.error;
                 showToast(
                     Level.warn,
                     "Failed to delete entries. Please try again later.",
                 );
             } finally {
                 isActionLoading = false;
-                openDeleteModal = false;
             }
         }
     }
@@ -405,6 +411,15 @@
         {$bulkBucket.length === 1 ? "entry" : "entries"}?<br />
         This action cannot be undone.
     </p>
+
+    {#if modelError}
+        <div class="mt-4">
+            <p class="text-red-600 font-medium mb-2">Error:</p>
+            <div class="max-h-60 overflow-auto">
+                <Prism code={modelError} />
+            </div>
+        </div>
+    {/if}
 
     <div class="flex justify-between w-full">
         <Button color="alternative" onclick={() => (openDeleteModal = false)}

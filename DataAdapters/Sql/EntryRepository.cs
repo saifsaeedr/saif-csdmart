@@ -1,7 +1,9 @@
 using System.Diagnostics.CodeAnalysis;
+using System.Text.Json;
 using Dmart.Models.Api;
 using Dmart.Models.Core;
 using Dmart.Models.Enums;
+using Dmart.Models.Json;
 using Npgsql;
 using NpgsqlTypes;
 
@@ -176,6 +178,103 @@ public sealed class EntryRepository(Db db)
         cmd.Parameters.Add(new() { Value = shortname });
         cmd.Parameters.Add(new() { Value = JsonbHelpers.EnumMember(type) });
         return await cmd.ExecuteNonQueryAsync(ct) > 0;
+    }
+
+    // Batched existence probe used by EntryService.ValidateRelationshipsAsync.
+    // Returns the set of (space, subpath, shortname) tuples present in
+    // `entries`. Type is intentionally NOT part of the key — the entries
+    // table UNIQUE constraint is (shortname, space_name, subpath) so a path
+    // hit is enough; matches GetAsync(...)'s type-fallback semantics.
+    //
+    // One round trip per validate call instead of one per relationship.
+    // SQL is `WHERE (space_name, subpath, shortname) IN ((...), ...)` with
+    // 3*N positional parameters — safe to interpolate the placeholder list
+    // because only integer indices are embedded; every caller-supplied value
+    // binds through Npgsql parameter substitution.
+    [SuppressMessage("Security", "CA2100",
+        Justification = "Audited: SQL placeholder list is built from integer indices; all caller-supplied values flow through NpgsqlCommand.Parameters.")]
+    public async Task<HashSet<(string SpaceName, string Subpath, string Shortname)>> ExistMaskAsync(
+        IReadOnlyList<(string SpaceName, string Subpath, string Shortname)> targets,
+        CancellationToken ct = default)
+    {
+        var hits = new HashSet<(string, string, string)>();
+        if (targets.Count == 0) return hits;
+
+        await using var conn = await db.OpenAsync(ct);
+        var sb = new System.Text.StringBuilder(
+            "SELECT space_name, subpath, shortname FROM entries WHERE (space_name, subpath, shortname) IN (");
+        await using var cmd = new NpgsqlCommand { Connection = conn };
+        for (var i = 0; i < targets.Count; i++)
+        {
+            if (i > 0) sb.Append(',');
+            sb.Append("($").Append(i * 3 + 1)
+              .Append(",$").Append(i * 3 + 2)
+              .Append(",$").Append(i * 3 + 3).Append(')');
+            cmd.Parameters.Add(new() { Value = targets[i].SpaceName });
+            cmd.Parameters.Add(new() { Value = targets[i].Subpath });
+            cmd.Parameters.Add(new() { Value = targets[i].Shortname });
+        }
+        sb.Append(')');
+        cmd.CommandText = sb.ToString();
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            hits.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+        return hits;
+    }
+
+    // Returns the (space, subpath, shortname) of the first entry whose
+    // relationships array contains a related_to matching the supplied
+    // locator — or null if nothing references it. Used by the delete-time
+    // RI gate so the caller can emit a useful error pointing at *which*
+    // entry blocks the delete.
+    //
+    // Uses the `@>` JSONB containment operator: postgres considers
+    // `[{"related_to":{type,space,subpath,shortname,…}}]` to contain
+    // `[{"related_to":{type,space,subpath,shortname}}]` regardless of any
+    // extra fields on the stored side. Without a GIN index this is a
+    // sequential scan over `entries`; on tables of meaningful size, add
+    // `CREATE INDEX entries_relationships_gin ON entries USING gin (relationships jsonb_path_ops)`
+    // and the query degrades to an index lookup. We exclude the row being
+    // deleted from the search so self-referencing entries are still
+    // deletable.
+    public async Task<(string SpaceName, string Subpath, string Shortname)?> FindFirstReferencerAsync(
+        string targetSpace, string targetSubpath, string targetShortname, ResourceType targetType,
+        string? excludeSpace, string? excludeSubpath, string? excludeShortname,
+        CancellationToken ct = default)
+    {
+        await using var conn = await db.OpenAsync(ct);
+        // Build a one-element array containing the related_to skeleton.
+        // EnumMember keeps the wire form ("content"/"ticket"/…) consistent
+        // with how MaterializeEntry writes it.
+        var probe = JsonSerializer.Serialize(new List<Dictionary<string, object>>
+        {
+            new()
+            {
+                ["related_to"] = new Dictionary<string, object>
+                {
+                    ["type"] = JsonbHelpers.EnumMember(targetType),
+                    ["space_name"] = targetSpace,
+                    ["subpath"] = targetSubpath,
+                    ["shortname"] = targetShortname,
+                },
+            },
+        }, DmartJsonContext.Default.ListDictionaryStringObject);
+
+        await using var cmd = new NpgsqlCommand("""
+            SELECT space_name, subpath, shortname
+            FROM entries
+            WHERE relationships @> $1::jsonb
+              AND NOT (space_name = $2 AND subpath = $3 AND shortname = $4)
+            LIMIT 1
+            """, conn);
+        cmd.Parameters.Add(new() { Value = probe });
+        cmd.Parameters.Add(new() { Value = excludeSpace ?? string.Empty });
+        cmd.Parameters.Add(new() { Value = excludeSubpath ?? string.Empty });
+        cmd.Parameters.Add(new() { Value = excludeShortname ?? string.Empty });
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct)) return null;
+        return (reader.GetString(0), reader.GetString(1), reader.GetString(2));
     }
 
     // Atomic, cascading folder delete. Removes (in one transaction):
