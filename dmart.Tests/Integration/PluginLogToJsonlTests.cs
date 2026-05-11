@@ -70,7 +70,9 @@ public sealed class PluginLogToJsonlTests : IDisposable
         var line = ReadOneJsonLine();
         line.GetProperty("category").GetString().ShouldBe("plugin.demo_plugin");
         line.GetProperty("level").GetString().ShouldBe("INFO");
-        line.GetProperty("message").GetString().ShouldBe("hello from plugin");
+        // LogSink tags `plugin.<shortname>` lines with `[<shortname>] ` so
+        // operators can grep "[demo_plugin]" without parsing JSON category.
+        line.GetProperty("message").GetString().ShouldBe("[demo_plugin] hello from plugin");
     }
 
     [Fact]
@@ -85,7 +87,7 @@ public sealed class PluginLogToJsonlTests : IDisposable
 
         var line = ReadOneJsonLine();
         line.GetProperty("category").GetString().ShouldBe("plugin.demo_plugin.events");
-        line.GetProperty("message").GetString().ShouldBe("user signed in");
+        line.GetProperty("message").GetString().ShouldBe("[demo_plugin] user signed in");
     }
 
     [Fact]

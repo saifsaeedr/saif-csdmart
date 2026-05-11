@@ -168,6 +168,17 @@ public static class NativePluginLoader
                 if (wrapper is not null)
                 {
                     wrapper.Shortname = Path.GetFileName(dir);
+                    string compact;
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(json);
+                        using var ms = new MemoryStream(json.Length);
+                        using (var w = new Utf8JsonWriter(ms, new JsonWriterOptions { Indented = false }))
+                            doc.WriteTo(w);
+                        compact = System.Text.Encoding.UTF8.GetString(ms.ToArray());
+                    }
+                    catch { compact = json; }
+                    Console.Error.WriteLine($"PLUGIN_CONFIG: {wrapper.Shortname} from {configPath} {compact}");
                     configs.Add(wrapper);
                 }
             }

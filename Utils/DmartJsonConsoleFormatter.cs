@@ -26,6 +26,15 @@ internal sealed class DmartJsonConsoleFormatter : ConsoleFormatter
         var message = entry.Formatter?.Invoke(entry.State, entry.Exception);
         if (message is null && entry.Exception is null) return;
 
+        // Match LogSink: prepend `[<shortname>] ` for plugin-category log
+        // lines so the terminal stream matches the JSONL file. Idempotent —
+        // a message already starting with `[` is left alone.
+        if (!string.IsNullOrEmpty(message) && message[0] != '[')
+        {
+            var tag = LogSink.PluginTagForCategory(entry.Category);
+            if (tag is not null) message = $"[{tag}] {message}";
+        }
+
         using var stream = new MemoryStream();
         using (var json = new Utf8JsonWriter(stream, WriterOptions))
         {

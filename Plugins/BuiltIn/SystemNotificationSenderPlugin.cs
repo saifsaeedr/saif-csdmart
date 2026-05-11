@@ -17,7 +17,7 @@ public sealed class SystemNotificationSenderPlugin(ILogger<SystemNotificationSen
 
     public Task HookAsync(Event e, CancellationToken ct = default)
     {
-        log.LogDebug("system_notification_sender: stub (no-op) for {Space}/{Subpath}/{Shortname}",
+        log.LogDebug("[system_notification_sender] stub (no-op) for {Space}/{Subpath}/{Shortname}",
             e.SpaceName, e.Subpath, e.Shortname ?? "-");
         return Task.CompletedTask;
     }

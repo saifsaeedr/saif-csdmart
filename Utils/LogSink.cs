@@ -97,9 +97,19 @@ public sealed class LogSink : IDisposable
     // Generic ILogger → one JSONL line per event. Shape mirrors Python's
     // base JsonFormatter output so operators see a uniform schema whether
     // the line came from a plugin log or a request handler.
+    //
+    // Tagging: when the category identifies a plugin we prepend
+    // `[<shortname>] ` to the message. Lets operators grep "[audit]" /
+    // "[oodi_sync]" without parsing the JSON category. Skipped if the
+    // message already starts with `[` to keep this idempotent across
+    // sources that already self-tag (e.g. native plugins writing directly
+    // to the file).
     public void WriteLog(string category, LogLevel level, string message)
     {
         if (!_active) return;
+        var tag = PluginTagForCategory(category);
+        if (tag is not null && !string.IsNullOrEmpty(message) && message[0] != '[')
+            message = $"[{tag}] {message}";
         var record = new Dictionary<string, object?>
         {
             ["hostname"] = Environment.MachineName,
@@ -111,6 +121,50 @@ public sealed class LogSink : IDisposable
             ["process"] = Environment.ProcessId,
         };
         WriteObject(record);
+    }
+
+    // Two recognized plugin-category shapes:
+    //   1. `plugin.<shortname>[.sub]` — V4 native plugins via EmitPluginLog.
+    //   2. `Dmart.Plugins.BuiltIn.<Class>Plugin` — built-in C# plugins using
+    //      ILogger<TPlugin>. The class name is Pascal-cased; we convert to
+    //      snake_case and strip the trailing `_plugin` to match the plugin's
+    //      Shortname (e.g. "AuditPlugin" → "audit",
+    //      "AdminNotificationSenderPlugin" → "admin_notification_sender").
+    // Anything else returns null and the message is written unmodified.
+    internal static string? PluginTagForCategory(string category)
+    {
+        if (string.IsNullOrEmpty(category)) return null;
+        const string nativePrefix = "plugin.";
+        if (category.StartsWith(nativePrefix, StringComparison.Ordinal))
+        {
+            var rest = category.AsSpan(nativePrefix.Length);
+            var dot = rest.IndexOf('.');
+            return (dot < 0 ? rest : rest[..dot]).ToString();
+        }
+        const string builtinPrefix = "Dmart.Plugins.BuiltIn.";
+        if (category.StartsWith(builtinPrefix, StringComparison.Ordinal))
+        {
+            var name = category.Substring(builtinPrefix.Length);
+            // Strip trailing "Plugin" if present.
+            if (name.EndsWith("Plugin", StringComparison.Ordinal))
+                name = name.Substring(0, name.Length - "Plugin".Length);
+            return PascalToSnake(name);
+        }
+        return null;
+    }
+
+    private static string PascalToSnake(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return s;
+        var sb = new StringBuilder(s.Length + 4);
+        for (var i = 0; i < s.Length; i++)
+        {
+            var c = s[i];
+            if (i > 0 && char.IsUpper(c) && (char.IsLower(s[i - 1]) || (i + 1 < s.Length && char.IsLower(s[i + 1]))))
+                sb.Append('_');
+            sb.Append(char.ToLowerInvariant(c));
+        }
+        return sb.ToString();
     }
 
     // Per-request access record. Already-built dictionary so the middleware

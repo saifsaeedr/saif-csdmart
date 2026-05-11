@@ -17,7 +17,7 @@ public sealed class LocalNotificationPlugin(ILogger<LocalNotificationPlugin> log
 
     public Task HookAsync(Event e, CancellationToken ct = default)
     {
-        log.LogDebug("local_notification: stub (no-op) for {Space}/{Subpath}/{Shortname}",
+        log.LogDebug("[local_notification] stub (no-op) for {Space}/{Subpath}/{Shortname}",
             e.SpaceName, e.Subpath, e.Shortname ?? "-");
         return Task.CompletedTask;
     }

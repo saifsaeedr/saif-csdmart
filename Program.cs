@@ -1054,6 +1054,22 @@ builder.Services.AddOpenApi(options =>
     if (!string.IsNullOrEmpty(logFile))
         logFormat = "json";
 
+    // Publish the log directory to plugins via env. Each plugin is
+    // responsible for opening its own `<shortname>.ljson.log` under this
+    // path — the host does not intercept, format, or rotate plugin-emitted
+    // lines. Subprocess plugins inherit the env from the dmart process;
+    // in-process .so plugins read it with Environment.GetEnvironmentVariable.
+    // The value is absolutized because subprocess plugins run with their own
+    // working directory (the plugin's own folder), so a relative path would
+    // resolve to the wrong place. Empty LogFile = no env exported, and the
+    // plugin-side helper skips file logging on its own.
+    if (!string.IsNullOrEmpty(logFile))
+    {
+        var dir = Path.GetDirectoryName(logFile);
+        if (!string.IsNullOrEmpty(dir))
+            Environment.SetEnvironmentVariable("DMART_PLUGIN_LOG_DIR", Path.GetFullPath(dir));
+    }
+
     // Set minimum log level from config.env.
     if (Enum.TryParse<LogLevel>(logLevelStr, ignoreCase: true, out var minLevel))
         builder.Logging.SetMinimumLevel(minLevel);

@@ -13,7 +13,7 @@ public sealed class AuditPlugin(ILogger<AuditPlugin> log) : IHookPlugin
 
     public Task HookAsync(Event e, CancellationToken ct = default)
     {
-        log.LogInformation("audit: {Action} {Space}/{Subpath}/{Shortname} by {User}",
+        log.LogInformation("[audit] {Action} {Space}/{Subpath}/{Shortname} by {User}",
             JsonbHelpers.EnumMember(e.ActionType),
             e.SpaceName, e.Subpath, e.Shortname ?? "-", e.UserShortname);
         return Task.CompletedTask;
