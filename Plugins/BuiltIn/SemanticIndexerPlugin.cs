@@ -42,7 +42,7 @@ public sealed class SemanticIndexerPlugin(
         }
         catch (Exception ex)
         {
-            log.LogWarning(ex, "[semantic_indexer] failed to reload entry {Space}/{Subpath}/{Shortname}",
+            log.LogWarning(ex, "failed to reload entry {Space}/{Subpath}/{Shortname}",
                 e.SpaceName, e.Subpath, e.Shortname);
             return;
         }

@@ -1063,6 +1063,11 @@ builder.Services.AddOpenApi(options =>
     // working directory (the plugin's own folder), so a relative path would
     // resolve to the wrong place. Empty LogFile = no env exported, and the
     // plugin-side helper skips file logging on its own.
+    //
+    // dmart owns DMART_PLUGIN_LOG_DIR: a pre-existing value from the parent
+    // env is overwritten so plugins always agree with the host on the log
+    // directory. Operators who want a different location should set LogFile
+    // in dmart's config rather than exporting this env var directly.
     if (!string.IsNullOrEmpty(logFile))
     {
         var dir = Path.GetDirectoryName(logFile);
@@ -1478,6 +1483,15 @@ app.Services.GetRequiredService<LanguageLoader>().Load();
 
 // Load plugins + mount API plugin routes
 {
+    // Register plugin type → shortname mappings so LogSink and the console
+    // formatter can prepend `[<shortname>]` to log lines emitted via
+    // ILogger<TPlugin>. Done before LoadAsync so any startup log lines from
+    // a plugin's constructor or hook registration are already tagged.
+    foreach (var p in app.Services.GetServices<IHookPlugin>())
+        LogSink.RegisterBuiltinPlugin(p.GetType(), p.Shortname);
+    foreach (var p in app.Services.GetServices<IApiPlugin>())
+        LogSink.RegisterBuiltinPlugin(p.GetType(), p.Shortname);
+
     var pluginManager = app.Services.GetRequiredService<PluginManager>();
     await pluginManager.LoadAsync();
     foreach (var apiPlugin in pluginManager.ActiveApiPlugins)

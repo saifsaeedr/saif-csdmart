@@ -1,4 +1,3 @@
-using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using Dmart.Config;
@@ -125,15 +124,17 @@ public sealed class LogSink : IDisposable
 
     // Two recognized plugin-category shapes:
     //   1. `plugin.<shortname>[.sub]` — V4 native plugins via EmitPluginLog.
-    //   2. `Dmart.Plugins.BuiltIn.<Class>Plugin` — built-in C# plugins using
-    //      ILogger<TPlugin>. The class name is Pascal-cased; we convert to
-    //      snake_case and strip the trailing `_plugin` to match the plugin's
-    //      Shortname (e.g. "AuditPlugin" → "audit",
-    //      "AdminNotificationSenderPlugin" → "admin_notification_sender").
+    //      Extracted directly from the category string.
+    //   2. Built-in C# plugin types — looked up in the type→shortname map
+    //      populated by `RegisterBuiltinPlugin` at startup. We use the
+    //      plugin's own `Shortname` property rather than guessing from the
+    //      class name (avoids brittle PascalCase→snake_case heuristics that
+    //      mis-handle abbreviations like `OAuth`).
     // Anything else returns null and the message is written unmodified.
     internal static string? PluginTagForCategory(string category)
     {
         if (string.IsNullOrEmpty(category)) return null;
+        if (_builtinPlugins.TryGetValue(category, out var sn)) return sn;
         const string nativePrefix = "plugin.";
         if (category.StartsWith(nativePrefix, StringComparison.Ordinal))
         {
@@ -141,30 +142,20 @@ public sealed class LogSink : IDisposable
             var dot = rest.IndexOf('.');
             return (dot < 0 ? rest : rest[..dot]).ToString();
         }
-        const string builtinPrefix = "Dmart.Plugins.BuiltIn.";
-        if (category.StartsWith(builtinPrefix, StringComparison.Ordinal))
-        {
-            var name = category.Substring(builtinPrefix.Length);
-            // Strip trailing "Plugin" if present.
-            if (name.EndsWith("Plugin", StringComparison.Ordinal))
-                name = name.Substring(0, name.Length - "Plugin".Length);
-            return PascalToSnake(name);
-        }
         return null;
     }
 
-    private static string PascalToSnake(string s)
+    // Populated at startup from the DI container so PluginTagForCategory can
+    // map ILogger<TPlugin> categories (= full type name) to the plugin's
+    // declared shortname. ConcurrentDictionary because log entries from
+    // background threads may run during the registration loop.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _builtinPlugins =
+        new(StringComparer.Ordinal);
+
+    public static void RegisterBuiltinPlugin(Type pluginType, string shortname)
     {
-        if (string.IsNullOrEmpty(s)) return s;
-        var sb = new StringBuilder(s.Length + 4);
-        for (var i = 0; i < s.Length; i++)
-        {
-            var c = s[i];
-            if (i > 0 && char.IsUpper(c) && (char.IsLower(s[i - 1]) || (i + 1 < s.Length && char.IsLower(s[i + 1]))))
-                sb.Append('_');
-            sb.Append(char.ToLowerInvariant(c));
-        }
-        return sb.ToString();
+        if (pluginType.FullName is null || string.IsNullOrEmpty(shortname)) return;
+        _builtinPlugins[pluginType.FullName] = shortname;
     }
 
     // Per-request access record. Already-built dictionary so the middleware

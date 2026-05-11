@@ -104,8 +104,12 @@ public sealed class PluginManager(
                     wrapper.Shortname = Path.GetFileName(dir);
                     // Skip duplicates (first occurrence wins)
                     if (configs.Any(c => c.Shortname == wrapper.Shortname)) continue;
-                    log.LogInformation("PLUGIN_CONFIG: {Shortname} from {Path} {Config}",
-                        wrapper.Shortname, configPath, CompactJson(bytes));
+                    // Debug-level: config.json may contain secrets (API keys,
+                    // tokens) for plugin-specific integrations. Operators
+                    // who need this for plugin debugging can lower LOG_LEVEL
+                    // to "debug" temporarily.
+                    log.LogDebug("PLUGIN_CONFIG: {Shortname} from {Path} {Config}",
+                        wrapper.Shortname, configPath, JsonUtil.Compact(bytes));
                     configs.Add(wrapper);
                 }
                 catch (Exception ex)
@@ -328,25 +332,6 @@ public sealed class PluginManager(
         var normalized = filterSubpath.TrimEnd('/');
         if (eventSubpath == normalized) return true;
         return eventSubpath.StartsWith(normalized + "/", StringComparison.Ordinal);
-    }
-
-    // Strip whitespace from a JSON byte buffer so it fits cleanly inside a
-    // single-line structured log message (no embedded \n escapes). Falls back
-    // to the raw text if the buffer doesn't parse as JSON.
-    private static string CompactJson(byte[] bytes)
-    {
-        try
-        {
-            using var doc = JsonDocument.Parse(bytes);
-            using var ms = new MemoryStream(bytes.Length);
-            using (var w = new Utf8JsonWriter(ms, new JsonWriterOptions { Indented = false }))
-                doc.WriteTo(w);
-            return System.Text.Encoding.UTF8.GetString(ms.ToArray());
-        }
-        catch
-        {
-            return System.Text.Encoding.UTF8.GetString(bytes);
-        }
     }
 
     private static bool TryParseAction(string raw, out ActionType value)
