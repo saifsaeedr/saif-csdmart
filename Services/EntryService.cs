@@ -170,31 +170,52 @@ public sealed class EntryService(
     // Walks the relationships list and verifies each related_to locator
     // resolves to a row in `entries`. Returns null on success, a single-line
     // error message (containing the literal "relationship target not found"
-    // anchor the integration tests pin on) on the first miss so callers can
-    // surface a structured INVALID_DATA without leaking full locator dumps.
+    // anchor the integration tests pin on) on the first miss in source order
+    // so callers can surface a structured INVALID_DATA without leaking full
+    // locator dumps.
+    //
+    // Batched: one EntryRepository.ExistMaskAsync round trip regardless of
+    // ref count. The earlier per-rel GetAsync loop was O(N) round trips on
+    // every create and on every update that added refs.
     //
     // Scope: user/role/permission/space live in their own tables, so we
-    // can't probe them via EntryRepository.GetAsync; skipping those keeps the
-    // gate honest (no false positives on cross-table refs) while still
-    // catching the common case — relationships from content entries to other
-    // content entries, tickets, folders, schemas, posts, etc.
+    // can't probe them via EntryRepository; skipping those keeps the gate
+    // honest (no false positives on cross-table refs) while still catching
+    // the common case — relationships from content entries to other content
+    // entries, tickets, folders, schemas, posts, etc.
+    //
+    // TOCTOU note: a target deleted between validate and the subsequent
+    // upsert would land a dangling ref. We accept that gap rather than wrap
+    // the upsert in a transaction with a row lock — the converse (reverse-
+    // RI on delete) catches the practical case, and concurrent deletes
+    // during a write are vanishingly rare.
     private async Task<string?> ValidateRelationshipsAsync(
         List<Dictionary<string, object>>? relationships, CancellationToken ct)
     {
         if (relationships is null || relationships.Count == 0) return null;
+        var ordered = new List<Locator>();
         foreach (var rel in relationships)
         {
             if (rel is null) continue;
             if (!rel.TryGetValue("related_to", out var rawTarget) || rawTarget is null) continue;
             var target = ParseLocator(rawTarget);
             if (target is null) continue;  // malformed shape — let schema validation surface it, not RI.
-            // Out-of-table targets pass through. EntryRepository.GetAsync only
-            // probes `entries`, so probing user/role/permission/space here
-            // would always 404 even when the target exists elsewhere.
+            // Out-of-table targets pass through. ExistMaskAsync only probes
+            // `entries`, so probing user/role/permission/space here would
+            // always 404 even when the target exists elsewhere.
             if (target.Type is ResourceType.User or ResourceType.Role
                 or ResourceType.Permission or ResourceType.Space) continue;
-            var hit = await entries.GetAsync(target.SpaceName, target.Subpath, target.Shortname, target.Type, ct);
-            if (hit is null)
+            ordered.Add(target);
+        }
+        if (ordered.Count == 0) return null;
+
+        var probes = new List<(string SpaceName, string Subpath, string Shortname)>(ordered.Count);
+        foreach (var l in ordered) probes.Add((l.SpaceName, l.Subpath, l.Shortname));
+        var hits = await entries.ExistMaskAsync(probes, ct);
+
+        foreach (var target in ordered)
+        {
+            if (!hits.Contains((target.SpaceName, target.Subpath, target.Shortname)))
                 return $"relationship target not found: {target.SpaceName}{target.Subpath}/{target.Shortname} ({JsonbHelpers.EnumMember(target.Type)})";
         }
         return null;
@@ -249,6 +270,12 @@ public sealed class EntryService(
     // don't move the row. Both lists may contain JsonElement-boxed or
     // Dictionary-typed values; ParseLocator normalizes the comparison key
     // either way. Used by UpdateAsync to validate only freshly added refs.
+    //
+    // Consequence: an edit that keeps the same locator but mutates the
+    // relationship's `attributes` payload is NOT considered "new" → the RI
+    // gate does not re-run. That's by design — the locator is what RI
+    // protects; attributes are arbitrary metadata. Worth knowing if you're
+    // chasing a "why didn't validation catch X" question.
     private static List<Dictionary<string, object>>? DiffNewRelationships(
         List<Dictionary<string, object>>? prev, List<Dictionary<string, object>>? next)
     {
@@ -689,11 +716,14 @@ public sealed class EntryService(
         // list. The wire shape lands as a JsonElement array (source-gen);
         // route through the same FromRelationships path MaterializeEntry
         // uses so the SQL writer sees identical structure regardless of
-        // entry-point. Patch with `relationships: null` clears the column.
+        // entry-point. Patch with `relationships: null` clears the column
+        // — covers both the in-process literal-null and the HTTP shape
+        // (JsonElement of ValueKind.Null).
         List<Dictionary<string, object>>? PatchRelationships()
         {
             if (!patch.TryGetValue("relationships", out var raw)) return existing.Relationships;
             if (raw is null) return null;
+            if (raw is JsonElement nullEl && nullEl.ValueKind == JsonValueKind.Null) return null;
             if (raw is List<Dictionary<string, object>> direct) return direct;
             if (raw is JsonElement el && el.ValueKind == JsonValueKind.Array)
                 return JsonbHelpers.FromRelationships(el.GetRawText());

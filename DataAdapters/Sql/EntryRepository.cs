@@ -180,6 +180,49 @@ public sealed class EntryRepository(Db db)
         return await cmd.ExecuteNonQueryAsync(ct) > 0;
     }
 
+    // Batched existence probe used by EntryService.ValidateRelationshipsAsync.
+    // Returns the set of (space, subpath, shortname) tuples present in
+    // `entries`. Type is intentionally NOT part of the key — the entries
+    // table UNIQUE constraint is (shortname, space_name, subpath) so a path
+    // hit is enough; matches GetAsync(...)'s type-fallback semantics.
+    //
+    // One round trip per validate call instead of one per relationship.
+    // SQL is `WHERE (space_name, subpath, shortname) IN ((...), ...)` with
+    // 3*N positional parameters — safe to interpolate the placeholder list
+    // because only integer indices are embedded; every caller-supplied value
+    // binds through Npgsql parameter substitution.
+    [SuppressMessage("Security", "CA2100",
+        Justification = "Audited: SQL placeholder list is built from integer indices; all caller-supplied values flow through NpgsqlCommand.Parameters.")]
+    public async Task<HashSet<(string SpaceName, string Subpath, string Shortname)>> ExistMaskAsync(
+        IReadOnlyList<(string SpaceName, string Subpath, string Shortname)> targets,
+        CancellationToken ct = default)
+    {
+        var hits = new HashSet<(string, string, string)>();
+        if (targets.Count == 0) return hits;
+
+        await using var conn = await db.OpenAsync(ct);
+        var sb = new System.Text.StringBuilder(
+            "SELECT space_name, subpath, shortname FROM entries WHERE (space_name, subpath, shortname) IN (");
+        await using var cmd = new NpgsqlCommand { Connection = conn };
+        for (var i = 0; i < targets.Count; i++)
+        {
+            if (i > 0) sb.Append(',');
+            sb.Append("($").Append(i * 3 + 1)
+              .Append(",$").Append(i * 3 + 2)
+              .Append(",$").Append(i * 3 + 3).Append(')');
+            cmd.Parameters.Add(new() { Value = targets[i].SpaceName });
+            cmd.Parameters.Add(new() { Value = targets[i].Subpath });
+            cmd.Parameters.Add(new() { Value = targets[i].Shortname });
+        }
+        sb.Append(')');
+        cmd.CommandText = sb.ToString();
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            hits.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+        return hits;
+    }
+
     // Returns the (space, subpath, shortname) of the first entry whose
     // relationships array contains a related_to matching the supplied
     // locator — or null if nothing references it. Used by the delete-time

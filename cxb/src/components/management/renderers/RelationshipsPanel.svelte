@@ -354,7 +354,7 @@
     bind:open={showForm}
     size="lg"
     title={isEditing ? "Edit Relationship" : "New Relationship"}
-    on:close={resetForm}
+    onclose={resetForm}
 >
     <div class="space-y-3 w-full">
         <div>

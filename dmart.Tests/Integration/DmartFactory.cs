@@ -101,6 +101,14 @@ public sealed class DmartFactory : WebApplicationFactory<Program>, IAsyncLifetim
                 ["Dmart:JwtAccessExpires"] = "300",
                 ["Dmart:AdminPassword"] = AdminPassword,
                 ["Dmart:AdminEmail"] = "admin@test.local",
+                // Each test in a class typically calls CreateLoggedInUserAsync
+                // → one /user/login per test → all from 127.0.0.1. The prod
+                // default of 10 req/min/IP starves any class with > 10 tests
+                // (e.g. RelationshipsRefIntegrityTests has 12). Tests that
+                // need to exercise rate-limit *behavior* override this on
+                // their own factory (AuthRateLimitTests, ShortLinkAnonymous-
+                // ResolveTests both pin it to 3).
+                ["Dmart:AuthRateLimitPerMinute"] = "1000",
             };
 
             // If a PostgresConnection is resolved (from env var or config.env),

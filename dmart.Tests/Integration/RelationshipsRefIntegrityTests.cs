@@ -446,7 +446,288 @@ public class RelationshipsRefIntegrityTests : IClassFixture<DmartFactory>
         }
     }
 
+    // Self-referencing entry: source.relationships → source itself. The
+    // reverse-RI gate must allow deletion — the FindFirstReferencerAsync SQL
+    // explicitly excludes the row at the target's own (space, subpath,
+    // shortname) coordinates so a self-ref doesn't perpetually block its
+    // own removal.
+    [FactIfPg]
+    public async Task Delete_Self_Referencing_Entry_Succeeds()
+    {
+        var (client, _, _, _) = await _factory.CreateLoggedInUserAsync();
+        var space = "test";
+        var subpath = "/itest";
+        var sn = $"relself_{Guid.NewGuid():N}".Substring(0, 16);
+
+        // Create-then-update to self-ref: at create time the target doesn't
+        // exist yet, so we have to add the relationship in a second step.
+        await CreateContent(client, space, subpath, sn, relationships: null);
+        var patch = new Request
+        {
+            RequestType = RequestType.Update,
+            SpaceName = space,
+            Records = new()
+            {
+                new Record
+                {
+                    ResourceType = ResourceType.Content,
+                    Subpath = subpath,
+                    Shortname = sn,
+                    Attributes = new()
+                    {
+                        ["relationships"] = new List<Dictionary<string, object>>
+                        {
+                            new()
+                            {
+                                ["related_to"] = new Dictionary<string, object>
+                                {
+                                    ["type"] = "content",
+                                    ["space_name"] = space,
+                                    ["subpath"] = subpath,
+                                    ["shortname"] = sn,
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        };
+        var resp = await client.PostAsJsonAsync("/managed/request", patch, DmartJsonContext.Default.Request);
+        resp.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        // Delete must succeed — the self-ref does not block.
+        var deleteReq = new Request
+        {
+            RequestType = RequestType.Delete,
+            SpaceName = space,
+            Records = new()
+            {
+                new Record
+                {
+                    ResourceType = ResourceType.Content,
+                    Subpath = subpath,
+                    Shortname = sn,
+                },
+            },
+        };
+        var delResp = await client.PostAsJsonAsync("/managed/request", deleteReq, DmartJsonContext.Default.Request);
+        delResp.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        var get = await client.GetAsync($"/managed/entry/content/{space}/{subpath.TrimStart('/')}/{sn}");
+        get.StatusCode.ShouldBe(HttpStatusCode.NotFound);
+    }
+
+    // Update that swaps the relationship list: the existing entry has a ref
+    // to target A; the patch replaces it with a ref to target B. The diff-
+    // only validator must see {ref→B} as "new" and validate only B; if A
+    // was already deleted, the patch still succeeds. If B doesn't exist,
+    // the patch fails — proving the diff isn't a "pass everything through"
+    // shortcut.
+    [FactIfPg]
+    public async Task Update_That_Swaps_Relationships_Validates_Only_New_Ones()
+    {
+        var (client, _, _, _) = await _factory.CreateLoggedInUserAsync();
+        var space = "test";
+        var subpath = "/itest";
+        var aSn = $"relswpa_{Guid.NewGuid():N}".Substring(0, 16);
+        var bSn = $"relswpb_{Guid.NewGuid():N}".Substring(0, 16);
+        var srcSn = $"relswps_{Guid.NewGuid():N}".Substring(0, 16);
+        var ghostSn = $"relswpg_{Guid.NewGuid():N}".Substring(0, 16);
+
+        try
+        {
+            // Build: A, B, source→A.
+            await CreateContent(client, space, subpath, aSn, relationships: null);
+            await CreateContent(client, space, subpath, bSn, relationships: null);
+            await CreateContent(client, space, subpath, srcSn, relationships: new()
+            {
+                new Dictionary<string, object>
+                {
+                    ["related_to"] = new Dictionary<string, object>
+                    {
+                        ["type"] = "content",
+                        ["space_name"] = space,
+                        ["subpath"] = subpath,
+                        ["shortname"] = aSn,
+                    },
+                },
+            });
+
+            // Delete A out from under the source. The source still points at A,
+            // but the next patch will replace the whole list with {→B}.
+            await DeleteContent(client, space, subpath, aSn);
+
+            // Swap: replace [→A] with [→B]. B is valid → patch succeeds.
+            var swapToValid = SwapRelationshipsRequest(space, subpath, srcSn, bSn);
+            var resp = await client.PostAsJsonAsync("/managed/request", swapToValid, DmartJsonContext.Default.Request);
+            resp.StatusCode.ShouldBe(HttpStatusCode.OK);
+            (await resp.Content.ReadAsStringAsync()).ShouldContain("\"status\":\"success\"");
+
+            // Swap again: replace [→B] with [→ghost]. ghost doesn't exist →
+            // diff sees ref→ghost as "new", validator must fail.
+            var swapToGhost = SwapRelationshipsRequest(space, subpath, srcSn, ghostSn);
+            var bad = await client.PostAsJsonAsync("/managed/request", swapToGhost, DmartJsonContext.Default.Request);
+            bad.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+            (await bad.Content.ReadAsStringAsync()).ShouldContain("relationship target not found");
+        }
+        finally
+        {
+            await DeleteContent(client, space, subpath, srcSn);
+            await DeleteContent(client, space, subpath, bSn);
+            await DeleteContent(client, space, subpath, aSn);
+        }
+    }
+
+    // Multiple relationships, one missing: the validator returns the FIRST
+    // miss in source order — the error message must name the second
+    // relationship (the missing one), not the third (which is also valid).
+    // Pins the batched validator's source-order semantics.
+    [FactIfPg]
+    public async Task Create_With_Multiple_Relationships_One_Missing_Fails_On_First_Miss()
+    {
+        var (client, _, _, _) = await _factory.CreateLoggedInUserAsync();
+        var space = "test";
+        var subpath = "/itest";
+        var t1Sn = $"relm1_{Guid.NewGuid():N}".Substring(0, 16);
+        var t3Sn = $"relm3_{Guid.NewGuid():N}".Substring(0, 16);
+        var missingSn = $"relmiss_{Guid.NewGuid():N}".Substring(0, 16);
+        var srcSn = $"relmsrc_{Guid.NewGuid():N}".Substring(0, 16);
+
+        try
+        {
+            await CreateContent(client, space, subpath, t1Sn, relationships: null);
+            await CreateContent(client, space, subpath, t3Sn, relationships: null);
+
+            var req = BuildCreate(space, subpath, srcSn, relationships: new()
+            {
+                RelTo(space, subpath, t1Sn),
+                RelTo(space, subpath, missingSn),  // second position; this is the miss.
+                RelTo(space, subpath, t3Sn),
+            });
+            var resp = await client.PostAsJsonAsync("/managed/request", req, DmartJsonContext.Default.Request);
+            var body = await resp.Content.ReadAsStringAsync();
+            resp.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+
+            // Anchor on the missing shortname rather than position — the
+            // batched validator returns the first miss in source order, so
+            // the error names the second relationship's target.
+            body.ShouldContain("relationship target not found");
+            body.ShouldContain(missingSn);
+            body.ShouldNotContain(t3Sn);  // never reached the third — source order, first miss wins.
+
+            // Source must not have landed.
+            var get = await client.GetAsync($"/managed/entry/content/{space}/{subpath.TrimStart('/')}/{srcSn}");
+            get.StatusCode.ShouldBe(HttpStatusCode.NotFound);
+        }
+        finally
+        {
+            await DeleteContent(client, space, subpath, srcSn);
+            await DeleteContent(client, space, subpath, t1Sn);
+            await DeleteContent(client, space, subpath, t3Sn);
+        }
+    }
+
+    // Patch with `"relationships": null` must clear the column. Both the
+    // in-process literal-null path and the HTTP JsonElement(Null) path must
+    // collapse to the same outcome. GET afterwards shows the empty array
+    // (EntryHandler.Convert materializes `[]` for null).
+    [FactIfPg]
+    public async Task Patch_Relationships_Null_Clears_Column()
+    {
+        var (client, _, _, _) = await _factory.CreateLoggedInUserAsync();
+        var space = "test";
+        var subpath = "/itest";
+        var targetSn = $"relclr_t_{Guid.NewGuid():N}".Substring(0, 16);
+        var srcSn = $"relclr_s_{Guid.NewGuid():N}".Substring(0, 16);
+
+        try
+        {
+            await CreateContent(client, space, subpath, targetSn, relationships: null);
+            await CreateContent(client, space, subpath, srcSn, relationships: new()
+            {
+                RelTo(space, subpath, targetSn),
+            });
+
+            // Sanity: relationship is there.
+            var pre = await client.GetAsync($"/managed/entry/content/{space}/{subpath.TrimStart('/')}/{srcSn}");
+            using (var preDoc = JsonDocument.Parse(await pre.Content.ReadAsStringAsync()))
+                preDoc.RootElement.GetProperty("relationships").GetArrayLength().ShouldBe(1);
+
+            // Patch with explicit JSON null. Source-gen lands this as a
+            // JsonElement of ValueKind.Null on the dict value, so the patch
+            // handler's JsonElement(Null) branch is the one under test.
+            var patchJson = $$"""
+                {
+                    "request_type": "update",
+                    "space_name": "{{space}}",
+                    "records": [
+                        {
+                            "resource_type": "content",
+                            "subpath": "{{subpath}}",
+                            "shortname": "{{srcSn}}",
+                            "attributes": { "relationships": null }
+                        }
+                    ]
+                }
+                """;
+            using var httpContent = new StringContent(patchJson, System.Text.Encoding.UTF8, "application/json");
+            var resp = await client.PostAsync("/managed/request", httpContent);
+            resp.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+            // GET must now report `relationships: []` — the column was
+            // cleared, and EntryHandler.Convert materializes the empty
+            // array (Python parity).
+            var get = await client.GetAsync($"/managed/entry/content/{space}/{subpath.TrimStart('/')}/{srcSn}");
+            using var doc = JsonDocument.Parse(await get.Content.ReadAsStringAsync());
+            var rels = doc.RootElement.GetProperty("relationships");
+            rels.ValueKind.ShouldBe(JsonValueKind.Array);
+            rels.GetArrayLength().ShouldBe(0);
+        }
+        finally
+        {
+            await DeleteContent(client, space, subpath, srcSn);
+            await DeleteContent(client, space, subpath, targetSn);
+        }
+    }
+
     // -- helpers --
+
+    // One-relationship swap patch: replaces the whole relationships list
+    // with a single ref→shortname pointer. Used by the swap tests.
+    private static Request SwapRelationshipsRequest(string space, string subpath, string sourceSn, string targetSn)
+        => new()
+        {
+            RequestType = RequestType.Update,
+            SpaceName = space,
+            Records = new()
+            {
+                new Record
+                {
+                    ResourceType = ResourceType.Content,
+                    Subpath = subpath,
+                    Shortname = sourceSn,
+                    Attributes = new()
+                    {
+                        ["relationships"] = new List<Dictionary<string, object>>
+                        {
+                            RelTo(space, subpath, targetSn),
+                        },
+                    },
+                },
+            },
+        };
+
+    private static Dictionary<string, object> RelTo(string space, string subpath, string shortname)
+        => new()
+        {
+            ["related_to"] = new Dictionary<string, object>
+            {
+                ["type"] = "content",
+                ["space_name"] = space,
+                ["subpath"] = subpath,
+                ["shortname"] = shortname,
+            },
+        };
 
     private static async Task CreateContent(HttpClient client, string space, string subpath,
         string shortname, List<Dictionary<string, object>>? relationships)
