@@ -139,6 +139,116 @@ public class PatchRestrictedFieldsTests : IClassFixture<DmartFactory>
         }
     }
 
+    // Patch with `"slug": null` must clear the column. Before the IsPatchNull
+    // helper landed, `Str` saw JsonElement(Null) (the source-gen wire shape),
+    // failed the `v is not null` guard incorrectly (struct value is never CLR
+    // null), and wrote `el.ToString()` — yielding the empty string instead of
+    // clearing the field. Pins the contract that null clears.
+    [FactIfPg]
+    public async Task Patch_Slug_With_Null_Clears_It()
+    {
+        var (client, _, _, cleanup) = await _factory.CreateLoggedInUserAsync();
+        var shortname = $"slugtst_{Guid.NewGuid():N}".Substring(0, 16);
+        var space = "test";
+        var subpath = "/itest";
+        var initialSlug = $"slug-{Guid.NewGuid():N}".Substring(0, 12);
+
+        await CreateContent(client, space, subpath, shortname,
+            attributes: new() { ["displayname"] = "slug probe", ["slug"] = initialSlug });
+
+        try
+        {
+            // Sanity: slug landed on create.
+            var preAttrs = await GetAttributes(client, space, subpath, shortname);
+            preAttrs.ShouldContainKey("slug");
+            ((JsonElement)preAttrs["slug"]).GetString().ShouldBe(initialSlug);
+
+            // Raw JSON so the wire carries `"slug": null` — source-gen will
+            // land that as a JsonElement(Null), which is the shape under test.
+            var patchJson = $$"""
+                {
+                    "request_type": "update",
+                    "space_name": "{{space}}",
+                    "records": [
+                        {
+                            "resource_type": "content",
+                            "subpath": "{{subpath}}",
+                            "shortname": "{{shortname}}",
+                            "attributes": { "slug": null }
+                        }
+                    ]
+                }
+                """;
+            using var httpContent = new StringContent(patchJson, System.Text.Encoding.UTF8, "application/json");
+            var resp = await client.PostAsync("/managed/request", httpContent);
+            resp.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+            // Slug is `string?`; cleared → JsonStripEmptiesMiddleware drops
+            // the key. Specifically asserting "no key" is sharper than
+            // "value is empty string" — empty string was the bug shape.
+            var postAttrs = await GetAttributes(client, space, subpath, shortname);
+            postAttrs.ShouldNotContainKey("slug");
+        }
+        finally
+        {
+            await DeleteContent(client, space, subpath, shortname);
+            await cleanup();
+        }
+    }
+
+    // Patch with `"tags": null` must clear the column. Before the fix,
+    // PatchTags's branch chain fell through to fallback on JsonElement(Null)
+    // and silently kept the existing tags. Tags is non-nullable (`List<string>`
+    // defaulting to []), so "clear" means empty list — which the strip-empties
+    // middleware then removes from the response.
+    [FactIfPg]
+    public async Task Patch_Tags_With_Null_Clears_Them()
+    {
+        var (client, _, _, cleanup) = await _factory.CreateLoggedInUserAsync();
+        var shortname = $"tagsnul_{Guid.NewGuid():N}".Substring(0, 16);
+        var space = "test";
+        var subpath = "/itest";
+
+        await CreateContent(client, space, subpath, shortname,
+            attributes: new()
+            {
+                ["displayname"] = "tags-null probe",
+                ["tags"] = new List<string> { "alpha", "beta" },
+            });
+
+        try
+        {
+            var preAttrs = await GetAttributes(client, space, subpath, shortname);
+            ((JsonElement)preAttrs["tags"]).GetArrayLength().ShouldBe(2);
+
+            var patchJson = $$"""
+                {
+                    "request_type": "update",
+                    "space_name": "{{space}}",
+                    "records": [
+                        {
+                            "resource_type": "content",
+                            "subpath": "{{subpath}}",
+                            "shortname": "{{shortname}}",
+                            "attributes": { "tags": null }
+                        }
+                    ]
+                }
+                """;
+            using var httpContent = new StringContent(patchJson, System.Text.Encoding.UTF8, "application/json");
+            var resp = await client.PostAsync("/managed/request", httpContent);
+            resp.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+            var postAttrs = await GetAttributes(client, space, subpath, shortname);
+            postAttrs.ShouldNotContainKey("tags");
+        }
+        finally
+        {
+            await DeleteContent(client, space, subpath, shortname);
+            await cleanup();
+        }
+    }
+
     // -- helpers --
 
     private static Request BuildUpdate(string space, string subpath, string shortname,

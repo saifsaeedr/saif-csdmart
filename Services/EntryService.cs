@@ -264,6 +264,16 @@ public sealed class EntryService(
     private static string? TryReadJsonString(JsonElement el, string key)
         => el.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
 
+    // Patch dicts are typed `Dictionary<string, object>` but System.Text.Json's
+    // source generator deserializes JSON `null` into a `JsonElement` of
+    // `ValueKind.Null` (a struct value), not CLR `null`. So a check like
+    // `raw is null` only fires for in-process callers passing literal null
+    // and misses the HTTP wire shape entirely. This helper collapses both
+    // shapes into one predicate so patch handlers can rely on "key present
+    // + value indicates clear" being a single check.
+    internal static bool IsPatchNull(object? raw)
+        => raw is null || (raw is JsonElement el && el.ValueKind == JsonValueKind.Null);
+
     // Returns the subset of `next` whose related_to locator did NOT appear in
     // `prev`. Compared by the four locator fields (type / space_name /
     // subpath / shortname) — uuid/domain/attributes are ignored because they
@@ -656,8 +666,18 @@ public sealed class EntryService(
         bool RestrictedAllowed(string field) =>
             allowedRestrictedFields is not null && allowedRestrictedFields.Contains(field);
 
+        // absent key → keep existing value; explicit JSON null (either CLR or
+        // JsonElement(Null)) → clear; anything else → stringify. The earlier
+        // shape `v is not null ? v.ToString() : fallback` silently wrote the
+        // empty string for HTTP `"field": null` because JsonElement(Null) is
+        // a struct value, not CLR null. See IsPatchNull.
         string? Str(string key, string? fallback)
-            => patch.TryGetValue(key, out var v) && v is not null ? v.ToString() : fallback;
+        {
+            if (!patch.TryGetValue(key, out var v)) return fallback;
+            if (IsPatchNull(v)) return null;
+            if (v is JsonElement el && el.ValueKind == JsonValueKind.String) return el.GetString();
+            return v.ToString();
+        }
 
         Translation? PatchTranslation(string key, Translation? fallback)
         {
@@ -681,7 +701,11 @@ public sealed class EntryService(
 
         bool? PatchBool(string key, bool? fallback)
         {
-            if (!patch.TryGetValue(key, out var v) || v is null) return fallback;
+            if (!patch.TryGetValue(key, out var v)) return fallback;
+            // Explicit null clears the column. Falling through to fallback
+            // would silently no-op on `"is_open": null`, which contradicts
+            // the patch contract used by `relationships` / `displayname`.
+            if (IsPatchNull(v)) return null;
             if (v is bool bv) return bv;
             if (v is JsonElement je)
             {
@@ -694,9 +718,12 @@ public sealed class EntryService(
         // System.Text.Json source-gen lands JSON arrays in Dictionary<string, object>
         // as JsonElement, not List<object> — so the prior `is IEnumerable<object>`
         // pattern silently dropped tag patches from HTTP callers.
+        // `"tags": null` collapses to an empty list (the column is non-nullable
+        // and defaults to []), matching the "null clears" patch contract.
         List<string> PatchTags(List<string> fallback)
         {
-            if (!patch.TryGetValue("tags", out var raw) || raw is null) return fallback;
+            if (!patch.TryGetValue("tags", out var raw)) return fallback;
+            if (IsPatchNull(raw)) return new List<string>();
             if (raw is JsonElement el && el.ValueKind == JsonValueKind.Array)
             {
                 var list = new List<string>();
@@ -716,14 +743,12 @@ public sealed class EntryService(
         // list. The wire shape lands as a JsonElement array (source-gen);
         // route through the same FromRelationships path MaterializeEntry
         // uses so the SQL writer sees identical structure regardless of
-        // entry-point. Patch with `relationships: null` clears the column
-        // — covers both the in-process literal-null and the HTTP shape
-        // (JsonElement of ValueKind.Null).
+        // entry-point. `relationships: null` clears the column — IsPatchNull
+        // covers both the in-process literal-null and HTTP JsonElement(Null).
         List<Dictionary<string, object>>? PatchRelationships()
         {
             if (!patch.TryGetValue("relationships", out var raw)) return existing.Relationships;
-            if (raw is null) return null;
-            if (raw is JsonElement nullEl && nullEl.ValueKind == JsonValueKind.Null) return null;
+            if (IsPatchNull(raw)) return null;
             if (raw is List<Dictionary<string, object>> direct) return direct;
             if (raw is JsonElement el && el.ValueKind == JsonValueKind.Array)
                 return JsonbHelpers.FromRelationships(el.GetRawText());
