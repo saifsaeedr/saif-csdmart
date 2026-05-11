@@ -607,8 +607,11 @@ public static class QueryHelper
                 var p1 = args.Count;
                 args.Add(new() { Value = v2 });
                 var p2 = args.Count;
-                var castCol = hasSubPath ? $"({elementJsonb})::float" : "e::float";
-                var between = $"{castCol} BETWEEN CAST(${p1} AS float) AND CAST(${p2} AS float)";
+                string between;
+                if (hasSubPath)
+                    between = $"jsonb_typeof({elementJsonb}) = 'number' AND ({elementJsonb})::float BETWEEN CAST(${p1} AS float) AND CAST(${p2} AS float)";
+                else
+                    between = $"e::float BETWEEN CAST(${p1} AS float) AND CAST(${p2} AS float)";
                 var exists = $"EXISTS (SELECT 1 FROM {iterator} WHERE {between})";
                 return data.Negative
                     ? $"({typeofGuard} AND NOT {exists})"

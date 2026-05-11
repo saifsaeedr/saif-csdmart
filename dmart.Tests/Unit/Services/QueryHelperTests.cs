@@ -78,6 +78,30 @@ public class QueryHelperTests
         where.ShouldContain("<=");
     }
 
+    [Fact]
+    public void Search_PayloadArray_SubPath_Numeric_Guards_Cast_Against_StringTypes()
+    {
+        // Regression: when a payload array element's sub-field is stored as a
+        // JSON string in some documents, an unguarded `(x->'k')::float` cast
+        // aborts the whole query. The generated SQL must wrap every numeric
+        // cast in `jsonb_typeof(...) = 'number'`. Covers all three branches:
+        // equality (#19), comparison operator (#19), and BETWEEN (this PR).
+        var equality = BuildSearch("@payload.body.items[].price:100");
+        equality.ShouldContain("jsonb_typeof");
+        equality.ShouldContain("= 'number'");
+        equality.ShouldContain("::float");
+
+        var range = BuildSearch("@payload.body.items[].price:[100 200]");
+        range.ShouldContain("jsonb_typeof");
+        range.ShouldContain("= 'number'");
+        range.ShouldContain("BETWEEN");
+
+        var compare = BuildSearch("@payload.body.items[].price:>=100");
+        compare.ShouldContain("jsonb_typeof");
+        compare.ShouldContain("= 'number'");
+        compare.ShouldContain(">=");
+    }
+
     // ==================== OR pipe ====================
 
     [Fact]
