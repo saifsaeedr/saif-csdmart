@@ -30,6 +30,13 @@ public sealed class OAuthUserResolver(
     IOptions<DmartSettings> settings,
     ILogger<OAuthUserResolver> log)
 {
+    // Python parity: api/user/router.py:61 defines USERS_SUBPATH="users" (no
+    // leading slash) and passes that verbatim to every Event it dispatches in
+    // this file. Plugin filter matching is case-sensitive and compares this
+    // against EventFilter.subpaths exactly, so the bare "users" form is
+    // load-bearing for plugin filters configured against the Python convention.
+    private const string UsersSubpath = "users";
+
     public async Task<User> ResolveAsync(OAuthUserInfo info, CancellationToken ct = default)
     {
         var shortname = BuildShortname(info.Provider, info.ProviderId);
@@ -44,13 +51,7 @@ public sealed class OAuthUserResolver(
         var preEvent = new Event
         {
             SpaceName = settings.Value.ManagementSpace,
-            // Python parity: api/user/router.py:61 defines USERS_SUBPATH="users"
-            // (no leading slash) and passes that verbatim to every Event it
-            // dispatches in this file. Plugin filter matching is case-sensitive
-            // and compares this against EventFilter.subpaths exactly, so the
-            // bare "users" form is load-bearing for plugin filters configured
-            // against the Python convention.
-            Subpath = "users",
+            Subpath = UsersSubpath,
             Shortname = shortname,
             ActionType = ActionType.Create,
             ResourceType = ResourceType.User,
@@ -108,13 +109,7 @@ public sealed class OAuthUserResolver(
         await plugins.AfterActionAsync(new Event
         {
             SpaceName = settings.Value.ManagementSpace,
-            // Python parity: api/user/router.py:61 defines USERS_SUBPATH="users"
-            // (no leading slash) and passes that verbatim to every Event it
-            // dispatches in this file. Plugin filter matching is case-sensitive
-            // and compares this against EventFilter.subpaths exactly, so the
-            // bare "users" form is load-bearing for plugin filters configured
-            // against the Python convention.
-            Subpath = "users",
+            Subpath = UsersSubpath,
             Shortname = shortname,
             ActionType = ActionType.Create,
             ResourceType = ResourceType.User,
