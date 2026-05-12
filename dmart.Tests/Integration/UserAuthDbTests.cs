@@ -31,11 +31,21 @@ public class UserAuthDbTests : IClassFixture<DmartFactory>
         var body = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
         body.ShouldNotBeNull();
         body!.Status.ShouldBe(Status.Success);
-        // Login now returns records[{attributes: {access_token}}] (Python parity).
+        // Login now returns records[{attributes: {access_token, ...}}] (Python
+        // parity). roles is included for client convenience — pin it so a
+        // future refactor can't silently drop it from the wire shape.
+        //
+        // groups is also added to the dictionary at AuthHandler.cs, but dmart's
+        // API convention omits empty collections from attribute bags — so the
+        // bootstrap admin (Groups=[]) sees no "groups" key on the wire, by
+        // design. Don't assert groups presence here without first populating
+        // Groups for the test user; that's a different test.
         body.Records.ShouldNotBeNull();
         body.Records!.Count.ShouldBeGreaterThan(0);
         body.Records![0].Attributes.ShouldNotBeNull();
-        body.Records![0].Attributes!.ContainsKey("access_token").ShouldBeTrue();
+        var loginAttrs = body.Records![0].Attributes!;
+        loginAttrs.ContainsKey("access_token").ShouldBeTrue();
+        loginAttrs.ContainsKey("roles").ShouldBeTrue();
     }
 
     [FactIfPg]
