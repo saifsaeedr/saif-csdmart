@@ -177,14 +177,127 @@ public class CsvRoundTripTests : IClassFixture<DmartFactory>
         }
     }
 
+    // CSV header lookup for the `shortname` column is OrdinalIgnoreCase by design —
+    // `Shortname` and `SHORTNAME` are accepted as aliases of `shortname`. Pins that
+    // contract so a future refactor doesn't silently revert to case-sensitive matching
+    // (which is what the dictionary-based lookup used pre-#24).
+    [FactIfPg]
+    public async Task Csv_Import_UppercaseShortnameHeader_Works()
+    {
+        const string space = "itest_csv_upper";
+        var (client, _, _, _) = await _factory.CreateLoggedInUserAsync();
+
+        try
+        {
+            await CleanupAsync(client, space);
+            await SeedSpaceAsync(client, space);
+
+            // Capital-S header — the row's shortname cell `peach` must end up as the
+            // resulting record's shortname, not an auto-generated `row-…` value.
+            var csv = "Shortname,name,price\r\npeach,Yellow Peach,3.50\r\n";
+            var importResp = await UploadCsvAsync(client,
+                resourceType: "content", space: space, subpath: "items", schema: "goods",
+                csvBytes: Encoding.UTF8.GetBytes(csv));
+            importResp.Status.ShouldBe(Status.Success);
+            ExtractInt(importResp.Attributes!["inserted"]).ShouldBe(1);
+
+            var queryBody = "{\"space_name\":\"" + space +
+                "\",\"type\":\"subpath\",\"subpath\":\"items\",\"filter_schema_names\":[],\"limit\":50}";
+            var queryResp = await PostJson(client, "/managed/query", queryBody);
+            queryResp.Status.ShouldBe(Status.Success);
+            queryResp.Records!.Any(r => r.Shortname == "peach").ShouldBeTrue(
+                "row's shortname cell should win — case-insensitive header match must read the raw cell");
+        }
+        finally
+        {
+            await CleanupAsync(client, space);
+        }
+    }
+
+    // ImportAsync auto-generates a `row-<12-hex>` shortname when the shortname cell is
+    // empty (Guid.NewGuid().ToString("N").Substring(0, 12)). #24 dropped the prior
+    // fixture row covering this branch; re-add explicit coverage.
+    [FactIfPg]
+    public async Task Csv_Import_EmptyShortnameCell_AutoGenerates()
+    {
+        const string space = "itest_csv_auto";
+        var (client, _, _, _) = await _factory.CreateLoggedInUserAsync();
+
+        try
+        {
+            await CleanupAsync(client, space);
+            await SeedSpaceAsync(client, space);
+
+            // Two rows, both with empty shortname cells. Each must get its own
+            // unique auto-generated shortname so the inserts don't collide.
+            var csv =
+                "shortname,name,price\r\n" +
+                ",Plum,1.00\r\n" +
+                ",Apricot,2.00\r\n";
+            var importResp = await UploadCsvAsync(client,
+                resourceType: "content", space: space, subpath: "items", schema: "goods",
+                csvBytes: Encoding.UTF8.GetBytes(csv));
+            importResp.Status.ShouldBe(Status.Success);
+            ExtractInt(importResp.Attributes!["inserted"]).ShouldBe(2);
+
+            var queryBody = "{\"space_name\":\"" + space +
+                "\",\"type\":\"subpath\",\"subpath\":\"items\",\"filter_schema_names\":[],\"limit\":50}";
+            var queryResp = await PostJson(client, "/managed/query", queryBody);
+            queryResp.Status.ShouldBe(Status.Success);
+            var autoNames = queryResp.Records!
+                .Select(r => r.Shortname)
+                .Where(s => s.StartsWith("row-", StringComparison.Ordinal))
+                .ToList();
+            autoNames.Count.ShouldBe(2);
+            // ImportAsync builds `row-{Guid.NewGuid():N}`.Substring(0, 12) →
+            // 4-char "row-" prefix + 8 hex chars from the start of the guid = 12 total.
+            foreach (var n in autoNames)
+                System.Text.RegularExpressions.Regex.IsMatch(n, "^row-[0-9a-f]{8}$")
+                    .ShouldBeTrue($"auto-generated shortname '{n}' must match row-<8hex>");
+            autoNames.Distinct().Count().ShouldBe(2, "auto-generated shortnames must be unique");
+        }
+        finally
+        {
+            await CleanupAsync(client, space);
+        }
+    }
+
     // ---------------- helpers ----------------
 
-    private static async Task CleanupAsync(HttpClient client)
+    // Sets up space + items folder + schema folder + a permissive `goods` schema
+    // for the per-test isolated spaces used by the case-sensitivity / auto-shortname
+    // tests. The original Csv_Import_Then_Export test inlines this against `itest_csv`
+    // and isn't refactored to use this helper.
+    private static async Task SeedSpaceAsync(HttpClient client, string space)
+    {
+        (await PostOk(client, "/managed/request",
+            "{\"space_name\":\"" + space + "\",\"request_type\":\"create\",\"records\":[" +
+            "{\"resource_type\":\"space\",\"subpath\":\"/\",\"shortname\":\"" + space +
+            "\",\"attributes\":{\"hide_space\":true,\"is_active\":true}}]}"))
+            .ShouldBeTrue("space create");
+        (await PostOk(client, "/managed/request",
+            "{\"space_name\":\"" + space + "\",\"request_type\":\"create\",\"records\":[" +
+            "{\"resource_type\":\"folder\",\"subpath\":\"/\",\"shortname\":\"items\"," +
+            "\"attributes\":{\"is_active\":true}}]}"))
+            .ShouldBeTrue("folder create");
+        // schema/ may already exist (auto-created by resource_folders_creation plugin)
+        await PostOk(client, "/managed/request",
+            "{\"space_name\":\"" + space + "\",\"request_type\":\"create\",\"records\":[" +
+            "{\"resource_type\":\"folder\",\"subpath\":\"/\",\"shortname\":\"schema\"," +
+            "\"attributes\":{\"is_active\":true}}]}");
+        await UploadSchemaAsync(client,
+            shortname: "goods",
+            schemaJson: """{"title":"goods","type":"object","additionalProperties":true}""",
+            space: space);
+    }
+
+    private static async Task CleanupAsync(HttpClient client, string space = "itest_csv")
     {
         // Fire-and-forget — ok if the space doesn't exist yet.
+        var body = "{\"space_name\":\"" + space + "\",\"request_type\":\"delete\",\"records\":[" +
+                   "{\"resource_type\":\"space\",\"subpath\":\"/\",\"shortname\":\"" + space + "\",\"attributes\":{}}]}";
         using var _ = await client.PostAsync("/managed/request", new StringContent(
-            """{"space_name":"itest_csv","request_type":"delete","records":[{"resource_type":"space","subpath":"/","shortname":"itest_csv","attributes":{}}]}""",
-            Encoding.UTF8, "application/json"));
+            body, Encoding.UTF8, "application/json"));
     }
 
     private static async Task<bool> PostOk(HttpClient client, string url, string body)
@@ -201,10 +314,11 @@ public class CsvRoundTripTests : IClassFixture<DmartFactory>
         return parsed!;
     }
 
-    private static async Task UploadSchemaAsync(HttpClient client, string shortname, string schemaJson)
+    private static async Task UploadSchemaAsync(HttpClient client, string shortname, string schemaJson,
+        string space = "itest_csv")
     {
         using var form = new MultipartFormDataContent();
-        form.Add(new StringContent("itest_csv"), "space_name");
+        form.Add(new StringContent(space), "space_name");
 
         var recordJson =
             "{\"resource_type\":\"schema\",\"subpath\":\"schema\",\"shortname\":\"" + shortname +
