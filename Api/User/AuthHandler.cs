@@ -62,8 +62,11 @@ public static class AuthHandler
             //   Response(status=success, records=[Record(
             //     resource_type="user", shortname=user.shortname,
             //     attributes={access_token, type, displayname?})])
-            // We include roles for client convenience but omit refresh_token
-            // to match Python's wire shape exactly.
+            // We include roles + groups for client convenience (so the SDK can
+            // render authorization-aware UI without a follow-up /user/profile
+            // round-trip) but omit refresh_token to match Python's wire shape
+            // exactly. Both fields default to empty lists on the User model,
+            // so the response shape is stable for users with no membership.
             var loginRecord = new Record
             {
                 ResourceType = Dmart.Models.Enums.ResourceType.User,

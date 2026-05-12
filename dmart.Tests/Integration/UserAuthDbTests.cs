@@ -31,11 +31,25 @@ public class UserAuthDbTests : IClassFixture<DmartFactory>
         var body = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
         body.ShouldNotBeNull();
         body!.Status.ShouldBe(Status.Success);
-        // Login now returns records[{attributes: {access_token}}] (Python parity).
+        // Login now returns records[{attributes: {access_token, ...}}] (Python
+        // parity). roles is included for client convenience — pin it so a
+        // future refactor can't silently drop it from the wire shape.
+        //
+        // groups is also added to the dictionary at AuthHandler.cs but does
+        // NOT currently surface on the wire for users with an empty Groups
+        // list (bootstrap admin's case): something in the ASP.NET Core HTTP
+        // serialization path drops `Dictionary<string, object>` entries whose
+        // value is an empty `List<string>` boxed as object. Direct
+        // `JsonSerializer.Serialize(response, DmartJsonContext.Default.Response)`
+        // emits `groups:[]` as expected, so this is specific to the HTTP
+        // pipeline. Until that's diagnosed, asserting groups presence here
+        // would always fail for the bootstrap admin.
         body.Records.ShouldNotBeNull();
         body.Records!.Count.ShouldBeGreaterThan(0);
         body.Records![0].Attributes.ShouldNotBeNull();
-        body.Records![0].Attributes!.ContainsKey("access_token").ShouldBeTrue();
+        var loginAttrs = body.Records![0].Attributes!;
+        loginAttrs.ContainsKey("access_token").ShouldBeTrue();
+        loginAttrs.ContainsKey("roles").ShouldBeTrue();
     }
 
     [FactIfPg]
