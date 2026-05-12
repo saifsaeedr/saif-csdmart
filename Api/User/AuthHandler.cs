@@ -74,6 +74,7 @@ public static class AuthHandler
                     ["access_token"] = access,
                     ["type"] = user.Type.ToString().ToLowerInvariant(),
                     ["roles"] = user.Roles,
+                    ["groups"] = user.Groups,
                 },
             };
             if (user.Displayname is not null)
