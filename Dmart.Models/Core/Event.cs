@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using Dmart.Models.Enums;
 
 namespace Dmart.Models.Core;
@@ -26,4 +27,13 @@ public sealed record Event
     public Translation? Displayname { get; init; }
     public Translation? Description { get; init; }
     public List<string>? Tags { get; init; }
+
+    // Host-internal marker — set by callers that fan out one Event per row of a
+    // bulk operation (e.g. CsvService.ImportAsync). Hook plugins that exist
+    // solely to log every action (AuditPlugin) check this and skip, so a 10k-row
+    // CSV produces one HTTP-level audit line instead of 10k plugin-level ones.
+    // [JsonIgnore] keeps it out of the wire form so external .so/subprocess
+    // plugins are unaffected.
+    [JsonIgnore]
+    public bool IsBulkImport { get; init; }
 }

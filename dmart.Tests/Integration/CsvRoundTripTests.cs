@@ -59,20 +59,21 @@ public class CsvRoundTripTests : IClassFixture<DmartFactory>
                 schemaJson: """{"title":"goods","type":"object","additionalProperties":true}""");
 
             // ---- 2. import CSV via /managed/resources_from_csv -----------
-            // Four data rows:
-            //   apple   — plain values
-            //   banana  — quoted field with embedded comma
-            //   cherry  — quoted field with escaped double-quote (`""`)
-            //   date    — no `shortname` column (absent from header) → ImportAsync
-            //             auto-generates a uuid-based shortname
+            // Three data rows + one deliberately malformed row:
+            //   apple   — plain values + a JSON-array `features` cell
+            //   banana  — quoted field with embedded comma + JSON-array `features`
+            //   cherry  — quoted field with escaped double-quote + a `features`
+            //             cell that *looks* like an array but is malformed JSON
+            //             (must fall back to the raw string, mirroring Python's
+            //             always-on heuristic in api/managed/utils.py:1553-1557)
             //
-            // Plus one deliberately malformed row with the wrong column count so
-            // ImportAsync's "expected N fields" failure branch is exercised.
+            // Plus a malformed row with the wrong column count so ImportAsync's
+            // "expected N fields" failure branch is exercised.
             var csv =
-                "shortname,name,price,in_stock\r\n" +
-                "apple,Red Apple,1.25,true\r\n" +
-                "banana,\"Cavendish, Ripe\",0.75,true\r\n" +
-                "cherry,\"Cherry \"\"Bing\"\"\",2.50,false\r\n" +
+                "shortname,name,price,in_stock,features\r\n" +
+                "apple,Red Apple,1.25,true,\"[\"\"crisp\"\",\"\"sweet\"\"]\"\r\n" +
+                "banana,\"Cavendish, Ripe\",0.75,true,\"[\"\"yellow\"\"]\"\r\n" +
+                "cherry,\"Cherry \"\"Bing\"\"\",2.50,false,[not json\r\n" +
                 "malformed,only_two_fields\r\n";
 
             var importResp = await UploadCsvAsync(client,
@@ -143,7 +144,7 @@ public class CsvRoundTripTests : IClassFixture<DmartFactory>
 
             // ---- 5. round-trip verification: query the space ------------
             var queryResp = await PostJson(client, "/managed/query",
-                """{"space_name":"itest_csv","type":"subpath","subpath":"items","filter_schema_names":[],"limit":50}""");
+                """{"space_name":"itest_csv","type":"subpath","subpath":"items","filter_schema_names":[],"retrieve_json_payload":true,"limit":50}""");
             queryResp.Status.ShouldBe(Status.Success);
             // apple + banana + cherry (from CSV import) + rich_row = at least 4
             (queryResp.Records?.Count ?? 0).ShouldBeGreaterThanOrEqualTo(4);
@@ -151,6 +152,24 @@ public class CsvRoundTripTests : IClassFixture<DmartFactory>
             queryResp.Records!.Any(r => r.Shortname == "banana").ShouldBeTrue();
             queryResp.Records!.Any(r => r.Shortname == "cherry").ShouldBeTrue();
             queryResp.Records!.Any(r => r.Shortname == "rich_row").ShouldBeTrue();
+
+            // ---- 6. JSON-array heuristic ---------------------------------
+            // apple's `features` cell was `["crisp","sweet"]`. The always-on
+            // heuristic in CsvService.ParseCellValue must have lifted it into a
+            // real JSON array — not a quoted string — so payload.body.features
+            // round-trips as JsonValueKind.Array.
+            var appleBody = GetPayloadBody(queryResp.Records!.First(r => r.Shortname == "apple"));
+            var appleFeatures = appleBody.GetProperty("features");
+            appleFeatures.ValueKind.ShouldBe(JsonValueKind.Array);
+            appleFeatures.EnumerateArray().Select(e => e.GetString()).ToArray()
+                .ShouldBe(new[] { "crisp", "sweet" });
+
+            // cherry's `features` cell was `[not json` — invalid JSON that the
+            // heuristic must fall back from, storing the raw string (Python parity).
+            var cherryFeatures = GetPayloadBody(queryResp.Records!.First(r => r.Shortname == "cherry"))
+                .GetProperty("features");
+            cherryFeatures.ValueKind.ShouldBe(JsonValueKind.String);
+            cherryFeatures.GetString().ShouldBe("[not json");
         }
         finally
         {
@@ -227,4 +246,14 @@ public class CsvRoundTripTests : IClassFixture<DmartFactory>
         long l         => (int)l,
         _              => int.Parse(value.ToString()!),
     };
+
+    // After /managed/query with retrieve_json_payload=true, record.Attributes["payload"]
+    // is a JsonElement (System.Text.Json source-gen materializes `object` values as
+    // JsonElement on the deserialize side). Drill in one level to payload.body.
+    private static JsonElement GetPayloadBody(Record record)
+    {
+        record.Attributes.ShouldNotBeNull();
+        var payload = (JsonElement)record.Attributes!["payload"];
+        return payload.GetProperty("body");
+    }
 }

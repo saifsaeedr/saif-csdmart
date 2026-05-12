@@ -94,13 +94,19 @@ public sealed class CsvService(QueryService queries, EntryService entries)
                 continue;
             }
 
-            // Build attributes from the headers + values.
+            // Build attributes from the headers + values. Cell values that look like
+            // a JSON array/object (start with `[` / `{`) are parsed into a JsonElement
+            // so they round-trip as real arrays/objects in payload.body instead of
+            // quoted strings — mirrors dmart Python's always-on heuristic in
+            // import_resources_from_csv_handler (api/managed/utils.py:1553-1557).
             var rowDict = new Dictionary<string, object>();
             for (var i = 0; i < headers.Count; i++)
-                rowDict[headers[i]] = fields[i];
+                rowDict[headers[i]] = ParseCellValue(fields[i]);
 
-            // shortname column is required (or auto-generate)
-            var shortname = rowDict.TryGetValue("shortname", out var sn) ? sn?.ToString() ?? "" : "";
+            // shortname column is required (or auto-generate). Read from the raw
+            // fields so a JSON-shaped shortname doesn't become a JsonElement.
+            var shortnameIdx = headers.FindIndex(h => string.Equals(h, "shortname", StringComparison.OrdinalIgnoreCase));
+            var shortname = shortnameIdx >= 0 && shortnameIdx < fields.Count ? fields[shortnameIdx] : "";
             if (string.IsNullOrEmpty(shortname))
                 shortname = $"row-{Guid.NewGuid():N}".Substring(0, 12);
 
@@ -130,7 +136,11 @@ public sealed class CsvService(QueryService queries, EntryService entries)
                 UpdatedAt = TimeUtils.Now(),
             };
 
-            var result = await entries.CreateAsync(entry, actor, ct);
+            // isBulkImport tags the Event so logging-only hooks (AuditPlugin)
+            // skip per-row noise — one HTTP-level audit line covers the whole
+            // CSV import. Functional hooks (resource_folders_creation, etc.)
+            // still fire because they ignore the flag.
+            var result = await entries.CreateAsync(entry, actor, rawAttrs: null, isBulkImport: true, ct);
             if (result.IsOk) inserted++;
             else failed.Add(new()
             {
@@ -257,6 +267,29 @@ public sealed class CsvService(QueryService queries, EntryService entries)
         if (s.Contains(',') || s.Contains('"') || s.Contains('\n') || s.Contains('\r'))
             return $"\"{s.Replace("\"", "\"\"")}\"";
         return s;
+    }
+
+    // Mirrors the always-on heuristic in dmart Python's import_resources_from_csv_handler
+    // (api/managed/utils.py:1553-1557): if the stripped cell starts with `[` or `{`,
+    // try to parse it as JSON; on failure, fall back to the raw string. Schema-driven
+    // coercion (Python's data_types_mapper for integer/number/boolean) is deliberately
+    // not replicated here — only the array/object case the heuristic actually covers.
+    private static object ParseCellValue(string raw)
+    {
+        if (string.IsNullOrEmpty(raw)) return raw;
+        var stripped = raw.Trim();
+        if (stripped.Length == 0) return raw;
+        var first = stripped[0];
+        if (first != '[' && first != '{') return raw;
+        try
+        {
+            using var doc = JsonDocument.Parse(stripped);
+            return doc.RootElement.Clone();
+        }
+        catch (JsonException)
+        {
+            return raw;
+        }
     }
 
     // RFC 4180 CSV line parser — handles quoted fields with embedded commas, newlines,

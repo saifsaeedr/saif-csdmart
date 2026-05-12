@@ -90,7 +90,7 @@ public static class SubmitHandler
             },
         };
         // Public submit runs as the anonymous actor after the allowlist check.
-        var result = await entries.CreateAsync(entry, actor: "anonymous", rawAttrs, ct);
+        var result = await entries.CreateAsync(entry, actor: "anonymous", rawAttrs, ct: ct);
         if (!result.IsOk)
             return Response.Fail(result.ErrorCode, result.ErrorMessage!, result.ErrorType ?? "request");
 
