@@ -1,8 +1,6 @@
 using System.Net;
-using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
-using Dmart.Models.Json;
 using Dmart.Tests.Infrastructure;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -20,9 +18,13 @@ namespace Dmart.Tests.Integration;
 //
 // Two regressions are guarded here:
 //   1. The handler must reach AfterActionAsync at all (wiring).
-//   2. The Event.Attributes the handler hands to plugins (and the audit log)
-//      must NOT contain credential keys — password / old_password /
-//      firebase_token — even when the inbound patch carries them.
+//   2. Python parity: Event.Attributes carries history_diff (the same
+//      {field_path: {old, new}} shape persisted to the history table) — the
+//      audit log and any after-hook plugin (e.g. action_log) read the change
+//      set from there. Credentials and session tokens (password / old_password
+//      / firebase_token) must never appear anywhere in the event payload —
+//      ComputeUserHistoryDiff/FlattenUser exclude them by construction, so a
+//      regression in either would surface here.
 //
 // We use a dedicated WebApplicationFactory subclass so SpacesFolder can be
 // pointed at a per-test temp directory without poisoning the shared
@@ -101,19 +103,83 @@ public sealed class ProfileAfterHookTests
             resource.GetProperty("subpath").GetString().ShouldBe("/users");
             resource.GetProperty("shortname").GetString().ShouldBe(user.Shortname);
 
-            // Positive: displayname change is preserved.
+            // Positive: displayname change surfaces in history_diff under the
+            // flat dot-path key FlattenUser emits ("displayname.en"), with
+            // {old, new} shape matching Python's store_entry_diff.
             var attrs = updateLine.Value.GetProperty("attributes");
-            attrs.GetProperty("displayname").GetProperty("en").GetString()
+            var historyDiff = attrs.GetProperty("history_diff");
+            historyDiff.GetProperty("displayname.en").GetProperty("new").GetString()
                 .ShouldBe("after-hook-test");
 
-            // Negative: credential/session keys MUST be stripped before the
-            // event is handed to plugins or the audit writer.
+            // Negative: credentials / session tokens MUST NOT appear anywhere
+            // in the event payload — neither at the top level (where the
+            // pre-history_diff design risked leaking the raw patch) nor inside
+            // history_diff (FlattenUser excludes password/AttemptCount, and
+            // old_password/firebase_token aren't User fields at all). Asserting
+            // both scopes locks in the invariant against either regression.
             attrs.TryGetProperty("password", out _).ShouldBeFalse(
                 "password leaked into audit attributes — sanitization regression");
             attrs.TryGetProperty("old_password", out _).ShouldBeFalse(
                 "old_password leaked into audit attributes — sanitization regression");
             attrs.TryGetProperty("firebase_token", out _).ShouldBeFalse(
                 "firebase_token leaked into audit attributes — sanitization regression");
+            historyDiff.TryGetProperty("password", out _).ShouldBeFalse(
+                "password leaked into history_diff — FlattenUser regression");
+            historyDiff.TryGetProperty("old_password", out _).ShouldBeFalse(
+                "old_password leaked into history_diff — FlattenUser regression");
+            historyDiff.TryGetProperty("firebase_token", out _).ShouldBeFalse(
+                "firebase_token leaked into history_diff — FlattenUser regression");
+        }
+        finally
+        {
+            await user.Cleanup();
+            try { Directory.Delete(tempDir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    // Symmetry with the history.AppendAsync guard: a no-op patch produces no
+    // history row AND no plugin event. Without this, action_log-style plugins
+    // would fire on idempotent profile POSTs (e.g. a client re-submitting the
+    // same form), creating phantom audit noise.
+    [FactIfPg]
+    public async Task UpdateProfile_NoOp_Patch_Does_Not_Fire_After_Hook()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"dmart-aftertest-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+        var auditPath = Path.Combine(tempDir, "management", ".dm", "events.jsonl");
+
+        using var factory = new ProfileAfterHookFactory(tempDir);
+        await DmartFactory.ResetBootstrapAdminStateAsync(factory.Services);
+
+        using var dmart = new DmartFactory();
+        var user = await dmart.CreateLoggedInUserAsync(host: factory);
+        try
+        {
+            // Empty attributes => historyDiff is empty => both the history
+            // append and the after-hook are skipped. Handler still returns OK
+            // with the shortname (idempotent success).
+            var body = """{"attributes": {}}""";
+            var resp = await user.Client.PostAsync(
+                "/user/profile",
+                new StringContent(body, Encoding.UTF8, "application/json"));
+            resp.StatusCode.ShouldBe(HttpStatusCode.OK,
+                $"profile update failed: {await resp.Content.ReadAsStringAsync()}");
+
+            // SpaceEventLogger writes synchronously inside AfterActionAsync, so
+            // if a write were going to happen it would already be on disk by
+            // the time the HTTP response returns. A short settling delay
+            // catches any future async-detach regression without slowing the
+            // happy path materially.
+            await Task.Delay(TimeSpan.FromMilliseconds(250));
+
+            var lines = File.Exists(auditPath) ? File.ReadAllLines(auditPath) : Array.Empty<string>();
+            foreach (var line in lines)
+            {
+                var root = JsonDocument.Parse(line).RootElement;
+                if (root.GetProperty("request").GetString() != "update") continue;
+                if (root.GetProperty("user_shortname").GetString() != user.Shortname) continue;
+                Assert.Fail($"no-op profile patch produced an after-hook event line: {line}");
+            }
         }
         finally
         {

@@ -6,6 +6,7 @@ using Dmart.DataAdapters.Sql;
 using Dmart.Models.Api;
 using Dmart.Models.Core;
 using Dmart.Models.Enums;
+using Dmart.Plugins;
 using Microsoft.Extensions.Options;
 
 namespace Dmart.Services;
@@ -18,6 +19,7 @@ public sealed class UserService(
     InvitationJwt invitationJwt,
     InvitationRepository invitations,
     HistoryRepository history,
+    PluginManager plugins,
     IOptions<DmartSettings> settings,
     ILogger<UserService> log)
 {
@@ -830,6 +832,27 @@ public sealed class UserService(
             var ftStr = ft.ToString();
             if (!string.IsNullOrEmpty(ftStr))
                 await users.UpdateSessionFirebaseTokenAsync(shortname, sessionToken, ftStr, ct);
+        }
+
+        // After-hook fires only when something actually changed — symmetric
+        // with the history.AppendAsync guard above, so a no-op patch produces
+        // neither a history row nor a plugin event. The payload carries the
+        // same {field_path: {old, new}} diff persisted to history; plugins
+        // (e.g. action_log) read field-level deltas from there. Mirrors
+        // EntryService.UpdateAsync:372-374 — single source of truth.
+        if (historyDiff.Count > 0)
+        {
+            var afterEvent = new Event
+            {
+                SpaceName = MgmtSpace,
+                Subpath = "/users",
+                Shortname = updated.Shortname,
+                ActionType = ActionType.Update,
+                ResourceType = ResourceType.User,
+                UserShortname = shortname,
+            };
+            afterEvent.Attributes["history_diff"] = historyDiff;
+            await plugins.AfterActionAsync(afterEvent, ct);
         }
 
         return Result<User>.Ok(updated);
