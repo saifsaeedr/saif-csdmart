@@ -1,8 +1,13 @@
 using System.Text.Json;
+using Dmart.Config;
 using Dmart.DataAdapters.Sql;
 using Dmart.Models.Api;
+using Dmart.Models.Core;
+using Dmart.Models.Enums;
 using Dmart.Models.Json;
+using Dmart.Plugins;
 using Dmart.Services;
+using Microsoft.Extensions.Options;
 
 namespace Dmart.Api.User;
 
@@ -56,7 +61,8 @@ public static class ProfileHandler
             return Response.Ok(new[] { profileRecord });
         });
 
-        g.MapPost("/profile", async (HttpRequest req, HttpContext http, UserService svc, CancellationToken ct) =>
+        g.MapPost("/profile", async (HttpRequest req, HttpContext http, UserService svc,
+            PluginManager plugins, IOptions<DmartSettings> settings, CancellationToken ct) =>
         {
             var actor = http.Actor();
             if (actor is null)
@@ -102,9 +108,31 @@ public static class ProfileHandler
             // Pull from Authorization bearer first, fall back to cookie.
             var sessionToken = TryExtractSessionToken(http);
             var result = await svc.UpdateProfileAsync(actor, patch, sessionToken, ct);
-            return result.IsOk
-                ? Response.Ok(attributes: new() { ["shortname"] = result.Value!.Shortname })
-                : Response.Fail(result.ErrorCode, result.ErrorMessage!, result.ErrorType ?? "request");
+            if (!result.IsOk)
+                return Response.Fail(result.ErrorCode, result.ErrorMessage!, result.ErrorType ?? "request");
+
+            // Python parity: fire user/profile after-hooks (e.g.
+            // update_access_controls, ldap_manager). Mirrors the create-side in
+            // RegistrationHandler.Map. Strip credential/session keys before
+            // exposing the patch to plugins and the audit log — those must
+            // never be persisted or handed to hook code.
+            var eventAttrs = new Dictionary<string, object>(patch, StringComparer.Ordinal);
+            eventAttrs.Remove("password");
+            eventAttrs.Remove("old_password");
+            eventAttrs.Remove("firebase_token");
+
+            await plugins.AfterActionAsync(new Event
+            {
+                SpaceName = settings.Value.ManagementSpace,
+                Subpath = "/users",
+                Shortname = result.Value!.Shortname,
+                ActionType = ActionType.Update,
+                ResourceType = ResourceType.User,
+                UserShortname = actor,
+                Attributes = eventAttrs,
+            }, ct);
+
+            return Response.Ok(attributes: new() { ["shortname"] = result.Value!.Shortname });
         });
 
         g.MapPost("/delete", async (HttpContext http, UserService svc, CancellationToken ct) =>
