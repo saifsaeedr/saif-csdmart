@@ -1,6 +1,9 @@
+using Dmart.Config;
 using Dmart.DataAdapters.Sql;
 using Dmart.Models.Core;
 using Dmart.Models.Enums;
+using Dmart.Plugins;
+using Microsoft.Extensions.Options;
 
 namespace Dmart.Auth.OAuth;
 
@@ -21,11 +24,44 @@ namespace Dmart.Auth.OAuth;
 // local dmart account on first OAuth login. Users who already have a local
 // account get a second, separate account for OAuth logins; linking the two
 // has to be a deliberate server-side ceremony, not a silent merge.
-public sealed class OAuthUserResolver(UserRepository users, ILogger<OAuthUserResolver> log)
+public sealed class OAuthUserResolver(
+    UserRepository users,
+    PluginManager plugins,
+    IOptions<DmartSettings> settings,
+    ILogger<OAuthUserResolver> log)
 {
+    // Python parity: api/user/router.py:61 defines USERS_SUBPATH="users" (no
+    // leading slash) and passes that verbatim to every Event it dispatches in
+    // this file. Plugin filter matching is case-sensitive and compares this
+    // against EventFilter.subpaths exactly, so the bare "users" form is
+    // load-bearing for plugin filters configured against the Python convention.
+    private const string UsersSubpath = "users";
+
     public async Task<User> ResolveAsync(OAuthUserInfo info, CancellationToken ct = default)
     {
         var shortname = BuildShortname(info.Provider, info.ProviderId);
+
+        // Python parity (api/user/router.py:1337-1346): fire the before-hook
+        // unconditionally at the top of find_or_create_social_user, before the
+        // existence check. Plugins that care whether a create is actually about
+        // to happen must check themselves. Exceptions are logged and swallowed
+        // — unlike EntryService.CreateAsync, which translates a thrown before-
+        // hook into a Result.Fail, Python's OAuth path doesn't let a plugin
+        // block login. Don't surprise existing integrations.
+        var preEvent = new Event
+        {
+            SpaceName = settings.Value.ManagementSpace,
+            Subpath = UsersSubpath,
+            Shortname = shortname,
+            ActionType = ActionType.Create,
+            ResourceType = ResourceType.User,
+            UserShortname = shortname,
+        };
+        try { await plugins.BeforeActionAsync(preEvent, ct); }
+        catch (Exception ex)
+        {
+            log.LogWarning(ex, "oauth: before-create plugin hook threw for {Shortname}; continuing", shortname);
+        }
 
         // 1. Exact shortname match.
         var existing = await users.GetByShortnameAsync(shortname, ct);
@@ -65,6 +101,21 @@ public sealed class OAuthUserResolver(UserRepository users, ILogger<OAuthUserRes
             Groups = [],
         };
         await users.UpsertAsync(created, ct);
+
+        // Python parity (api/user/router.py:1381-1390): after-hook fires only
+        // on the actual create branch, after db.create. PluginManager logs and
+        // swallows plugin failures internally, so no try/catch needed here —
+        // same convention as RegistrationHandler.cs:77-86.
+        await plugins.AfterActionAsync(new Event
+        {
+            SpaceName = settings.Value.ManagementSpace,
+            Subpath = UsersSubpath,
+            Shortname = shortname,
+            ActionType = ActionType.Create,
+            ResourceType = ResourceType.User,
+            UserShortname = shortname,
+        }, ct);
+
         log.LogInformation("oauth: created user {Shortname} from {Provider}", shortname, info.Provider);
         return created;
     }

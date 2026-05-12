@@ -242,7 +242,7 @@ public static class ResourceWithPayloadHandler
         // Python parity: pass record.attributes (as submitted) to the gate so
         // restricted_fields tests the same surface Python's
         // serve_request_create_check_access does.
-        var result = await entries.CreateAsync(entry, actor, record.Attributes, ct);
+        var result = await entries.CreateAsync(entry, actor, record.Attributes, ct: ct);
         if (!result.IsOk)
             return Response.Fail(result.ErrorCode, result.ErrorMessage!, result.ErrorType ?? "request");
         return Response.Ok(records: new[] { record with { Uuid = result.Value!.Uuid } });

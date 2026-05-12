@@ -1,9 +1,12 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Json;
 using Dmart.Auth.OAuth;
 using Dmart.DataAdapters.Sql;
 using Dmart.Models.Core;
 using Dmart.Models.Enums;
+using Dmart.Plugins;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
 using Xunit;
@@ -93,6 +96,118 @@ public sealed class OAuthEndpointsTests : IClassFixture<DmartFactory>
         finally
         {
             try { await users.DeleteAsync(expectedShortname); } catch { }
+        }
+    }
+
+    // Pins the Python-parity asymmetric hook behavior in OAuthUserResolver: every
+    // login (existing or new user) fires the before-hook; the after-hook fires only
+    // on the actual create branch. If a future refactor moves the before-hook below
+    // the existence check (turning it into create-only), this test fails.
+    [FactIfPg]
+    public async Task Resolver_FiresBeforeHookOnEveryLogin_AfterHookOnlyOnFirstLogin()
+    {
+        // Two separate plugin instances — one registered to the before-dispatch
+        // table, the other to the after-dispatch table. Using two shortnames keeps
+        // the per-side counts cleanly independent (one IHookPlugin instance
+        // registered under both ListenTimes would force fragile phase inference).
+        var beforePlugin = new BeforeCountingHookPlugin();
+        var afterPlugin = new AfterCountingHookPlugin();
+
+        // Spin up an isolated factory so registering a test plugin doesn't bleed
+        // into other tests sharing the class-fixture DmartFactory.
+        using var host = _factory.WithWebHostBuilder(b =>
+        {
+            b.ConfigureTestServices(s =>
+            {
+                s.AddSingleton<IHookPlugin>(beforePlugin);
+                s.AddSingleton<IHookPlugin>(afterPlugin);
+            });
+        });
+
+        // Force the host to construct so Services / PluginManager exist.
+        host.CreateClient();
+        var plugins = host.Services.GetRequiredService<PluginManager>();
+        var resolver = host.Services.GetRequiredService<OAuthUserResolver>();
+        var users = host.Services.GetRequiredService<UserRepository>();
+
+        // Register the two test plugins, one each in the before / after dispatch
+        // tables. always_active=true bypasses the management space's active_plugins
+        // gate. Concurrent=false on the after wrapper so the count is observable
+        // synchronously — the default fire-and-forget branch would race the assert.
+        var filter = new EventFilter
+        {
+            Subpaths = new() { "users", "/users" },
+            ResourceTypes = new() { "user" },
+            SchemaShortnames = new() { "__ALL__" },
+            Actions = new() { "create" },
+        };
+        plugins.Register(new[]
+        {
+            new PluginWrapper
+            {
+                Shortname = beforePlugin.Shortname,
+                IsActive = true,
+                AlwaysActive = true,
+                Filters = filter,
+                ListenTime = EventListenTime.Before,
+                Type = PluginType.Hook,
+            },
+            new PluginWrapper
+            {
+                Shortname = afterPlugin.Shortname,
+                IsActive = true,
+                AlwaysActive = true,
+                Filters = filter,
+                ListenTime = EventListenTime.After,
+                Type = PluginType.Hook,
+                Concurrent = false,
+            },
+        });
+
+        var providerId = Guid.NewGuid().ToString("N")[..12];
+        var shortname = $"google_{providerId}";
+        var info = new OAuthUserInfo("google", providerId, $"{providerId}@test.local",
+            "Hook", "Tester", null);
+
+        try
+        {
+            // First login → user doesn't exist yet → both hooks fire.
+            await resolver.ResolveAsync(info);
+            // Second login → same provider id → existing-by-shortname → only before fires.
+            await resolver.ResolveAsync(info);
+
+            beforePlugin.CountFor(shortname).ShouldBe(2,
+                "before-hook is fired unconditionally at the top of ResolveAsync (Python parity)");
+            afterPlugin.CountFor(shortname).ShouldBe(1,
+                "after-hook fires only on the actual create branch (Python parity)");
+        }
+        finally
+        {
+            try { await users.DeleteAsync(shortname); } catch { }
+        }
+    }
+
+    private sealed class BeforeCountingHookPlugin : IHookPlugin
+    {
+        public string Shortname => "test_oauth_before_counter";
+        private readonly ConcurrentDictionary<string, int> _counts = new();
+        public int CountFor(string shortname) => _counts.GetValueOrDefault(shortname);
+        public Task HookAsync(Event e, CancellationToken ct = default)
+        {
+            _counts.AddOrUpdate(e.Shortname ?? "", 1, (_, n) => n + 1);
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class AfterCountingHookPlugin : IHookPlugin
+    {
+        public string Shortname => "test_oauth_after_counter";
+        private readonly ConcurrentDictionary<string, int> _counts = new();
+        public int CountFor(string shortname) => _counts.GetValueOrDefault(shortname);
+        public Task HookAsync(Event e, CancellationToken ct = default)
+        {
+            _counts.AddOrUpdate(e.Shortname ?? "", 1, (_, n) => n + 1);
+            return Task.CompletedTask;
         }
     }
 

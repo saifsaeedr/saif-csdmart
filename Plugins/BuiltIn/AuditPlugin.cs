@@ -13,6 +13,12 @@ public sealed class AuditPlugin(ILogger<AuditPlugin> log) : IHookPlugin
 
     public Task HookAsync(Event e, CancellationToken ct = default)
     {
+        // Bulk imports (CSV today, potentially zip later) tag each per-row Event
+        // with IsBulkImport=true. Logging every row would flood the audit log
+        // with thousands of lines for one operator action — the HTTP-level
+        // request log already records the bulk call once, which is enough.
+        if (e.IsBulkImport) return Task.CompletedTask;
+
         log.LogInformation("{Action} {Space}/{Subpath}/{Shortname} by {User}",
             JsonbHelpers.EnumMember(e.ActionType),
             e.SpaceName, e.Subpath, e.Shortname ?? "-", e.UserShortname);

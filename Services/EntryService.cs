@@ -55,15 +55,18 @@ public sealed class EntryService(
     }
 
     public async Task<Result<Entry>> CreateAsync(Entry entry, string? actor, CancellationToken ct = default)
-        => await CreateAsync(entry, actor, rawAttrs: null, ct);
+        => await CreateAsync(entry, actor, rawAttrs: null, isBulkImport: false, ct);
 
     // Overload that accepts the client's raw record.attributes dict for the
     // restricted_fields / allowed_fields_values gate. Python parity: the
     // create check is passed `record.attributes` as-submitted — synthesizing
     // defaults like is_active=true or tags=[] on the gate side would deny
     // requests Python allows when a permission has those fields restricted.
+    // `isBulkImport=true` tags emitted Events so logging-only hooks (audit)
+    // skip per-row noise during /resources_from_csv etc.; other hooks still fire.
     public async Task<Result<Entry>> CreateAsync(
-        Entry entry, string? actor, Dictionary<string, object>? rawAttrs, CancellationToken ct = default)
+        Entry entry, string? actor, Dictionary<string, object>? rawAttrs,
+        bool isBulkImport = false, CancellationToken ct = default)
     {
         var locator = new Locator(entry.ResourceType, entry.SpaceName, entry.Subpath, entry.Shortname);
         // Python passes the raw client attributes (no synthesized defaults). When
@@ -132,7 +135,7 @@ public sealed class EntryService(
         // Fire the BEFORE hook before the DB write. A plugin throwing here should
         // abort the create — we translate the exception into a Result.Fail so the
         // caller can surface a structured error without leaking the stack.
-        var beforeEvent = BuildEvent(toSave, ActionType.Create, actor);
+        var beforeEvent = BuildEvent(toSave, ActionType.Create, actor, isBulkImport);
         try { await plugins.BeforeActionAsync(beforeEvent, ct); }
         catch (Exception ex)
         {
@@ -151,7 +154,7 @@ public sealed class EntryService(
         // not call store_entry_diff), so skip the append here. Mirrors the
         // /managed/query?type=history response shape — every row's diff is
         // `{field: {old, new}}`, never a synthetic `{action:"create"}` envelope.
-        await plugins.AfterActionAsync(BuildEvent(toSave, ActionType.Create, actor), ct);
+        await plugins.AfterActionAsync(BuildEvent(toSave, ActionType.Create, actor, isBulkImport), ct);
         return Result<Entry>.Ok(toSave);
     }
 
@@ -617,7 +620,7 @@ public sealed class EntryService(
     // state, since that's what the realtime notifier uses) because anything
     // else forces the Event object into a heavier allocation and there's no
     // caller that needs more.
-    private static Event BuildEvent(Entry entry, ActionType action, string? actor)
+    private static Event BuildEvent(Entry entry, ActionType action, string? actor, bool isBulkImport = false)
     {
         var attrs = new Dictionary<string, object>(StringComparer.Ordinal);
         if (entry.State is not null) attrs["state"] = entry.State;
@@ -638,6 +641,7 @@ public sealed class EntryService(
             Displayname = entry.Displayname,
             Description = entry.Description,
             Tags = entry.Tags,
+            IsBulkImport = isBulkImport,
         };
     }
 

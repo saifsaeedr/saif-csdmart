@@ -349,7 +349,7 @@ public static class RequestHandler
         // gate, not the synthesized Entry dict. Synthesizing is_active/tags on
         // the gate side makes restricted_fields:["is_active"]/["tags"] deny
         // creates the Python port allows for the same request body.
-        var result = await entries.CreateAsync(entry, actor, rec.Attributes, ct);
+        var result = await entries.CreateAsync(entry, actor, rec.Attributes, ct: ct);
         if (!result.IsOk)
             return (Response.Fail(result.ErrorCode!, result.ErrorMessage!, ErrorTypes.Request), rec);
         var saved = result.Value!;
