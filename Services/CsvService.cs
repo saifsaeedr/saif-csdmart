@@ -75,6 +75,17 @@ public sealed class CsvService(QueryService queries, EntryService entries)
             return Response.Fail(InternalErrorCode.MISSING_DATA, "csv has no header row", ErrorTypes.Request);
 
         var headers = ParseCsvLine(headerLine);
+        // Resolve the shortname column index once — headers don't change per row.
+        // The match is OrdinalIgnoreCase by design: `Shortname`, `SHORTNAME`, and
+        // `shortname` are all accepted as the shortname column. Python's
+        // import_resources_from_csv_handler is tolerant about header casing
+        // (api/managed/utils.py:1553+ reads via pandas with no normalisation,
+        // but downstream lookups rely on csv.DictReader-style key access that
+        // accepts whatever the header row spelled), and the port matches the
+        // more permissive form rather than the case-sensitive dictionary lookup
+        // that lived here pre-#24.
+        var shortnameIdx = headers.FindIndex(h =>
+            string.Equals(h, "shortname", StringComparison.OrdinalIgnoreCase));
         var inserted = 0;
         var failed = new List<Dictionary<string, object>>();
         var rowNumber = 0;
@@ -104,8 +115,8 @@ public sealed class CsvService(QueryService queries, EntryService entries)
                 rowDict[headers[i]] = ParseCellValue(fields[i]);
 
             // shortname column is required (or auto-generate). Read from the raw
-            // fields so a JSON-shaped shortname doesn't become a JsonElement.
-            var shortnameIdx = headers.FindIndex(h => string.Equals(h, "shortname", StringComparison.OrdinalIgnoreCase));
+            // fields (not rowDict) so a JSON-shaped shortname cell doesn't get lifted
+            // into a JsonElement by ParseCellValue — the shortname is always a string.
             var shortname = shortnameIdx >= 0 && shortnameIdx < fields.Count ? fields[shortnameIdx] : "";
             if (string.IsNullOrEmpty(shortname))
                 shortname = $"row-{Guid.NewGuid():N}".Substring(0, 12);
