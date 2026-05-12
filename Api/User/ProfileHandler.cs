@@ -111,12 +111,16 @@ public static class ProfileHandler
             if (!result.IsOk)
                 return Response.Fail(result.ErrorCode, result.ErrorMessage!, result.ErrorType ?? "request");
 
-            // Python parity: dmart fires after-hooks for user/profile updates
-            // (backend/plugins/update_access_controls reloads ACLs, ldap_manager
-            // syncs LDAP). Mirror RegistrationHandler:77-86 — call directly so
-            // Concurrent plugins fire-and-forget while synchronous ones block.
-            // PluginManager swallows/logs hook failures so the update succeeds
-            // even if a plugin misbehaves.
+            // Python parity: fire user/profile after-hooks (e.g.
+            // update_access_controls, ldap_manager). Mirrors the create-side in
+            // RegistrationHandler.Map. Strip credential/session keys before
+            // exposing the patch to plugins and the audit log — those must
+            // never be persisted or handed to hook code.
+            var eventAttrs = new Dictionary<string, object>(patch, StringComparer.Ordinal);
+            eventAttrs.Remove("password");
+            eventAttrs.Remove("old_password");
+            eventAttrs.Remove("firebase_token");
+
             await plugins.AfterActionAsync(new Event
             {
                 SpaceName = settings.Value.ManagementSpace,
@@ -125,6 +129,7 @@ public static class ProfileHandler
                 ActionType = ActionType.Update,
                 ResourceType = ResourceType.User,
                 UserShortname = actor,
+                Attributes = eventAttrs,
             }, ct);
 
             return Response.Ok(attributes: new() { ["shortname"] = result.Value!.Shortname });
