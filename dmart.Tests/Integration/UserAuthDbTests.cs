@@ -35,15 +35,11 @@ public class UserAuthDbTests : IClassFixture<DmartFactory>
         // parity). roles is included for client convenience — pin it so a
         // future refactor can't silently drop it from the wire shape.
         //
-        // groups is also added to the dictionary at AuthHandler.cs but does
-        // NOT currently surface on the wire for users with an empty Groups
-        // list (bootstrap admin's case): something in the ASP.NET Core HTTP
-        // serialization path drops `Dictionary<string, object>` entries whose
-        // value is an empty `List<string>` boxed as object. Direct
-        // `JsonSerializer.Serialize(response, DmartJsonContext.Default.Response)`
-        // emits `groups:[]` as expected, so this is specific to the HTTP
-        // pipeline. Until that's diagnosed, asserting groups presence here
-        // would always fail for the bootstrap admin.
+        // groups is also added to the dictionary at AuthHandler.cs, but dmart's
+        // API convention omits empty collections from attribute bags — so the
+        // bootstrap admin (Groups=[]) sees no "groups" key on the wire, by
+        // design. Don't assert groups presence here without first populating
+        // Groups for the test user; that's a different test.
         body.Records.ShouldNotBeNull();
         body.Records!.Count.ShouldBeGreaterThan(0);
         body.Records![0].Attributes.ShouldNotBeNull();
