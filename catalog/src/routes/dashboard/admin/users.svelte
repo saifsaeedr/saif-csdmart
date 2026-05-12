@@ -13,7 +13,7 @@
   import { _, locale } from "@/i18n";
   import { formatNumber } from "@/lib/helpers";
   import { derived as derivedStore } from "svelte/store";
-  import { Modal } from "flowbite-svelte";
+  import AppModal from "@/components/Modal.svelte";
   import { ResourceType, Dmart, RequestType, DmartScope } from "@edraj/tsdmart";
   import { createEntity } from "@/lib/dmart_services/core";
   import { getEntity } from "@/lib/dmart_services";
@@ -70,6 +70,10 @@
   let showBulkEditModal = $state(false);
   let bulkEditData = $state<Record<string, any>>({});
   let isBulkSaving = $state(false);
+
+  let showViewUserModal = $state(false);
+  let viewUserData = $state<any>(null);
+  let permissionsMap = $state<Record<string, any>>({});
 
   function getAttributeValue(item: any, key: any) {
     if (!item) return "";
@@ -208,6 +212,7 @@
           description: typeof role.attributes?.description === 'object'
             ? (role.attributes?.description?.en || role.attributes?.description?.ar || role.attributes?.description?.ku || `Role: ${role.shortname}`)
             : (role.attributes?.description || `Role: ${role.shortname}`),
+          permissions: Array.isArray(role.attributes?.permissions) ? role.attributes.permissions : [],
         }));
       } else {
         errorToastMessage($_("failed_to_load_roles"));
@@ -554,9 +559,57 @@
     await loadUsers();
   }
 
+  async function loadPermissions() {
+    try {
+      const permissionsResponse = await getSpaceContents(
+        "management",
+        "permissions",
+        DmartScope.managed,
+      );
+      if (permissionsResponse.status === "success") {
+        const map: Record<string, any> = {};
+        for (const p of permissionsResponse.records) {
+          map[p.shortname] = {
+            shortname: p.shortname,
+            displayname: typeof p.attributes?.displayname === 'object'
+              ? (p.attributes?.displayname?.en || p.attributes?.displayname?.ar || p.attributes?.displayname?.ku || p.shortname)
+              : (p.attributes?.displayname || p.shortname),
+            description: typeof p.attributes?.description === 'object'
+              ? (p.attributes?.description?.en || p.attributes?.description?.ar || p.attributes?.description?.ku || "")
+              : (p.attributes?.description || ""),
+            actions: Array.isArray(p.attributes?.actions) ? p.attributes.actions : [],
+            resource_types: Array.isArray(p.attributes?.resource_types) ? p.attributes.resource_types : [],
+            subpaths: p.attributes?.subpaths || {},
+          };
+        }
+        permissionsMap = map;
+      }
+    } catch (error) {
+      console.error("Error loading permissions:", error);
+    }
+  }
+
+  function openViewUserModal(user: any) {
+    viewUserData = user;
+    showViewUserModal = true;
+  }
+
+  function closeViewUserModal() {
+    showViewUserModal = false;
+    viewUserData = null;
+  }
+
+  function getRolePermissions(roleShortname: string): any[] {
+    const role = availableRoles.find((r) => r.shortname === roleShortname);
+    if (!role || !Array.isArray(role.permissions)) return [];
+    return role.permissions.map((permShortname: string) => {
+      return permissionsMap[permShortname] || { shortname: permShortname, displayname: permShortname };
+    });
+  }
+
   onMount(async () => {
     isLoading = true;
-    await Promise.all([loadUsers(), loadRoles()]);
+    await Promise.all([loadUsers(), loadRoles(), loadPermissions()]);
     isLoading = false;
   });
 
@@ -757,7 +810,7 @@
           }
         }}
         onSelectItem={(shortname) => toggleItemSelection(shortname)}
-        onRowClick={(user) => openEditUserModal(user)}
+        onRowClick={(user) => openViewUserModal(user)}
         loading={isLoading}
         currentPage={currentPage}
         totalPages={totalPages}
@@ -853,129 +906,292 @@
 
 </div>
 
-<Modal
-  title="{$_('manageRolesFor')} {selectedUser?.displayname ?? ''}"
-  bind:open={showRoleModal}
-  size="lg"
-  class="bg-white"
-  headerClass="text-gray-900"
-  placement="center"
-  autoclose={false}
->
-  <p class="modal-description">
-    {$_("selectRolesToAssignDescription")}
-  </p>
+{#if showRoleModal}
+  <AppModal
+    title="{$_('manageRolesFor')} {selectedUser?.displayname ?? ''}"
+    ariaLabel={$_('manageRolesFor')}
+    size="2xl"
+    dismissable={!isUpdating}
+    onClose={closeRoleModal}
+  >
+    <p class="text-sm text-gray-600 mb-4">
+      {$_("selectRolesToAssignDescription")}
+    </p>
 
-  {#if availableRoles.length === 0}
-    <div class="alert alert-warning">
-      <div class="alert-icon">⚠</div>
-      <div>{$_("noRolesAvailable")}</div>
-    </div>
-  {:else}
-    <div class="role-search-container">
-      <input
-        type="text"
-        class="role-search-input"
-        placeholder={$_("search_roles") || "Search roles..."}
-        bind:value={roleSearchTerm}
-        oninput={filterAvailableRoles}
+    {#if availableRoles.length === 0}
+      <div class="flex items-start gap-3 p-4 bg-amber-50 border border-amber-200 rounded-xl">
+        <div class="text-amber-500 text-lg leading-none">⚠</div>
+        <div class="text-sm text-amber-800">{$_("noRolesAvailable")}</div>
+      </div>
+    {:else}
+      <div class="mb-4">
+        <input
+          type="text"
+          class="w-full px-4 py-2.5 text-sm bg-white border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent placeholder:text-gray-400"
+          placeholder={$_("search_roles") || "Search roles..."}
+          bind:value={roleSearchTerm}
+          oninput={filterAvailableRoles}
+        />
+      </div>
+
+      {#if filteredRoles.length === 0}
+        <div class="text-center py-8 text-sm text-gray-500">
+          <p>
+            {$_("no_roles_match_search") || "No roles match your search"}
+          </p>
+        </div>
+      {:else}
+        <div class="space-y-2">
+          {#each filteredRoles as role}
+            <label class="flex items-start gap-3 p-4 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 cursor-pointer transition-colors">
+              <input
+                type="checkbox"
+                class="mt-0.5 w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
+                checked={selectedRoles.includes(role.shortname)}
+                onchange={() => toggleRole(role.shortname)}
+              />
+              <div class="flex-1 min-w-0">
+                <div class="text-sm font-medium text-gray-900">{role.displayname}</div>
+                <div class="text-xs text-gray-500 mt-0.5">{role.description}</div>
+              </div>
+            </label>
+          {/each}
+        </div>
+      {/if}
+    {/if}
+
+    {#snippet footer()}
+      <button
+        onclick={closeRoleModal}
+        disabled={isUpdating}
+        class="px-5 py-2.5 text-sm font-medium text-gray-700 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+      >
+        {$_("cancel")}
+      </button>
+      <button
+        onclick={saveUserRoles}
+        disabled={isUpdating || availableRoles.length === 0}
+        class="px-5 py-2.5 text-sm font-medium text-white bg-indigo-600 rounded-xl hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors inline-flex items-center gap-2"
+      >
+        {#if isUpdating}
+          <div class="spinner small"></div>
+          {$_("saving")}
+        {:else}
+          {$_("saveChanges")}
+        {/if}
+      </button>
+    {/snippet}
+  </AppModal>
+{/if}
+
+{#if showCreateUserModal}
+  <AppModal
+    title={isEditingUserMode ? ($_('edit_user') || 'Edit User') : ($_('create_user') || 'Create User')}
+    ariaLabel={isEditingUserMode ? ($_('edit_user') || 'Edit User') : ($_('create_user') || 'Create User')}
+    size="2xl"
+    dismissable={!isSavingUser}
+    onClose={closeUserModal}
+  >
+    <div class="space-y-4">
+      <MetaForm
+        bind:formData={metaContent}
+        bind:validateFn={validateMetaForm}
+        isCreate={!isEditingUserMode}
+        fullWidth={true}
+      />
+      <MetaUserForm
+        bind:formData={metaContent}
+        bind:validateFn={validateRTForm}
+        isCreate={!isEditingUserMode}
+        fullWidth={true}
       />
     </div>
 
-    {#if filteredRoles.length === 0}
-      <div class="empty-roles-state">
-        <p>
-          {$_("no_roles_match_search") || "No roles match your search"}
-        </p>
-      </div>
-    {:else}
-      <div class="roles-selection">
-        {#each filteredRoles as role}
-          <label class="role-option">
-            <input
-              type="checkbox"
-              checked={selectedRoles.includes(role.shortname)}
-              onchange={() => toggleRole(role.shortname)}
-            />
-            <div class="role-content">
-              <div class="role-name">{role.displayname}</div>
-              <div class="role-description">{role.description}</div>
+    {#snippet footer()}
+      <button
+        onclick={closeUserModal}
+        disabled={isSavingUser}
+        class="px-5 py-2.5 text-sm font-medium text-gray-700 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+      >
+        {$_("cancel")}
+      </button>
+      <button
+        onclick={handleSaveUser}
+        disabled={isSavingUser}
+        class="px-5 py-2.5 text-sm font-medium text-white bg-indigo-600 rounded-xl hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors inline-flex items-center gap-2"
+      >
+        {#if isSavingUser}
+          <div class="spinner small"></div>
+          {isEditingUserMode ? ($_("updating") || "Updating...") : ($_("creating") || "Creating...")}
+        {:else}
+          {isEditingUserMode ? ($_("update_user") || "Update User") : ($_("create_user") || "Create User")}
+        {/if}
+      </button>
+    {/snippet}
+  </AppModal>
+{/if}
+
+{#if showViewUserModal && viewUserData}
+  {@const userAttrs = viewUserData.attributes || {}}
+  <AppModal
+    title={viewUserData.displayname || viewUserData.shortname}
+    ariaLabel="User details"
+    size="3xl"
+    onClose={closeViewUserModal}
+  >
+    <div class="space-y-6">
+      <div class="bg-white rounded-2xl border border-gray-200 p-5">
+        <h3 class="text-sm font-semibold text-gray-900 mb-4">User Information</h3>
+        <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-4">
+          <div>
+            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">Shortname</dt>
+            <dd class="mt-1 text-sm text-gray-900 font-mono">{viewUserData.shortname}</dd>
+          </div>
+          <div>
+            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">Display Name</dt>
+            <dd class="mt-1 text-sm text-gray-900">{viewUserData.displayname || "—"}</dd>
+          </div>
+          <div>
+            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">Email</dt>
+            <dd class="mt-1 text-sm text-gray-900 break-all">{userAttrs.email || viewUserData.email || "—"}</dd>
+          </div>
+          <div>
+            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">Mobile Number</dt>
+            <dd class="mt-1 text-sm text-gray-900">{userAttrs.msisdn || "—"}</dd>
+          </div>
+          <div>
+            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">Status</dt>
+            <dd class="mt-1">
+              <span class="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-medium {viewUserData.is_active ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}">
+                <span class="w-1.5 h-1.5 rounded-full {viewUserData.is_active ? 'bg-emerald-500' : 'bg-red-500'} mr-1.5"></span>
+                {viewUserData.is_active ? $_("admin_content.status.active") : $_("admin_content.status.inactive")}
+              </span>
+            </dd>
+          </div>
+          <div>
+            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">Type</dt>
+            <dd class="mt-1 text-sm text-gray-900">{userAttrs.type || "—"}</dd>
+          </div>
+          <div>
+            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">Email Verified</dt>
+            <dd class="mt-1 text-sm text-gray-900">{userAttrs.is_email_verified ? "Yes" : "No"}</dd>
+          </div>
+          <div>
+            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">Phone Verified</dt>
+            <dd class="mt-1 text-sm text-gray-900">{userAttrs.is_msisdn_verified ? "Yes" : "No"}</dd>
+          </div>
+          <div>
+            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">Force Password Change</dt>
+            <dd class="mt-1 text-sm text-gray-900">{userAttrs.force_password_change ? "Yes" : "No"}</dd>
+          </div>
+          <div>
+            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">Language</dt>
+            <dd class="mt-1 text-sm text-gray-900">{userAttrs.language || "—"}</dd>
+          </div>
+          {#if userAttrs.created_at}
+            <div>
+              <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">Created At</dt>
+              <dd class="mt-1 text-sm text-gray-900">{userAttrs.created_at}</dd>
             </div>
-          </label>
-        {/each}
+          {/if}
+          {#if userAttrs.updated_at}
+            <div>
+              <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">Updated At</dt>
+              <dd class="mt-1 text-sm text-gray-900">{userAttrs.updated_at}</dd>
+            </div>
+          {/if}
+        </dl>
       </div>
-    {/if}
-  {/if}
 
-  {#snippet footer()}
-    <button
-      class="btn btn-secondary"
-      onclick={closeRoleModal}
-      disabled={isUpdating}
-    >
-      {$_("cancel")}
-    </button>
-    <button
-      class="btn btn-primary"
-      onclick={saveUserRoles}
-      disabled={isUpdating || availableRoles.length === 0}
-    >
-      {#if isUpdating}
-        <div class="spinner small"></div>
-        {$_("saving")}
-      {:else}
-        {$_("saveChanges")}
+      {#if Array.isArray(userAttrs.groups) && userAttrs.groups.length > 0}
+        <div class="bg-white rounded-2xl border border-gray-200 p-5">
+          <h3 class="text-sm font-semibold text-gray-900 mb-3">Groups</h3>
+          <div class="flex flex-wrap gap-2">
+            {#each userAttrs.groups as group}
+              <span class="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-medium bg-gray-100 text-gray-700">{group}</span>
+            {/each}
+          </div>
+        </div>
       {/if}
-    </button>
-  {/snippet}
-</Modal>
 
-<Modal
-  title={isEditingUserMode ? ($_('edit_user') || 'Edit User') : ($_('create_user') || 'Create User')}
-  bind:open={showCreateUserModal}
-  size="lg"
-  class="bg-white"
-  headerClass="text-gray-900"
-  placement="center"
-  autoclose={false}
->
-  <div class="space-y-4 max-h-[75vh] overflow-y-auto p-4">
-    <MetaForm
-      bind:formData={metaContent}
-      bind:validateFn={validateMetaForm}
-      isCreate={!isEditingUserMode}
-      fullWidth={true}
-    />
-    <MetaUserForm
-      bind:formData={metaContent}
-      bind:validateFn={validateRTForm}
-      isCreate={!isEditingUserMode}
-      fullWidth={true}
-    />
-  </div>
+      <div class="bg-white rounded-2xl border border-gray-200 p-5">
+        <h3 class="text-sm font-semibold text-gray-900 mb-3">Roles &amp; Permissions</h3>
+        {#if !viewUserData.roles || viewUserData.roles.length === 0}
+          <p class="text-sm text-gray-500 italic">No roles assigned</p>
+        {:else}
+          <div class="space-y-3">
+            {#each viewUserData.roles as roleShortname}
+              {@const rolePerms = getRolePermissions(roleShortname)}
+              <details class="group bg-gray-50/60 rounded-xl border border-gray-200 overflow-hidden" open>
+                <summary class="flex items-center justify-between px-4 py-3 cursor-pointer hover:bg-gray-100 transition-colors">
+                  <div class="flex items-center gap-2 min-w-0">
+                    <svg class="w-4 h-4 text-gray-400 transition-transform group-open:rotate-90 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
+                    </svg>
+                    <span class="text-sm font-medium text-gray-900 truncate">{getRoleDisplayName(roleShortname)}</span>
+                    <span class="text-xs text-gray-500 font-mono">({roleShortname})</span>
+                  </div>
+                  <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-indigo-50 text-indigo-700 shrink-0 ml-2">
+                    {rolePerms.length} {rolePerms.length === 1 ? "permission" : "permissions"}
+                  </span>
+                </summary>
+                <div class="px-4 py-3 border-t border-gray-200 bg-white">
+                  {#if rolePerms.length === 0}
+                    <p class="text-xs text-gray-500 italic">No permissions</p>
+                  {:else}
+                    <ul class="space-y-2">
+                      {#each rolePerms as perm}
+                        <li class="text-sm">
+                          <div class="flex items-start gap-2">
+                            <svg class="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+                            </svg>
+                            <div class="min-w-0 flex-1">
+                              <div class="font-medium text-gray-900">{perm.displayname || perm.shortname}</div>
+                              {#if perm.description}
+                                <div class="text-xs text-gray-500 mt-0.5">{perm.description}</div>
+                              {/if}
+                              {#if Array.isArray(perm.actions) && perm.actions.length > 0}
+                                <div class="flex flex-wrap gap-1 mt-1.5">
+                                  {#each perm.actions as action}
+                                    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-50 text-blue-700">{action}</span>
+                                  {/each}
+                                </div>
+                              {/if}
+                            </div>
+                          </div>
+                        </li>
+                      {/each}
+                    </ul>
+                  {/if}
+                </div>
+              </details>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    </div>
 
-  {#snippet footer()}
-    <button
-      class="btn btn-secondary"
-      onclick={closeUserModal}
-      disabled={isSavingUser}
-    >
-      {$_("cancel")}
-    </button>
-    <button
-      class="btn btn-primary"
-      onclick={handleSaveUser}
-      disabled={isSavingUser}
-    >
-      {#if isSavingUser}
-        <div class="spinner small"></div>
-        {isEditingUserMode ? ($_("updating") || "Updating...") : ($_("creating") || "Creating...")}
-      {:else}
-        {isEditingUserMode ? ($_("update_user") || "Update User") : ($_("create_user") || "Create User")}
-      {/if}
-    </button>
-  {/snippet}
-</Modal>
+    {#snippet footer()}
+      <button
+        onclick={closeViewUserModal}
+        class="px-5 py-2.5 text-sm font-medium text-gray-700 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 transition-colors"
+      >
+        {$_("common.close")}
+      </button>
+      <button
+        onclick={() => {
+          closeViewUserModal();
+          openEditUserModal(viewUserData);
+        }}
+        class="px-5 py-2.5 text-sm font-medium text-white bg-indigo-600 rounded-xl hover:bg-indigo-700 transition-colors inline-flex items-center gap-2"
+      >
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
+        Edit
+      </button>
+    {/snippet}
+  </AppModal>
+{/if}
 
 {#if isCSVUploadModalOpen}
   {@const _csvUploadProps = { space_name: "management", subpath: "users", isOpen: isCSVUploadModalOpen, onClose: () => (isCSVUploadModalOpen = false), onUpload: handleCSVUpload } as any}
