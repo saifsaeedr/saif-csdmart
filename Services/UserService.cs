@@ -6,6 +6,7 @@ using Dmart.DataAdapters.Sql;
 using Dmart.Models.Api;
 using Dmart.Models.Core;
 using Dmart.Models.Enums;
+using Dmart.Plugins;
 using Microsoft.Extensions.Options;
 
 namespace Dmart.Services;
@@ -18,6 +19,7 @@ public sealed class UserService(
     InvitationJwt invitationJwt,
     InvitationRepository invitations,
     HistoryRepository history,
+    PluginManager plugins,
     IOptions<DmartSettings> settings,
     ILogger<UserService> log)
 {
@@ -831,6 +833,25 @@ public sealed class UserService(
             if (!string.IsNullOrEmpty(ftStr))
                 await users.UpdateSessionFirebaseTokenAsync(shortname, sessionToken, ftStr, ct);
         }
+
+        // Python parity (api/user/router.py:798-808): after-hook carries the
+        // same {field_path: {old, new}} diff that was just persisted to history
+        // so plugins (e.g. action_log) can log field-level deltas. Mirrors
+        // EntryService.UpdateAsync:372-374 — single source of truth for the
+        // diff. Guard on historyDiff.Count so a no-op patch still fires the
+        // hook but without the history_diff key, matching Python behavior.
+        var afterEvent = new Event
+        {
+            SpaceName = MgmtSpace,
+            Subpath = "/users",
+            Shortname = updated.Shortname,
+            ActionType = ActionType.Update,
+            ResourceType = ResourceType.User,
+            UserShortname = shortname,
+        };
+        if (historyDiff.Count > 0)
+            afterEvent.Attributes["history_diff"] = historyDiff;
+        await plugins.AfterActionAsync(afterEvent, ct);
 
         return Result<User>.Ok(updated);
     }
