@@ -20,9 +20,13 @@ namespace Dmart.Tests.Integration;
 //
 // Two regressions are guarded here:
 //   1. The handler must reach AfterActionAsync at all (wiring).
-//   2. The Event.Attributes the handler hands to plugins (and the audit log)
-//      must NOT contain credential keys — password / old_password /
-//      firebase_token — even when the inbound patch carries them.
+//   2. Python parity: Event.Attributes carries history_diff (the same
+//      {field_path: {old, new}} shape persisted to the history table) — the
+//      audit log and any after-hook plugin (e.g. action_log) read the change
+//      set from there. Credentials and session tokens (password / old_password
+//      / firebase_token) must never appear anywhere in the event payload —
+//      ComputeUserHistoryDiff/FlattenUser exclude them by construction, so a
+//      regression in either would surface here.
 //
 // We use a dedicated WebApplicationFactory subclass so SpacesFolder can be
 // pointed at a per-test temp directory without poisoning the shared
@@ -101,19 +105,32 @@ public sealed class ProfileAfterHookTests
             resource.GetProperty("subpath").GetString().ShouldBe("/users");
             resource.GetProperty("shortname").GetString().ShouldBe(user.Shortname);
 
-            // Positive: displayname change is preserved.
+            // Positive: displayname change surfaces in history_diff under the
+            // flat dot-path key FlattenUser emits ("displayname.en"), with
+            // {old, new} shape matching Python's store_entry_diff.
             var attrs = updateLine.Value.GetProperty("attributes");
-            attrs.GetProperty("displayname").GetProperty("en").GetString()
+            var historyDiff = attrs.GetProperty("history_diff");
+            historyDiff.GetProperty("displayname.en").GetProperty("new").GetString()
                 .ShouldBe("after-hook-test");
 
-            // Negative: credential/session keys MUST be stripped before the
-            // event is handed to plugins or the audit writer.
+            // Negative: credentials / session tokens MUST NOT appear anywhere
+            // in the event payload — neither at the top level (where the
+            // pre-history_diff design risked leaking the raw patch) nor inside
+            // history_diff (FlattenUser excludes password/AttemptCount, and
+            // old_password/firebase_token aren't User fields at all). Asserting
+            // both scopes locks in the invariant against either regression.
             attrs.TryGetProperty("password", out _).ShouldBeFalse(
                 "password leaked into audit attributes — sanitization regression");
             attrs.TryGetProperty("old_password", out _).ShouldBeFalse(
                 "old_password leaked into audit attributes — sanitization regression");
             attrs.TryGetProperty("firebase_token", out _).ShouldBeFalse(
                 "firebase_token leaked into audit attributes — sanitization regression");
+            historyDiff.TryGetProperty("password", out _).ShouldBeFalse(
+                "password leaked into history_diff — FlattenUser regression");
+            historyDiff.TryGetProperty("old_password", out _).ShouldBeFalse(
+                "old_password leaked into history_diff — FlattenUser regression");
+            historyDiff.TryGetProperty("firebase_token", out _).ShouldBeFalse(
+                "firebase_token leaked into history_diff — FlattenUser regression");
         }
         finally
         {
