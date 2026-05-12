@@ -74,6 +74,7 @@
   let showViewUserModal = $state(false);
   let viewUserData = $state<any>(null);
   let permissionsMap = $state<Record<string, any>>({});
+  let permissionsLoaded = $state(false);
 
   function getAttributeValue(item: any, key: any) {
     if (!item) return "";
@@ -583,15 +584,22 @@
           };
         }
         permissionsMap = map;
+        permissionsLoaded = true;
       }
     } catch (error) {
       console.error("Error loading permissions:", error);
     }
   }
 
-  function openViewUserModal(user: any) {
+  async function openViewUserModal(user: any) {
     viewUserData = user;
     showViewUserModal = true;
+    // Permissions are only needed for the role/permission breakdown in this
+    // modal — defer the round-trip until the user actually opens it. Guard
+    // avoids refetching on every subsequent open.
+    if (!permissionsLoaded) {
+      await loadPermissions();
+    }
   }
 
   function closeViewUserModal() {
@@ -609,7 +617,7 @@
 
   onMount(async () => {
     isLoading = true;
-    await Promise.all([loadUsers(), loadRoles(), loadPermissions()]);
+    await Promise.all([loadUsers(), loadRoles()]);
     isLoading = false;
   });
 
@@ -1035,32 +1043,32 @@
   {@const userAttrs = viewUserData.attributes || {}}
   <AppModal
     title={viewUserData.displayname || viewUserData.shortname}
-    ariaLabel="User details"
+    ariaLabel={$_("view_user.title")}
     size="3xl"
     onClose={closeViewUserModal}
   >
     <div class="space-y-6">
       <div class="bg-white rounded-2xl border border-gray-200 p-5">
-        <h3 class="text-sm font-semibold text-gray-900 mb-4">User Information</h3>
+        <h3 class="text-sm font-semibold text-gray-900 mb-4">{$_("view_user.user_information")}</h3>
         <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-4">
           <div>
-            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">Shortname</dt>
+            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">{$_("view_user.shortname")}</dt>
             <dd class="mt-1 text-sm text-gray-900 font-mono">{viewUserData.shortname}</dd>
           </div>
           <div>
-            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">Display Name</dt>
+            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">{$_("view_user.display_name")}</dt>
             <dd class="mt-1 text-sm text-gray-900">{viewUserData.displayname || "—"}</dd>
           </div>
           <div>
-            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">Email</dt>
+            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">{$_("view_user.email")}</dt>
             <dd class="mt-1 text-sm text-gray-900 break-all">{userAttrs.email || viewUserData.email || "—"}</dd>
           </div>
           <div>
-            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">Mobile Number</dt>
+            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">{$_("view_user.mobile_number")}</dt>
             <dd class="mt-1 text-sm text-gray-900">{userAttrs.msisdn || "—"}</dd>
           </div>
           <div>
-            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">Status</dt>
+            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">{$_("view_user.status")}</dt>
             <dd class="mt-1">
               <span class="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-medium {viewUserData.is_active ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}">
                 <span class="w-1.5 h-1.5 rounded-full {viewUserData.is_active ? 'bg-emerald-500' : 'bg-red-500'} mr-1.5"></span>
@@ -1069,34 +1077,34 @@
             </dd>
           </div>
           <div>
-            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">Type</dt>
+            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">{$_("view_user.type")}</dt>
             <dd class="mt-1 text-sm text-gray-900">{userAttrs.type || "—"}</dd>
           </div>
           <div>
-            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">Email Verified</dt>
-            <dd class="mt-1 text-sm text-gray-900">{userAttrs.is_email_verified ? "Yes" : "No"}</dd>
+            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">{$_("view_user.email_verified")}</dt>
+            <dd class="mt-1 text-sm text-gray-900">{userAttrs.is_email_verified ? $_("view_user.yes") : $_("view_user.no")}</dd>
           </div>
           <div>
-            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">Phone Verified</dt>
-            <dd class="mt-1 text-sm text-gray-900">{userAttrs.is_msisdn_verified ? "Yes" : "No"}</dd>
+            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">{$_("view_user.phone_verified")}</dt>
+            <dd class="mt-1 text-sm text-gray-900">{userAttrs.is_msisdn_verified ? $_("view_user.yes") : $_("view_user.no")}</dd>
           </div>
           <div>
-            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">Force Password Change</dt>
-            <dd class="mt-1 text-sm text-gray-900">{userAttrs.force_password_change ? "Yes" : "No"}</dd>
+            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">{$_("view_user.force_password_change")}</dt>
+            <dd class="mt-1 text-sm text-gray-900">{userAttrs.force_password_change ? $_("view_user.yes") : $_("view_user.no")}</dd>
           </div>
           <div>
-            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">Language</dt>
+            <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">{$_("view_user.language")}</dt>
             <dd class="mt-1 text-sm text-gray-900">{userAttrs.language || "—"}</dd>
           </div>
           {#if userAttrs.created_at}
             <div>
-              <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">Created At</dt>
+              <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">{$_("view_user.created_at")}</dt>
               <dd class="mt-1 text-sm text-gray-900">{userAttrs.created_at}</dd>
             </div>
           {/if}
           {#if userAttrs.updated_at}
             <div>
-              <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">Updated At</dt>
+              <dt class="text-xs font-medium text-gray-500 uppercase tracking-wide">{$_("view_user.updated_at")}</dt>
               <dd class="mt-1 text-sm text-gray-900">{userAttrs.updated_at}</dd>
             </div>
           {/if}
@@ -1105,7 +1113,7 @@
 
       {#if Array.isArray(userAttrs.groups) && userAttrs.groups.length > 0}
         <div class="bg-white rounded-2xl border border-gray-200 p-5">
-          <h3 class="text-sm font-semibold text-gray-900 mb-3">Groups</h3>
+          <h3 class="text-sm font-semibold text-gray-900 mb-3">{$_("view_user.groups")}</h3>
           <div class="flex flex-wrap gap-2">
             {#each userAttrs.groups as group}
               <span class="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-medium bg-gray-100 text-gray-700">{group}</span>
@@ -1115,9 +1123,9 @@
       {/if}
 
       <div class="bg-white rounded-2xl border border-gray-200 p-5">
-        <h3 class="text-sm font-semibold text-gray-900 mb-3">Roles &amp; Permissions</h3>
+        <h3 class="text-sm font-semibold text-gray-900 mb-3">{$_("view_user.roles_and_permissions")}</h3>
         {#if !viewUserData.roles || viewUserData.roles.length === 0}
-          <p class="text-sm text-gray-500 italic">No roles assigned</p>
+          <p class="text-sm text-gray-500 italic">{$_("view_user.no_roles_assigned")}</p>
         {:else}
           <div class="space-y-3">
             {#each viewUserData.roles as roleShortname}
@@ -1132,12 +1140,12 @@
                     <span class="text-xs text-gray-500 font-mono">({roleShortname})</span>
                   </div>
                   <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-indigo-50 text-indigo-700 shrink-0 ml-2">
-                    {rolePerms.length} {rolePerms.length === 1 ? "permission" : "permissions"}
+                    {rolePerms.length} {rolePerms.length === 1 ? $_("view_user.permission_singular") : $_("view_user.permission_plural")}
                   </span>
                 </summary>
                 <div class="px-4 py-3 border-t border-gray-200 bg-white">
                   {#if rolePerms.length === 0}
-                    <p class="text-xs text-gray-500 italic">No permissions</p>
+                    <p class="text-xs text-gray-500 italic">{$_("view_user.no_permissions")}</p>
                   {:else}
                     <ul class="space-y-2">
                       {#each rolePerms as perm}
@@ -1177,7 +1185,7 @@
         onclick={closeViewUserModal}
         class="px-5 py-2.5 text-sm font-medium text-gray-700 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 transition-colors"
       >
-        {$_("common.close")}
+        {$_("view_user.close")}
       </button>
       <button
         onclick={() => {
@@ -1187,7 +1195,7 @@
         class="px-5 py-2.5 text-sm font-medium text-white bg-indigo-600 rounded-xl hover:bg-indigo-700 transition-colors inline-flex items-center gap-2"
       >
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
-        Edit
+        {$_("view_user.edit")}
       </button>
     {/snippet}
   </AppModal>

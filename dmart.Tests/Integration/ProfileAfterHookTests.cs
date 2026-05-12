@@ -1,8 +1,6 @@
 using System.Net;
-using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
-using Dmart.Models.Json;
 using Dmart.Tests.Infrastructure;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -131,6 +129,57 @@ public sealed class ProfileAfterHookTests
                 "old_password leaked into history_diff — FlattenUser regression");
             historyDiff.TryGetProperty("firebase_token", out _).ShouldBeFalse(
                 "firebase_token leaked into history_diff — FlattenUser regression");
+        }
+        finally
+        {
+            await user.Cleanup();
+            try { Directory.Delete(tempDir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    // Symmetry with the history.AppendAsync guard: a no-op patch produces no
+    // history row AND no plugin event. Without this, action_log-style plugins
+    // would fire on idempotent profile POSTs (e.g. a client re-submitting the
+    // same form), creating phantom audit noise.
+    [FactIfPg]
+    public async Task UpdateProfile_NoOp_Patch_Does_Not_Fire_After_Hook()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"dmart-aftertest-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+        var auditPath = Path.Combine(tempDir, "management", ".dm", "events.jsonl");
+
+        using var factory = new ProfileAfterHookFactory(tempDir);
+        await DmartFactory.ResetBootstrapAdminStateAsync(factory.Services);
+
+        using var dmart = new DmartFactory();
+        var user = await dmart.CreateLoggedInUserAsync(host: factory);
+        try
+        {
+            // Empty attributes => historyDiff is empty => both the history
+            // append and the after-hook are skipped. Handler still returns OK
+            // with the shortname (idempotent success).
+            var body = """{"attributes": {}}""";
+            var resp = await user.Client.PostAsync(
+                "/user/profile",
+                new StringContent(body, Encoding.UTF8, "application/json"));
+            resp.StatusCode.ShouldBe(HttpStatusCode.OK,
+                $"profile update failed: {await resp.Content.ReadAsStringAsync()}");
+
+            // SpaceEventLogger writes synchronously inside AfterActionAsync, so
+            // if a write were going to happen it would already be on disk by
+            // the time the HTTP response returns. A short settling delay
+            // catches any future async-detach regression without slowing the
+            // happy path materially.
+            await Task.Delay(TimeSpan.FromMilliseconds(250));
+
+            var lines = File.Exists(auditPath) ? File.ReadAllLines(auditPath) : Array.Empty<string>();
+            foreach (var line in lines)
+            {
+                var root = JsonDocument.Parse(line).RootElement;
+                if (root.GetProperty("request").GetString() != "update") continue;
+                if (root.GetProperty("user_shortname").GetString() != user.Shortname) continue;
+                Assert.Fail($"no-op profile patch produced an after-hook event line: {line}");
+            }
         }
         finally
         {

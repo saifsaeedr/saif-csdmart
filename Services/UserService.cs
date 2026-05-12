@@ -834,24 +834,26 @@ public sealed class UserService(
                 await users.UpdateSessionFirebaseTokenAsync(shortname, sessionToken, ftStr, ct);
         }
 
-        // Python parity (api/user/router.py:798-808): after-hook carries the
-        // same {field_path: {old, new}} diff that was just persisted to history
-        // so plugins (e.g. action_log) can log field-level deltas. Mirrors
-        // EntryService.UpdateAsync:372-374 — single source of truth for the
-        // diff. Guard on historyDiff.Count so a no-op patch still fires the
-        // hook but without the history_diff key, matching Python behavior.
-        var afterEvent = new Event
-        {
-            SpaceName = MgmtSpace,
-            Subpath = "/users",
-            Shortname = updated.Shortname,
-            ActionType = ActionType.Update,
-            ResourceType = ResourceType.User,
-            UserShortname = shortname,
-        };
+        // After-hook fires only when something actually changed — symmetric
+        // with the history.AppendAsync guard above, so a no-op patch produces
+        // neither a history row nor a plugin event. The payload carries the
+        // same {field_path: {old, new}} diff persisted to history; plugins
+        // (e.g. action_log) read field-level deltas from there. Mirrors
+        // EntryService.UpdateAsync:372-374 — single source of truth.
         if (historyDiff.Count > 0)
+        {
+            var afterEvent = new Event
+            {
+                SpaceName = MgmtSpace,
+                Subpath = "/users",
+                Shortname = updated.Shortname,
+                ActionType = ActionType.Update,
+                ResourceType = ResourceType.User,
+                UserShortname = shortname,
+            };
             afterEvent.Attributes["history_diff"] = historyDiff;
-        await plugins.AfterActionAsync(afterEvent, ct);
+            await plugins.AfterActionAsync(afterEvent, ct);
+        }
 
         return Result<User>.Ok(updated);
     }
