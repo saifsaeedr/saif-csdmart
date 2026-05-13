@@ -89,6 +89,55 @@ if (dotenvPath is not null)
     }
 }
 
+// Bulk-update query_policies for a chunk of rows in one of the five
+// ACL-filterable tables (entries, users, roles, permissions, spaces). Builds
+// one `UPDATE … FROM (VALUES …)` statement that joins the target table
+// against a literal VALUES list keyed on (shortname, space_name, subpath) —
+// the same primary key the per-row UPDATEs in fix_query_policies and
+// update_query_policies used to use, just shipped in one statement. Caller
+// is responsible for chunking (Postgres caps prepared-statement parameters
+// at 65535; 4 params per row → cap well over our 1000-row chunk size).
+[System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "CA2100",
+    Justification = "Audited: tableName is from a hardcoded set in each caller (entries/users/roles/permissions/spaces for fix_query_policies, 'entries' for update_query_policies). The dynamic VALUES list embeds only integer placeholder indices; all caller-supplied values flow through NpgsqlCommand.Parameters.")]
+static async Task<int> BulkUpdatePoliciesAsync(
+    Npgsql.NpgsqlConnection conn,
+    string tableName,
+    List<(string Shortname, string SpaceName, string Subpath, string[] Policies)> rows,
+    int offset, int len)
+{
+    if (len == 0) return 0;
+
+    var sb = new System.Text.StringBuilder(120 + 100 * len);
+    sb.Append("UPDATE ").Append(tableName).Append(" AS t SET query_policies = v.policies FROM (VALUES");
+    for (var i = 0; i < len; i++)
+    {
+        if (i > 0) sb.Append(',');
+        // 4 params per row, starting at $1. Cast the first row's columns so
+        // Postgres can infer the VALUES column types; later rows inherit.
+        var p = 1 + i * 4;
+        sb.Append('(').Append('$').Append(p).Append("::text,$")
+                      .Append(p + 1).Append("::text,$")
+                      .Append(p + 2).Append("::text,$")
+                      .Append(p + 3).Append("::text[])");
+    }
+    sb.Append(") AS v(shortname, space_name, subpath, policies) WHERE t.shortname = v.shortname AND t.space_name = v.space_name AND t.subpath = v.subpath");
+
+    await using var cmd = new Npgsql.NpgsqlCommand(sb.ToString(), conn);
+    for (var i = 0; i < len; i++)
+    {
+        var row = rows[offset + i];
+        cmd.Parameters.Add(new() { Value = row.Shortname });
+        cmd.Parameters.Add(new() { Value = row.SpaceName });
+        cmd.Parameters.Add(new() { Value = row.Subpath });
+        cmd.Parameters.Add(new()
+        {
+            Value = row.Policies,
+            NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text,
+        });
+    }
+    return await cmd.ExecuteNonQueryAsync();
+}
+
 switch (subcommand)
 {
     case "version":
@@ -766,11 +815,11 @@ switch (subcommand)
                 continue;
             }
 
-            var updateSql = $"""
-                UPDATE {tableName} SET query_policies = $1
-                WHERE shortname = $2 AND space_name = $3 AND subpath = $4
-                """;
-            var fixedCount = 0;
+            // Pre-compute every orphan's policies in C# (same QueryPolicies.Generate
+            // call as before, just gathered up front), then ship in chunks via a
+            // single UPDATE ... FROM (VALUES …) per chunk. Collapses N round-trips
+            // to ⌈N/CHUNK_SIZE⌉ without changing what the rows end up looking like.
+            var rows = new List<(string Shortname, string SpaceName, string Subpath, string[] Policies)>(orphans.Count);
             foreach (var (sn, sp, subp, rt, act, own, og) in orphans)
             {
                 // Only entries.resource_type == 'folder' wants entryShortname
@@ -781,15 +830,15 @@ switch (subcommand)
                     spaceName: sp, subpath: subp, resourceType: rt,
                     isActive: act, ownerShortname: own,
                     ownerGroupShortname: og, entryShortname: entryShortname);
+                rows.Add((sn, sp, subp, policies.ToArray()));
+            }
 
-#pragma warning disable CA2100 // Audited: updateSql is `UPDATE {tableName} SET query_policies=$1 WHERE shortname=$2 AND space_name=$3 AND subpath=$4` with tableName from the hardcoded `tables` array; all values via $N.
-                await using var upd = new Npgsql.NpgsqlCommand(updateSql, conn);
-#pragma warning restore CA2100
-                upd.Parameters.Add(new() { Value = policies.ToArray() });
-                upd.Parameters.Add(new() { Value = sn });
-                upd.Parameters.Add(new() { Value = sp });
-                upd.Parameters.Add(new() { Value = subp });
-                fixedCount += await upd.ExecuteNonQueryAsync();
+            const int CHUNK_SIZE = 1000;
+            var fixedCount = 0;
+            for (var i = 0; i < rows.Count; i += CHUNK_SIZE)
+            {
+                var len = Math.Min(CHUNK_SIZE, rows.Count - i);
+                fixedCount += await BulkUpdatePoliciesAsync(conn, tableName, rows, i, len);
             }
             Console.WriteLine($"  {tableName}: updated {fixedCount} row(s).");
             grandTotal += fixedCount;
@@ -949,6 +998,13 @@ switch (subcommand)
             if (rows.Count == 0) break;
             Console.WriteLine($"Processing {rows.Count} entries...");
 
+            // Recompute per page in C# (same QueryPolicies.Generate call as
+            // before), drop rows whose stored value already matches (preserves
+            // the idempotency contract), then ship the differing rows in one
+            // chunked bulk UPDATE per CHUNK_SIZE rows. For a typical page
+            // (batchSize=1000) that's one bulk UPDATE per page instead of up
+            // to N per-row UPDATEs.
+            var differing = new List<(string Shortname, string SpaceName, string Subpath, string[] Policies)>();
             foreach (var (sn, sp, subp, rt, act, own, og, current) in rows)
             {
                 List<string> recomputed;
@@ -968,16 +1024,14 @@ switch (subcommand)
                 }
 
                 if (current.SequenceEqual(recomputed)) continue;
+                differing.Add((sn, sp, subp, recomputed.ToArray()));
+            }
 
-                await using var upd = new Npgsql.NpgsqlCommand("""
-                    UPDATE entries SET query_policies = $1
-                    WHERE shortname = $2 AND space_name = $3 AND subpath = $4
-                    """, conn);
-                upd.Parameters.Add(new() { Value = recomputed.ToArray() });
-                upd.Parameters.Add(new() { Value = sn });
-                upd.Parameters.Add(new() { Value = sp });
-                upd.Parameters.Add(new() { Value = subp });
-                updated += await upd.ExecuteNonQueryAsync();
+            const int CHUNK_SIZE = 1000;
+            for (var i = 0; i < differing.Count; i += CHUNK_SIZE)
+            {
+                var len = Math.Min(CHUNK_SIZE, differing.Count - i);
+                updated += await BulkUpdatePoliciesAsync(conn, "entries", differing, i, len);
             }
             offset += rows.Count;
         }

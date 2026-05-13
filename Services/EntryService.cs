@@ -3,8 +3,8 @@ using Dmart.DataAdapters.Sql;
 using Dmart.Models.Api;
 using Dmart.Models.Core;
 using Dmart.Models.Enums;
-using Dmart.Models.Json;
 using Dmart.Plugins;
+using Npgsql;
 
 namespace Dmart.Services;
 
@@ -600,11 +600,41 @@ public sealed class EntryService(
             return Result<Entry>.Fail(InternalErrorCode.INVALID_DATA, "plugin rejected move", ErrorTypes.Request);
         }
 
-        await entries.MoveAsync(from, to, ct);
-        // Python parity: no history row on move. Destination gets a fresh
-        // entry; the source's history stays with the old row (which is now
-        // gone). Keeping the /managed/query?type=history response shape
-        // uniformly `{field: {old, new}}` means no action-envelope rows.
+        int totalMoved;
+        try
+        {
+            totalMoved = await entries.MoveAsync(srcEntry, to, ct);
+        }
+        catch (PostgresException ex) when (ex.SqlState == "23505")
+        {
+            // UNIQUE-violation at the destination: an entry or attachment with
+            // the same (shortname, space_name, subpath) already exists there.
+            // The repository's transaction rolled back, so the source is intact.
+            return Result<Entry>.Fail(InternalErrorCode.SHORTNAME_ALREADY_EXIST,
+                "destination already occupied", ErrorTypes.Db);
+        }
+        if (totalMoved == 0)
+        {
+            // Concurrent delete between load and write: the source row no
+            // longer matches by uuid. Nothing was relocated; surface NOT_FOUND
+            // explicitly rather than falling through to the post-move re-fetch.
+            return Result<Entry>.Fail(InternalErrorCode.OBJECT_NOT_FOUND,
+                "source entry no longer exists", ErrorTypes.Db);
+        }
+        // We diverge from Python's no-history-on-move parity: the move now
+        // touches enough state — entry row, regenerated query_policies,
+        // attachment relocation, folder-subtree cascade — that operators
+        // benefit from an audit trail of who relocated what when. The diff
+        // keeps the standard `{field: {old, new}}` shape so the
+        // /managed/query?type=history response stays uniform.
+        var moveDiff = new Dictionary<string, object>
+        {
+            ["space_name"] = new Dictionary<string, string> { ["old"] = from.SpaceName, ["new"] = to.SpaceName },
+            ["subpath"]    = new Dictionary<string, string> { ["old"] = from.Subpath,   ["new"] = to.Subpath },
+            ["shortname"]  = new Dictionary<string, string> { ["old"] = from.Shortname, ["new"] = to.Shortname },
+        };
+        await history.AppendAsync(to.SpaceName, to.Subpath, to.Shortname, actor,
+                                   requestHeaders: null, diff: moveDiff, ct);
         await plugins.AfterActionAsync(moveEvent, ct);
         var moved = await entries.GetAsync(to.SpaceName, to.Subpath, to.Shortname, to.Type, ct);
         return moved is null
