@@ -59,32 +59,10 @@
 
   Dmart.setAxiosInstance(dmartAxios as any);
 
-  // Gate the slot so unauthenticated users never see protected content.
-  // Public routes render immediately; protected routes show the spinner
-  // until either the cached signed-in hint lets us render optimistically
-  // or the /info/me probe in onMount confirms a session. All redirects
-  // happen from onMount so the component is mounted before we navigate.
-  const initialPath =
-    typeof window !== "undefined" ? window.location.pathname : "/";
-  const initiallyPublic = isPublicRoute(initialPath);
-  // Read once at module-script run; cross-tab login/logout changes won't
-  // reflect until the next page load. Treated only as an optimistic hint —
-  // the /info/me probe below is the authoritative session check.
-  const cachedSignedIn = get(user).signedin === true;
-
-  let authReady = $state(initiallyPublic || cachedSignedIn);
-
   onMount(async () => {
     const currentPath = window.location.pathname;
 
     if (isPublicRoute(currentPath)) {
-      return;
-    }
-
-    // No cached session on a protected route — skip the /info/me probe
-    // (it would just confirm unauthenticated) and redirect to login.
-    if (!cachedSignedIn) {
-      redirectTo("/login");
       return;
     }
 
@@ -97,13 +75,11 @@
       const authed = r.data?.attributes?.authenticated === true;
 
       if (!authed) {
-        authReady = false;
         await signout();
         redirectTo("/login");
         return;
       }
 
-      authReady = true;
 
       // Connect global WebSocket for real-time notifications and chat.
       // Skipped when enable_websocket is explicitly false in config.json,
@@ -121,7 +97,6 @@
     } catch (error: any) {
       // /info/me itself failed (network, server down). Treat as signed-out.
       console.warn("Session probe failed:", error?.message ?? error);
-      authReady = false;
       await signout();
       redirectTo("/login");
     }
@@ -131,18 +106,7 @@
 <div class="app-shell">
   <DashboardHeader />
   <main class="app-main">
-    {#if authReady}
-      <!-- svelte-ignore slot_element_deprecated -->
-      <!-- Routify drives this layout via the legacy slot mechanism;
-           migrating to {@render children?.()} leaves children undefined
-           and the page renders blank. Revisit when Routify supports
-           Svelte 5 snippets. -->
-      <slot />
-    {:else}
-      <div class="auth-gate" aria-busy="true" aria-live="polite">
-        <div class="auth-gate-spinner" role="status" aria-label="Loading"></div>
-      </div>
-    {/if}
+    <slot />
   </main>
 </div>
 
@@ -159,23 +123,4 @@
     animation: fadeIn var(--duration-normal) var(--ease-out);
   }
 
-  .auth-gate {
-    min-height: 60vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .auth-gate-spinner {
-    width: 28px;
-    height: 28px;
-    border: 3px solid rgba(99, 102, 241, 0.2);
-    border-top-color: rgb(99, 102, 241);
-    border-radius: 50%;
-    animation: auth-spin 0.8s linear infinite;
-  }
-
-  @keyframes auth-spin {
-    to { transform: rotate(360deg); }
-  }
 </style>
