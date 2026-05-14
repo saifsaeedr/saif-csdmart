@@ -16,6 +16,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Build UI tarballs (smoke)
+        # Mirror what release.yml's build-ui-tarballs job does — runs
+        # `yarn install` at the workspace root and then `yarn build`
+        # under cxb/ and catalog/. Catches yarn-install / vite-build
+        # regressions at PR time instead of at release time, where they
+        # have previously only surfaced after a tag was already cut.
+        # No untrusted input is interpolated into the run: command — it
+        # invokes the checked-in build-ui.sh script with no arguments.
+        run: ./build-ui.sh
+
       - name: Copy host config
         # Absolute paths throughout — the runner's $HOME is per-instance
         # (/home/githubrunner/runners/rXX/home) under the systemd override

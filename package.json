@@ -4,5 +4,8 @@
   "workspaces": [
     "cxb",
     "catalog"
-  ]
+  ],
+  "resolutions": {
+    "vite": "^8.0.12"
+  }
 }
