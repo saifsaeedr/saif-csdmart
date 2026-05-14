@@ -51,7 +51,7 @@ jobs:
           path: dist/out/*.tar.gz
 
   publish-nuget:
-    name: Publish Dmart.Models + Dmart.Client to NuGet
+    name: Publish Dmart.Models + Dmart.Client + Dmart.SqlAdapter to NuGet
     runs-on: self-hosted
     # Bubble the secret up to job-level env so the step-level `if:`
     # expression can read it (env.X is resolved at the step evaluator,
@@ -69,15 +69,21 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           echo "version=${VERSION:-0.1.0}" >> "$GITHUB_OUTPUT"
 
-      # Pack both packages. MSBuild resolves the ProjectReference so
-      # Dmart.Client.nupkg correctly declares a PackageReference on
-      # Dmart.Models of the same version.
-      - name: Pack Dmart.Models + Dmart.Client
+      # Pack the three NuGet-shippable SDKs. MSBuild resolves the
+      # ProjectReferences so Dmart.Client.nupkg and Dmart.SqlAdapter.nupkg
+      # correctly declare a PackageReference on Dmart.Models at the same
+      # version. Dmart.SqlAdapter is excluded from the AOT server binary
+      # (see <Compile Remove="Dmart.SqlAdapter/**" /> in dmart.csproj) but
+      # is part of the public SDK surface and ships on the same release
+      # cadence as Models / Client.
+      - name: Pack Dmart.Models + Dmart.Client + Dmart.SqlAdapter
         run: |
           V="${{ steps.version.outputs.version }}"
           dotnet pack Dmart.Models/Dmart.Models.csproj \
             -c Release -p:Version="$V" --nologo -o dist/out/nuget
           dotnet pack dmart.Client/dmart.Client.csproj \
+            -c Release -p:Version="$V" --nologo -o dist/out/nuget
+          dotnet pack Dmart.SqlAdapter/Dmart.SqlAdapter.csproj \
             -c Release -p:Version="$V" --nologo -o dist/out/nuget
           ls -lh dist/out/nuget/
 
