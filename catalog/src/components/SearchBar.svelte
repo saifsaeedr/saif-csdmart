@@ -220,13 +220,20 @@
 </script>
 
 <div class="search-trigger-wrap">
-  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
   <div
     class="search-trigger"
     bind:this={triggerElement}
+    role="button"
+    tabindex="0"
     aria-label={$_("route_labels.aria_search")}
     title={$_("route_labels.aria_search")}
     onclick={openDropdown}
+    onkeydown={(e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        openDropdown();
+      }
+    }}
   >
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
       <path d="M7.33333 12.6667C10.2789 12.6667 12.6667 10.2789 12.6667 7.33333C12.6667 4.38781 10.2789 2 7.33333 2C4.38781 2 2 4.38781 2 7.33333C2 10.2789 4.38781 12.6667 7.33333 12.6667Z" stroke="currentColor" stroke-width="1.33333" stroke-linecap="round" stroke-linejoin="round"/>

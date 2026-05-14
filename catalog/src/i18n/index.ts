@@ -13,7 +13,9 @@ let l17ns = { ar: ar, en: en, ku: ku };
 let available_locales = ["ar", "en", "ku"];
 
 /**
- * Switches the application locale and reloads the page
+ * Switches the application locale reactively (no page reload).
+ * Persists the preference, updates the stored user locale, and lets
+ * the locale/dir stores propagate the change through the UI.
  * @param _locale - The locale code to switch to (e.g., 'ar', 'en', 'ku')
  */
 function switchLocale(_locale: string) {
@@ -22,8 +24,7 @@ function switchLocale(_locale: string) {
   }
   if (typeof localStorage !== "undefined") {
     localStorage.setItem("preferred_locale", JSON.stringify(_locale));
-    
-    // Update the user locale in localStorage if user is logged in
+
     const userData = localStorage.getItem("user");
     if (userData) {
       try {
@@ -38,7 +39,6 @@ function switchLocale(_locale: string) {
     }
   }
   locale.set(_locale);
-  window.location.reload();
 }
 
 /**

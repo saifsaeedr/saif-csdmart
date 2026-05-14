@@ -1054,7 +1054,9 @@
   let cameFromAdmin = $state(false);
 
   onMount(() => {
-    if (typeof document !== "undefined" && document.referrer) {
+    if ($params?.from === "admin") {
+      cameFromAdmin = true;
+    } else if (typeof document !== "undefined" && document.referrer) {
       cameFromAdmin = document.referrer.includes("/dashboard/admin");
     }
   });

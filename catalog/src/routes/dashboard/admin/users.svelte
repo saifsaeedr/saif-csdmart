@@ -329,7 +329,7 @@
                 body: {
                   ...(folderMetadata as any)?.attributes?.payload?.body,
                   index_attributes: editingIndexAttributes.filter(
-                    (a) => a.key.trim() && a.name.trim(),
+                    (a) => a?.key?.trim() && a?.name?.trim(),
                   ),
                 },
               },
@@ -1555,113 +1555,6 @@
 
   .modal-body {
     padding: 0 24px 24px 24px;
-  }
-
-  .modal-description {
-    color: #6b7280;
-    font-size: 14px;
-    margin-bottom: 20px;
-    line-height: 1.5;
-  }
-
-  .role-search-container {
-    margin-bottom: 16px;
-  }
-
-  .role-search-input {
-    width: 100%;
-    padding: 10px 16px;
-    border: 2px solid #e5e7eb;
-    border-radius: 8px;
-    font-size: 14px;
-    transition: all 0.2s ease;
-  }
-
-  .role-search-input:focus {
-    outline: none;
-    border-color: #3b82f6;
-    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
-  }
-
-  .empty-roles-state {
-    text-align: center;
-    padding: 32px;
-    color: #9ca3af;
-    font-size: 14px;
-  }
-
-  .alert {
-    padding: 16px;
-    border-radius: 8px;
-    margin-bottom: 20px;
-    display: flex;
-    align-items: flex-start;
-    gap: 12px;
-  }
-
-  .alert-warning {
-    background: #fffbeb;
-    border: 1px solid #fed7aa;
-    color: #92400e;
-  }
-
-  .alert-icon {
-    width: 20px;
-    height: 20px;
-    flex-shrink: 0;
-    margin-top: 2px;
-  }
-
-  .roles-selection {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-
-  .role-option {
-    display: flex;
-    align-items: flex-start;
-    gap: 12px;
-    padding: 16px;
-    border: 2px solid #e5e7eb;
-    border-radius: 8px;
-    cursor: pointer;
-    transition: all 0.2s ease;
-  }
-
-  .role-option:hover {
-    border-color: #d1d5db;
-    background: #f9fafb;
-  }
-
-  .role-option:has(:global(input:checked)) {
-    border-color: #3b82f6;
-    background: #eff6ff;
-  }
-
-  .role-option input[type="checkbox"] {
-    width: 18px;
-    height: 18px;
-    margin: 0;
-    cursor: pointer;
-    accent-color: #3b82f6;
-  }
-
-  .role-content {
-    flex: 1;
-  }
-
-  .role-name {
-    font-weight: 600;
-    color: #111827;
-    margin-bottom: 4px;
-    font-size: 14px;
-  }
-
-  .role-description {
-    color: #6b7280;
-    font-size: 13px;
-    line-height: 1.4;
   }
 
   .modal-footer {

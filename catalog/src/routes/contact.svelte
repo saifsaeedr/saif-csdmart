@@ -11,7 +11,7 @@
     } from "flowbite-svelte-icons";
     import {contactUs} from "@/stores/user";
 
-    const isRTL = $locale === "ar" || $locale === "ku";
+    $: isRTL = $locale === "ar" || $locale === "ku";
 
   let name = "";
   let email = "";

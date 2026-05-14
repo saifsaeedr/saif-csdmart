@@ -29,6 +29,8 @@
   import MetaForm from "@/components/forms/MetaForm.svelte";
   import FolderForm from "@/components/forms/FolderForm.svelte";
   import { formatNumber, getParentPath } from "@/lib/helpers";
+  import { parseBreadcrumbPath } from "@/lib/breadcrumb";
+  import { stripServerManagedFields } from "@/lib/duplicate";
   import SchemaForm from "@/components/forms/SchemaForm.svelte";
   import CreateTemplateModal from "@/components/CreateTemplateModal.svelte";
   import WorkflowForm from "@/components/forms/WorkflowForm.svelte";
@@ -125,6 +127,44 @@
   async function handleCopyOrMoveDone() {
     selectedItems = new Set();
     await loadContents(true);
+  }
+
+  let duplicatingShortname = $state<string | null>(null);
+  async function handleDuplicateItem(item: any) {
+    if (!item || duplicatingShortname) return;
+    duplicatingShortname = item.shortname;
+    try {
+      const cleanAttributes = stripServerManagedFields(item.attributes);
+      const response = await Dmart.request({
+        space_name: spaceName,
+        request_type: RequestType.create,
+        records: [
+          {
+            resource_type: item.resource_type,
+            shortname: "auto",
+            subpath: `/${$actualSubpath}`,
+            attributes: cleanAttributes,
+          },
+        ],
+      });
+      if (response?.status === "success") {
+        successToastMessage($_("admin_content.actions.duplicate_success"));
+        await loadContents(true);
+      } else {
+        errorToastMessage(
+          (response as any)?.error?.message ||
+            $_("admin_content.actions.duplicate_failed"),
+        );
+      }
+    } catch (err: any) {
+      console.error("Duplicate error:", err);
+      errorToastMessage(
+        err?.response?.data?.error?.message ||
+          $_("admin_content.actions.duplicate_failed"),
+      );
+    } finally {
+      duplicatingShortname = null;
+    }
   }
 
   let searchQuery = $state("");
@@ -456,6 +496,7 @@
       $goto("/entries/create", {
         space_name: spaceName,
         subpath: $actualSubpath,
+        from: "admin",
       });
     }
   }
@@ -588,9 +629,18 @@
   // }
 
   function navigateToBreadcrumb(path: any) {
-    if (path) {
-      $goto(`/dashboard/admin/[space_name]`, {
-        space_name: spaceName,
+    const target = parseBreadcrumbPath(path);
+    if (!target) return;
+    if (target.kind === "admin-root") {
+      $goto("/dashboard/admin");
+    } else if (target.kind === "space-root") {
+      $goto("/dashboard/admin/[space_name]", {
+        space_name: target.spaceName,
+      });
+    } else {
+      $goto("/dashboard/admin/[space_name]/[subpath]", {
+        space_name: target.spaceName,
+        subpath: target.subpath,
       });
     }
   }
@@ -1157,15 +1207,11 @@
   let canDownloadCSV = $derived((folderMetadata as any)?.payload?.body?.allow_csv === true);
 
   function handleOpenColumnSettings() {
+    // Preserve the saved index_attributes exactly. Auto-filling defaults here
+    // caused the table to silently change layout after editing unrelated
+    // fields (e.g. display name) because the defaults differed from the
+    // render-time fallback in the table.
     editingIndexAttributes = JSON.parse(JSON.stringify(indexAttributes));
-    if (editingIndexAttributes.length === 0) {
-      editingIndexAttributes = [
-        { key: "displayname", name: "Display Name" },
-        { key: "status", name: "Status" },
-        { key: "author", name: "Author" },
-        { key: "updated_at", name: "Last Modified" },
-      ];
-    }
     const meta: any = folderMetadata ?? {};
     editingMeta = {
       displayname: {
@@ -1229,7 +1275,7 @@
                 body: {
                   ...folderMetadata?.payload?.body,
                   index_attributes: editingIndexAttributes.filter(
-                    (a) => a.key.trim() && a.name.trim(),
+                    (a) => a?.key?.trim() && a?.name?.trim(),
                   ),
                 },
               },
@@ -2063,6 +2109,34 @@
                     ></path></svg>
                 </button>
               {/if}
+              <button
+                title={$_("admin_content.actions.duplicate")}
+                aria-label={$_("admin_content.actions.duplicate")}
+                onclick={(e) => {
+                  e.stopPropagation();
+                  handleDuplicateItem(item);
+                }}
+                disabled={duplicatingShortname === item.shortname}
+                class="text-[12px] font-semibold text-purple-600 hover:text-purple-800 flex items-center disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {#if duplicatingShortname === item.shortname}
+                  <div class="spinner spinner-sm"></div>
+                {:else}
+                  <svg
+                    class="w-4 h-4"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2"
+                    ></path>
+                  </svg>
+                {/if}
+              </button>
               <button
                 title="Copy"
                 aria-label="Copy"

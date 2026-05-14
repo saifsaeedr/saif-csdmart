@@ -440,3 +440,38 @@ dialog[open] {
   }
 }
 
+/* ─── RTL Helpers ───
+   Tailwind's physical utilities (ml-*, mr-*, left-*, right-*, text-left,
+   text-right, border-l/r-*) do not auto-flip under [dir="rtl"]. The rules
+   below mirror the most common offenders so admin pages, tables, modals,
+   and breadcrumbs adapt to RTL without per-file rewrites. */
+[dir="rtl"] {
+  /* Text alignment */
+  .text-left  { text-align: right; }
+  .text-right { text-align: left; }
+
+  /* Force LTR-style flex rows to mirror in RTL */
+  .flex-row  { flex-direction: row-reverse; }
+  .inline-flex.flex-row { flex-direction: row-reverse; }
+
+  /* Action buttons / breadcrumb chevrons that explicitly rotate must flip */
+  .rtl-mirror,
+  .group-open\:rotate-90.rtl-mirror { transform: scaleX(-1); }
+
+  /* Tables: keep header/cell alignment with text direction */
+  table th,
+  table td { text-align: right; }
+  table th[align="left"],
+  table td[align="left"] { text-align: right; }
+  table th[align="right"],
+  table td[align="right"] { text-align: left; }
+
+  /* Common border-side overrides used for tabs / dividers */
+  .border-l { border-left: 0; border-right: 1px solid; }
+  .border-r { border-right: 0; border-left: 1px solid; }
+
+  /* Floats (rare but used by some legacy components) */
+  .float-left  { float: right; }
+  .float-right { float: left; }
+}
+

@@ -8,6 +8,7 @@
   import { getWebSocketService } from "@/lib/services/websocket";
   import { wsConnected } from "@/stores/websocket";
   import { isPublicRoute } from "@/lib/constants";
+  import { website } from "@/config";
 
   $goto;
 
@@ -19,7 +20,7 @@
   });
 
   let isMenuOpen = $state(false);
-  let isRTL = $locale === "ar" || $locale === "ku";
+  let isRTL = $derived($locale === "ar" || $locale === "ku");
 
   let removeListener: (() => void) | null = null;
 
@@ -510,84 +511,90 @@
                       </svg>
                       <span>{$_("dashboard") || "Dashboard"}</span>
                     </button>
-                    <button
-                      aria-label={`Chat & Messaging`}
-                      onclick={() => handleMenuItemClick("/messaging")}
-                      class="menu-item"
-                    >
-                      <svg
-                        class="menu-icon"
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
+                    {#if website.enable_chat}
+                      <button
+                        aria-label={`Chat & Messaging`}
+                        onclick={() => handleMenuItemClick("/messaging")}
+                        class="menu-item"
                       >
-                        <path
+                        <svg
+                          class="menu-icon"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            stroke-width="2"
+                            d="M7 8h10M7 12h6m-9 8l2-4h10a4 4 0 004-4V6a4 4 0 00-4-4H6a4 4 0 00-4 4v10a4 4 0 004 4z"
+                          />
+                        </svg>
+
+                        <span>{$_("chat")}</span>
+                      </button>
+                    {/if}
+                    {#if website.enable_surveys}
+                      <button
+                        aria-label={`Surveys`}
+                        onclick={() => handleMenuItemClick("/surveys")}
+                        class="menu-item"
+                      >
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          viewBox="0 0 24 24"
+                          width="24"
+                          height="24"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-width="1.6"
                           stroke-linecap="round"
                           stroke-linejoin="round"
-                          stroke-width="2"
-                          d="M7 8h10M7 12h6m-9 8l2-4h10a4 4 0 004-4V6a4 4 0 00-4-4H6a4 4 0 00-4 4v10a4 4 0 004 4z"
-                        />
-                      </svg>
+                          class="menu-icon"
+                        >
+                          <rect
+                            x="4"
+                            y="3"
+                            width="16"
+                            height="18"
+                            rx="2"
+                            ry="2"
+                          />
+                          <line x1="8" y1="8" x2="16" y2="8" />
+                          <line x1="8" y1="12" x2="16" y2="12" />
+                          <line x1="8" y1="16" x2="13" y2="16" />
+                          <polyline points="6 16 7.5 17.5 10 15" />
+                        </svg>
 
-                      <span>{$_("chat")}</span>
-                    </button>
-                    <button
-                      aria-label={`Surveys`}
-                      onclick={() => handleMenuItemClick("/surveys")}
-                      class="menu-item"
-                    >
-                      <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        viewBox="0 0 24 24"
-                        width="24"
-                        height="24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="1.6"
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        class="menu-icon"
+                        <span>{$_("surveys._val")}</span>
+                      </button>
+                    {/if}
+
+                    {#if website.enable_notifications}
+                      <button
+                        aria-label={`Notifications`}
+                        onclick={() => handleMenuItemClick("/notifications")}
+                        class="menu-item"
                       >
-                        <rect
-                          x="4"
-                          y="3"
-                          width="16"
-                          height="18"
-                          rx="2"
-                          ry="2"
-                        />
-                        <line x1="8" y1="8" x2="16" y2="8" />
-                        <line x1="8" y1="12" x2="16" y2="12" />
-                        <line x1="8" y1="16" x2="13" y2="16" />
-                        <polyline points="6 16 7.5 17.5 10 15" />
-                      </svg>
-
-                      <span>{$_("surveys._val")}</span>
-                    </button>
-
-                    <button
-                      aria-label={`Notifications`}
-                      onclick={() => handleMenuItemClick("/notifications")}
-                      class="menu-item"
-                    >
-                      <svg
-                        class="menu-icon {renderNotificationIconColor()}"
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
-                      >
-                        <path
-                          stroke-linecap="round"
-                          stroke-linejoin="round"
-                          stroke-width="2"
-                          d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"
-                        />
-                      </svg>
-                      <span>{$_("notifications")}</span>
-                      {#if $newNotificationType}
-                        <span class="notification-badge"></span>
-                      {/if}
-                    </button>
+                        <svg
+                          class="menu-icon {renderNotificationIconColor()}"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            stroke-width="2"
+                            d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"
+                          />
+                        </svg>
+                        <span>{$_("notifications")}</span>
+                        {#if $newNotificationType}
+                          <span class="notification-badge"></span>
+                        {/if}
+                      </button>
+                    {/if}
                     <button
                       aria-label={`My Profile`}
                       onclick={() => handleMenuItemClick("/me")}

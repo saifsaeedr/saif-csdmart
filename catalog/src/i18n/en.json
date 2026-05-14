@@ -189,7 +189,10 @@
       "create_folder": "Create Folder",
       "create_new_item": "Create New Item",
       "create_schema": "Create Schema",
-      "create_workflow": "Create Workflow"
+      "create_workflow": "Create Workflow",
+      "duplicate": "Duplicate",
+      "duplicate_success": "Item duplicated",
+      "duplicate_failed": "Failed to duplicate item"
     },
     "settings_modal": {
       "title": "Settings",
@@ -368,6 +371,42 @@
       "name": "Name",
       "owner": "Owner",
       "updated": "Updated Date"
+    }
+  },
+  "admin_settings": {
+    "title": "Settings",
+    "subtitle": "Review and resolve critical resources required by reports, polls, and surveys.",
+    "back_to_dashboard": "Back to Admin",
+    "recheck": "Re-check",
+    "checking": "Checking…",
+    "checking_resources": "Checking critical resources…",
+    "critical_resources": {
+      "title": "Critical Resources",
+      "description": "These resources must exist on the server for application features to work correctly.",
+      "status_ok": "All resources OK",
+      "status_issues": "Action required"
+    },
+    "issues": {
+      "heading": "Missing Application Resources",
+      "missing_folders": "Missing folders in the applications space",
+      "missing_workflow": "The report_workflow is missing in the workflows folder.",
+      "missing_report_schema": "The report schema is missing in the schema folder.",
+      "missing_workflow_schema": "The workflow schema is missing in the schema folder.",
+      "missing_critical": "Missing critical resources in the management space",
+      "required_note": "These are required for reports, polls, and surveys to function properly.",
+      "fix_button": "Create Missing Resources",
+      "fixing": "Creating…"
+    },
+    "fixed": {
+      "heading": "Resources Created Successfully",
+      "body": "All required folders, workflows, and schemas have been created in the applications space.",
+      "workflow_created": "has been set up with default states.",
+      "report_schema_created": "schema has been created.",
+      "workflow_schema_created": "schema has been created."
+    },
+    "healthy": {
+      "heading": "Everything looks good",
+      "body": "All critical resources are present and accessible."
     }
   },
   "admin_item_detail": {

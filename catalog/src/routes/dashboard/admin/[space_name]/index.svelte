@@ -967,10 +967,10 @@
             ></path>
           </svg>
           <h3 class="text-lg font-medium text-gray-900 mb-2">
-            {$_("search_filters.no_results_title")}
+            {$_("search_filters.no_results.title")}
           </h3>
           <p class="text-gray-500 mb-4">
-            {$_("search_filters.no_results_description")}
+            {$_("search_filters.no_results.description")}
           </p>
           <button
             onclick={clearFilters}

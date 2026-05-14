@@ -17,7 +17,7 @@
   let showError = false;
   let errors: { identifier?: string; password?: string } = {};
   let isError: boolean;
-  const isRTL = $locale === "ar" || $locale === "ku";
+  $: isRTL = $locale === "ar" || $locale === "ku";
 
   function isEmail(input: string): boolean {
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input);

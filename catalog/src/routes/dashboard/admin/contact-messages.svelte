@@ -18,7 +18,7 @@
   let replyContent = $state("");
   let sendingReply = $state(false);
 
-  const isRTL = $locale === "ar" || $locale === "ku";
+  const isRTL = $derived($locale === "ar" || $locale === "ku");
 
   function hasAttachment(message: any): boolean {
     return message.attachments && message.attachments.length > 0;

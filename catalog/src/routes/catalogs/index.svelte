@@ -13,6 +13,7 @@
   import { formatNumber, formatNumberInText } from "@/lib/helpers";
   import { QueryType } from "@edraj/tsdmart";
   import { user, getCurrentScope } from "@/stores/user";
+  import { website } from "@/config";
 
   $goto;
 
@@ -112,9 +113,11 @@
   }
 
   function handleSpaceClick(space: any) {
-    $goto("/catalogs/[space_name]", {
-      space_name: space.shortname,
-    });
+    const target =
+      website.use_admin_space_view === true
+        ? "/dashboard/admin/[space_name]"
+        : "/catalogs/[space_name]";
+    $goto(target, { space_name: space.shortname });
   }
 
   function handleRecordClick(record: any) {

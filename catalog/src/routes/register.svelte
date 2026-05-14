@@ -65,7 +65,7 @@
   };
   let errors: Errors = $state({});
 
-  const isRTL = $locale === "ar" || $locale === "ku";
+  const isRTL = $derived($locale === "ar" || $locale === "ku");
 
   function parseConfessors(text: string): string[] {
     if (!text.trim()) return [];

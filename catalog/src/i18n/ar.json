@@ -189,7 +189,10 @@
       "create_folder": "إنشاء مجلد",
       "create_new_item": "إنشاء عنصر جديد",
       "create_schema": "إنشاء مخطط",
-      "create_workflow": "إنشاء سير عمل"
+      "create_workflow": "إنشاء سير عمل",
+      "duplicate": "تكرار",
+      "duplicate_success": "تم تكرار العنصر",
+      "duplicate_failed": "فشل تكرار العنصر"
     },
     "settings_modal": {
       "title": "الإعدادات",
@@ -356,6 +359,42 @@
       "name": "الاسم",
       "owner": "المالك",
       "updated": "تاريخ التحديث"
+    }
+  },
+  "admin_settings": {
+    "title": "الإعدادات",
+    "subtitle": "راجِع الموارد الأساسية اللازمة للتقارير والاستطلاعات وحلّ أي نواقص.",
+    "back_to_dashboard": "العودة للوحة التحكم",
+    "recheck": "إعادة الفحص",
+    "checking": "جاري الفحص…",
+    "checking_resources": "جاري فحص الموارد الأساسية…",
+    "critical_resources": {
+      "title": "الموارد الأساسية",
+      "description": "يجب أن تكون هذه الموارد متوفّرة على الخادم لكي تعمل ميزات التطبيق بشكل صحيح.",
+      "status_ok": "جميع الموارد متوفرة",
+      "status_issues": "إجراء مطلوب"
+    },
+    "issues": {
+      "heading": "موارد ناقصة في التطبيق",
+      "missing_folders": "مجلدات مفقودة في فضاء التطبيقات",
+      "missing_workflow": "‎report_workflow‎ مفقود في مجلد سير العمل.",
+      "missing_report_schema": "مخطط ‎report‎ مفقود في مجلد المخططات.",
+      "missing_workflow_schema": "مخطط ‎workflow‎ مفقود في مجلد المخططات.",
+      "missing_critical": "موارد أساسية مفقودة في فضاء الإدارة",
+      "required_note": "هذه الموارد ضرورية لعمل التقارير والاستطلاعات والاستبيانات.",
+      "fix_button": "إنشاء الموارد الناقصة",
+      "fixing": "جاري الإنشاء…"
+    },
+    "fixed": {
+      "heading": "تم إنشاء الموارد بنجاح",
+      "body": "تم إنشاء كل المجلدات وسير العمل والمخططات المطلوبة في فضاء التطبيقات.",
+      "workflow_created": "تم إعداده بالحالات الافتراضية.",
+      "report_schema_created": "تم إنشاء المخطط.",
+      "workflow_schema_created": "تم إنشاء المخطط."
+    },
+    "healthy": {
+      "heading": "كل شيء على ما يرام",
+      "body": "جميع الموارد الأساسية متوفّرة وقابلة للوصول."
     }
   },
   "admin_item_detail": {

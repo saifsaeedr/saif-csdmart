@@ -2,6 +2,7 @@
   import { createEventDispatcher } from "svelte";
   import { Dmart, QueryType } from "@edraj/tsdmart";
   import { _ } from "svelte-i18n";
+  import { applyFolderContentDefaults } from "@/lib/folder_defaults";
 
   const dispatch = createEventDispatcher();
 
@@ -15,47 +16,7 @@
     fullWidth?: boolean;
   } = $props();
 
-  content = {
-    icon: content.icon || "",
-    icon_closed: content.icon_closed || "",
-    icon_opened: content.icon_opened || "",
-    shortname_title: content.shortname_title || "",
-
-    index_attributes: content.index_attributes || [],
-
-    query: content.query || {
-      type: "",
-      search: "",
-      filter_types: [],
-    },
-
-    search_columns: content.search_columns || [],
-    csv_columns: content.csv_columns || [],
-
-    sort_by: content.sort_by || "",
-    sort_type: content.sort_type || "",
-
-    content_resource_types: content.content_resource_types || [],
-    content_schema_shortnames: content.content_schema_shortnames || [],
-    workflow_shortnames: content.workflow_shortnames || [],
-    enable_pdf_schema_shortnames: content.enable_pdf_schema_shortnames || [],
-
-    allow_view: content.allow_view || true,
-    allow_create: content.allow_create || true,
-    allow_update: content.allow_update || true,
-    allow_delete: content.allow_delete || false,
-    allow_create_category: content.allow_create_category || false,
-    allow_csv: content.allow_csv || false,
-    allow_upload_csv: content.allow_upload_csv || false,
-    use_media: content.use_media || false,
-    stream: content.stream || false,
-    expand_children: content.expand_children || false,
-    disable_filter: content.disable_filter || false,
-
-    ...content,
-  };
-
-  if (!content.query) content.query = {};
+  content = applyFolderContentDefaults(content);
 
   let errors: Record<string, any> = $state({});
 

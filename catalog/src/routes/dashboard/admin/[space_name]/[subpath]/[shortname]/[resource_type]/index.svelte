@@ -23,6 +23,7 @@
   import { ContentType, ResourceType, DmartScope } from "@edraj/tsdmart";
   import { _, locale } from "@/i18n";
   import { derived as derivedStore, writable } from "svelte/store";
+  import { website } from "@/config";
   import Attachment from "@/components/Attachments.svelte";
   import HtmlEditor from "@/components/editors/HtmlEditor.svelte";
   import MarkdownEditor from "@/components/editors/MarkdownEditor.svelte";
@@ -595,7 +596,7 @@
 
       if (success) {
         showDeleteModal.set(false);
-        $goto("/dashboard/admin/[space_name]/", {
+        $goto("/dashboard/admin/[space_name]/[subpath]", {
           space_name: spaceNameValue,
           subpath: actualSubpathValue,
         });
@@ -1066,7 +1067,7 @@
                             editable={true}
                             schemaShortname={itemDataValue?.payload?.schema_shortname}
                             spaceName={$params.space_name}
-                            subpath={$params.subpath}
+                            subpath={actualSubpathValue}
                             shortname={$params.shortname}
                             onSaved={(d) => { itemDataValue.payload.body = d; }}
                           />
@@ -1113,9 +1114,11 @@
               {/if}
 
               <!-- Comments and Reactions Section -->
+              {#if website.enable_reactions || website.enable_comments}
               <div class="mt-10 pt-8 border-t border-gray-100">
                 <!-- Action Buttons -->
                 <div class="flex items-center gap-6 mb-6">
+                  {#if website.enable_reactions}
                   <button
                     onclick={handleReaction}
                     class="flex items-center gap-2 px-3 py-1.5 rounded-xl font-medium transition-all duration-200 {userReactionEntry
@@ -1135,7 +1138,9 @@
                         0})</span
                     >
                   </button>
+                  {/if}
 
+                  {#if website.enable_comments}
                   <div class="flex items-center gap-2 text-gray-600">
                     <MessagesSolid class="w-5 h-5" />
                     <span>{$_("entry_detail.comments.title")}</span>
@@ -1144,8 +1149,10 @@
                         0})</span
                     >
                   </div>
+                  {/if}
                 </div>
 
+                {#if website.enable_comments}
                 <!-- Add Comment -->
                 <div class="bg-gray-50/50 rounded-2xl p-6 mb-6">
                   <h4
@@ -1263,7 +1270,9 @@
                     </p>
                   </div>
                 {/if}
+                {/if}
               </div>
+              {/if}
             </div>
           {/if}
           {#if $activeTab === "overview"}
@@ -2663,7 +2672,7 @@
                           isAdmin={true}
                           schemaShortname={itemDataValue?.payload?.schema_shortname}
                           spaceName={$params.space_name}
-                          subpath={$params.subpath}
+                          subpath={actualSubpathValue}
                           shortname={$params.shortname}
                           onSaved={(d) => { jsonEditFormValue = d; }}
                         />
