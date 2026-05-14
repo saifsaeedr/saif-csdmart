@@ -57,6 +57,27 @@ public sealed partial class DmartClient : IDisposable
     public DmartClient(string baseUrl, HttpClient http)
         : this(baseUrl, http, ownsHttp: false) { }
 
+    // Options-based ctor — same shape as Dmart.SqlAdapter's
+    // `new DmartSqlAdapter(new DmartDb(new DmartDbOptions { ... }))` pattern.
+    // The options bag covers BaseUrl (or DMART_BASE_URL env fallback),
+    // optional pre-set bearer token, HttpClient timeout, and any default
+    // headers to attach to every request. Owns its HttpClient.
+    public DmartClient(DmartClientOptions options)
+        : this(ResolveAndValidate(options), new HttpClient(), ownsHttp: true)
+    {
+        ApplyOptions(options, isOwnedHttp: true);
+    }
+
+    // Options-based ctor with a caller-owned HttpClient (typed-client / DI).
+    // Timeout is intentionally NOT applied here — the consumer's
+    // IHttpClientFactory wiring already controls HttpClient lifetime and
+    // tuning, and overwriting Timeout could break shared-client setups.
+    public DmartClient(DmartClientOptions options, HttpClient http)
+        : this(ResolveAndValidate(options), http, ownsHttp: false)
+    {
+        ApplyOptions(options, isOwnedHttp: false);
+    }
+
     private DmartClient(string baseUrl, HttpClient http, bool ownsHttp)
     {
         if (string.IsNullOrWhiteSpace(baseUrl))
@@ -64,6 +85,26 @@ public sealed partial class DmartClient : IDisposable
         BaseUrl = baseUrl.TrimEnd('/');
         _http = http ?? throw new ArgumentNullException(nameof(http));
         _ownsHttp = ownsHttp;
+    }
+
+    private static string ResolveAndValidate(DmartClientOptions options)
+    {
+        if (options is null) throw new ArgumentNullException(nameof(options));
+        return options.ResolveBaseUrl();
+    }
+
+    private void ApplyOptions(DmartClientOptions options, bool isOwnedHttp)
+    {
+        if (!string.IsNullOrEmpty(options.AuthToken)) _authToken = options.AuthToken;
+        if (isOwnedHttp && options.Timeout.HasValue) _http.Timeout = options.Timeout.Value;
+        if (options.DefaultHeaders.Count > 0)
+        {
+            // TryAddWithoutValidation skips header-name validation so callers
+            // can pass non-standard names (X-Tenant-Id, etc.) without the
+            // FormatException that strict Add() would throw.
+            foreach (var kv in options.DefaultHeaders)
+                _http.DefaultRequestHeaders.TryAddWithoutValidation(kv.Key, kv.Value);
+        }
     }
 
     public void Dispose()
@@ -166,13 +207,33 @@ public sealed partial class DmartClient : IDisposable
         var envelope = await SendEnvelopeAsync(req, ct).ConfigureAwait(false);
 
         // Python parity: login returns records[0].attributes.access_token.
-        var token = envelope.Records?.FirstOrDefault()?.Attributes?.TryGetValue("access_token", out var t) == true
-            ? (t is JsonElement el ? el.GetString() : t?.ToString())
-            : null;
-        if (string.IsNullOrEmpty(token))
+        // Token capture is centralized in TryExtractAndStoreToken; a missing
+        // token on a successful response is a server contract bug and we
+        // surface it loudly.
+        if (!TryExtractAndStoreToken(envelope))
             throw new DmartException(500, new Error(
                 ErrorTypes.Request, 500, "login response missing access_token", null));
-        _authToken = token;
+        return envelope;
+    }
+
+    // POST /user/login — alternative identifier flow (parity with tsdmart's
+    // loginBy). The server's login endpoint accepts whichever identifier is
+    // present in the body (shortname, email, msisdn) plus the password, so
+    // this just merges credentials with password and posts. Token is captured
+    // the same way LoginAsync does it.
+    public async Task<Response> LoginByAsync(
+        IReadOnlyDictionary<string, string> credentials, string password,
+        CancellationToken ct = default)
+    {
+        if (credentials is null) throw new ArgumentNullException(nameof(credentials));
+        var body = new Dictionary<string, object?>(StringComparer.Ordinal);
+        foreach (var kv in credentials) body[kv.Key] = kv.Value;
+        body["password"] = password;
+        using var req = BuildRequest(HttpMethod.Post, "/user/login", Json(body));
+        var envelope = await SendEnvelopeAsync(req, ct).ConfigureAwait(false);
+        if (!TryExtractAndStoreToken(envelope))
+            throw new DmartException(500, new Error(
+                ErrorTypes.Request, 500, "login response missing access_token", null));
         return envelope;
     }
 

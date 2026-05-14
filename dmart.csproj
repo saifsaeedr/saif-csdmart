@@ -90,6 +90,13 @@
     <Compile Remove="custom_plugins_sdk/**" />
     <Content Remove="custom_plugins_sdk/**" />
     <None Remove="custom_plugins_sdk/**" />
+    <!-- Dmart.SqlAdapter is a drop-in SDK consumed by external ASP.NET
+         projects. Like dmart.Client and Dmart.Models it lives in this repo
+         for development, but it must NOT compile into the dmart server's
+         AOT binary — it uses reflection-based STJ and isn't AOT-safe. -->
+    <Compile Remove="Dmart.SqlAdapter/**" />
+    <Content Remove="Dmart.SqlAdapter/**" />
+    <None Remove="Dmart.SqlAdapter/**" />
     <!-- Dmart.Models lives in its own sibling project (split out for NuGet
          sharing with dmart.Client and any third-party SDKs). The Web SDK's
          default Compile glob would otherwise pull its .cs files into this

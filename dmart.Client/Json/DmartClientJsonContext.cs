@@ -15,6 +15,7 @@
 using System.Collections.Generic;
 using System.Text.Json.Serialization;
 using Dmart.Models.Api;
+using Dmart.Models.Core;
 using Dmart.Models.Enums;
 
 namespace Dmart.Client.Json;
@@ -29,6 +30,14 @@ namespace Dmart.Client.Json;
 [JsonSerializable(typeof(Query))]
 [JsonSerializable(typeof(Error))]
 [JsonSerializable(typeof(ResourceType))]
+[JsonSerializable(typeof(QueryType))]
+// Typed parity facade hydrates these from /managed/entry responses and
+// query records. Keeping them source-gen-registered means the typed CRUD
+// surface (LoadAsync, FetchSpaceAsync, LoadUserMetaAsync, QueryEntriesAsync)
+// stays AOT-safe.
+[JsonSerializable(typeof(Entry))]
+[JsonSerializable(typeof(Space))]
+[JsonSerializable(typeof(User))]
 // Dictionary<string, object?> — used for ad-hoc request bodies (login, otp,
 // reset, etc.). Nullability annotations are erased at runtime, so the
 // canonical typeof() form is Dictionary<string, object>.

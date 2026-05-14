@@ -1,0 +1,84 @@
+<!-- NuGet-published SDK: direct PostgreSQL access to a dmart database. Lives
+     in the dmart repo for development but is intentionally excluded from the
+     main dmart.csproj build (see the <Compile Remove="Dmart.SqlAdapter/**" />
+     block in dmart.csproj) so it never ships inside the AOT server binary.
+
+     TreatAsLocalProperty="PublishAot;StripSymbols" lets PublishAot=false here
+     win even when a consumer publishes their host with PublishAot=true (same
+     trick Dmart.Models and dmart.Client use). -->
+<Project Sdk="Microsoft.NET.Sdk" TreatAsLocalProperty="PublishAot;StripSymbols">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <PublishAot>false</PublishAot>
+    <StripSymbols>false</StripSymbols>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Dmart.SqlAdapter</RootNamespace>
+    <AssemblyName>Dmart.SqlAdapter</AssemblyName>
+    <LangVersion>latest</LangVersion>
+
+    <!-- Same CA2000 false-positive class as dmart.csproj — Npgsql commands &
+         data readers are passed to using-blocks that own disposal; the
+         analyzer can't see the transfer. -->
+    <NoWarn>$(NoWarn);CA2000</NoWarn>
+
+    <!-- NuGet metadata. Reflection-based JSONB serialization isn't AOT-safe,
+         so we deliberately do NOT advertise IsAotCompatible/IsTrimmable —
+         consumers who need AOT plug their own source-gen JsonTypeInfoResolver
+         per the README's "JSON, AOT, and trimming notes" section. -->
+    <IsPackable>true</IsPackable>
+    <PackageId>Dmart.SqlAdapter</PackageId>
+    <Description>Direct PostgreSQL access to a dmart database, mirroring the Python SqlAdapter surface. Drop into any ASP.NET project that needs to read/write dmart-managed data without going through the dmart HTTP API.</Description>
+    <Authors>Kefah T. Issa; edraj contributors</Authors>
+    <Company>edraj</Company>
+    <Copyright>Copyright (c) edraj contributors</Copyright>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/edraj/csdmart</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/edraj/csdmart.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>dmart;cms;ims;edraj;sql;adapter;postgresql;npgsql</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Npgsql" Version="10.0.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Expose `internal` static helpers (BuildSubpathWalk, ToGlobalForm)
+         to the dmart test project so the walk + matching logic can be
+         unit-tested without forcing the helpers public on the SDK surface. -->
+    <InternalsVisibleTo Include="dmart.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Shared DTOs (Entry, User, Space, Locator, Query, enums) — the same
+         contract dmart.Client uses. Keeps both SDKs typing-equivalent so
+         consumers can pass the same Entry value into either backend. -->
+    <ProjectReference Include="..\Dmart.Models\Dmart.Models.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0'">
+    <!-- net10 ships System.Text.Json in the BCL; net8 doesn't bundle the
+         latest source-gen niceties — pin a recent version explicitly. -->
+    <PackageReference Include="System.Text.Json" Version="9.0.11" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- README is required at the package root when PackageReadmeFile is set,
+         so embed it via Pack=true. -->
+    <None Include="README.md" Pack="true" PackagePath="\" />
+    <!-- The sample/ folder is illustrative documentation, not part of the
+         library. Strip it out of the default <Compile> glob so a top-level
+         Program.cs there doesn't try to compile into Dmart.SqlAdapter.dll. -->
+    <Compile Remove="sample/**" />
+    <Content Remove="sample/**" />
+    <None Include="sample/**" />
+  </ItemGroup>
+
+</Project>

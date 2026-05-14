@@ -47,6 +47,10 @@
   <ItemGroup>
     <ProjectReference Include="..\dmart.csproj" />
     <ProjectReference Include="..\dmart.Client\dmart.Client.csproj" />
+    <!-- Pulled in for the SqlAdapter unit tests (parser, permission filter,
+         and PermissionEngine static helpers). The SDK targets net8.0;net10.0;
+         the test project is net10.0-only so the higher TFM is selected. -->
+    <ProjectReference Include="..\Dmart.SqlAdapter\Dmart.SqlAdapter.csproj" />
   </ItemGroup>
 
 </Project>
