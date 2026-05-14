@@ -405,7 +405,7 @@ public sealed class EntryService(
         // truth. Previously we wrote `{action:"update", patch:{...}}` into the
         // diff column — broke the /managed/query?type=history response shape
         // which clients expect to be `{old, new}`-only per key.
-        var historyDiff = ComputeHistoryDiff(existing, merged);
+        var historyDiff = HistoryDiffUtil.ComputeEntryDiff(existing, merged);
         await history.AppendAsync(locator.SpaceName, locator.Subpath, locator.Shortname, actor, null,
             historyDiff.Count > 0 ? historyDiff : null, ct);
 
@@ -413,63 +413,6 @@ public sealed class EntryService(
         if (historyDiff.Count > 0) afterEvent.Attributes["history_diff"] = historyDiff;
         await plugins.AfterActionAsync(afterEvent, ct);
         return Result<Entry>.Ok(merged);
-    }
-
-    // Mirror of dmart's adapter.py::store_entry_diff: flatten both Entries,
-    // produce a {key: {"old": …, "new": …}} dict for every field whose value
-    // changed. Empty dict when nothing relevant differs. Used by the
-    // AfterAction event so plugins can introspect exactly what changed.
-    private static Dictionary<string, object> ComputeHistoryDiff(Entry oldE, Entry newE)
-    {
-        var oldFlat = FlattenEntry(oldE);
-        var newFlat = FlattenEntry(newE);
-        var keys = new HashSet<string>(oldFlat.Keys, StringComparer.Ordinal);
-        keys.UnionWith(newFlat.Keys);
-
-        var diff = new Dictionary<string, object>(StringComparer.Ordinal);
-        foreach (var k in keys)
-        {
-            oldFlat.TryGetValue(k, out var o);
-            newFlat.TryGetValue(k, out var n);
-            if (HistoryDiffUtil.ValuesEqual(o, n)) continue;
-            diff[k] = new Dictionary<string, object?>(StringComparer.Ordinal)
-            {
-                ["old"] = o,
-                ["new"] = n,
-            };
-        }
-        return diff;
-    }
-
-    private static Dictionary<string, object?> FlattenEntry(Entry e)
-    {
-        var d = new Dictionary<string, object?>(StringComparer.Ordinal)
-        {
-            ["is_active"] = e.IsActive,
-            ["owner_shortname"] = e.OwnerShortname,
-            ["owner_group_shortname"] = e.OwnerGroupShortname,
-            ["slug"] = e.Slug,
-            ["tags"] = e.Tags ?? new(),
-            ["state"] = e.State,
-            ["is_open"] = e.IsOpen,
-            ["workflow_shortname"] = e.WorkflowShortname,
-            ["resolution_reason"] = e.ResolutionReason,
-        };
-        if (e.Displayname is not null)
-        {
-            d["displayname.en"] = e.Displayname.En;
-            d["displayname.ar"] = e.Displayname.Ar;
-            d["displayname.ku"] = e.Displayname.Ku;
-        }
-        if (e.Description is not null)
-        {
-            d["description.en"] = e.Description.En;
-            d["description.ar"] = e.Description.Ar;
-            d["description.ku"] = e.Description.Ku;
-        }
-        if (e.Payload?.Body is JsonElement body)
-            HistoryDiffUtil.FlattenJson(body, "payload.body", d);
-        return d;
     }
 
     public async Task<Result<bool>> DeleteAsync(Locator locator, string? actor, CancellationToken ct = default)

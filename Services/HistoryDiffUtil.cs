@@ -1,9 +1,12 @@
 using System.Text.Json;
+using Dmart.DataAdapters.Sql;
+using Dmart.Models.Core;
 
 namespace Dmart.Services;
 
-// Flatten + structural-equality helpers shared by EntryService and UserService
-// for building Python-parity history diffs ({field_path: {old, new}}).
+// Flatten + structural-equality helpers shared by EntryService, UserService,
+// and the native-plugin callback bridge for building Python-parity history
+// diffs ({field_path: {old, new}}).
 internal static class HistoryDiffUtil
 {
     public static void FlattenJson(JsonElement el, string prefix, Dictionary<string, object?> outDict)
@@ -106,5 +109,121 @@ internal static class HistoryDiffUtil
             default:
                 return false;
         }
+    }
+
+    // Python parity: history.diff is stored as {field_path: {old, new}}.
+    // Single source of truth — EntryService.UpdateAsync and the native-plugin
+    // SaveEntryCb both call through here so persisted history and
+    // after_action's attributes.history_diff stay aligned.
+    public static Dictionary<string, object> ComputeEntryDiff(Entry oldE, Entry newE)
+    {
+        var oldFlat = FlattenEntry(oldE);
+        var newFlat = FlattenEntry(newE);
+        var keys = new HashSet<string>(oldFlat.Keys, StringComparer.Ordinal);
+        keys.UnionWith(newFlat.Keys);
+
+        var diff = new Dictionary<string, object>(StringComparer.Ordinal);
+        foreach (var k in keys)
+        {
+            oldFlat.TryGetValue(k, out var o);
+            newFlat.TryGetValue(k, out var n);
+            if (ValuesEqual(o, n)) continue;
+            diff[k] = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["old"] = o,
+                ["new"] = n,
+            };
+        }
+        return diff;
+    }
+
+    private static Dictionary<string, object?> FlattenEntry(Entry e)
+    {
+        var d = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["is_active"] = e.IsActive,
+            ["owner_shortname"] = e.OwnerShortname,
+            ["owner_group_shortname"] = e.OwnerGroupShortname,
+            ["slug"] = e.Slug,
+            ["tags"] = e.Tags ?? new(),
+            ["state"] = e.State,
+            ["is_open"] = e.IsOpen,
+            ["workflow_shortname"] = e.WorkflowShortname,
+            ["resolution_reason"] = e.ResolutionReason,
+        };
+        if (e.Displayname is not null)
+        {
+            d["displayname.en"] = e.Displayname.En;
+            d["displayname.ar"] = e.Displayname.Ar;
+            d["displayname.ku"] = e.Displayname.Ku;
+        }
+        if (e.Description is not null)
+        {
+            d["description.en"] = e.Description.En;
+            d["description.ar"] = e.Description.Ar;
+            d["description.ku"] = e.Description.Ku;
+        }
+        if (e.Payload?.Body is JsonElement body)
+            FlattenJson(body, "payload.body", d);
+        return d;
+    }
+
+    // {field_path: {old, new}} restricted to user-facing fields. Password
+    // hash, AttemptCount, UpdatedAt are deliberately excluded to avoid
+    // leaking secrets and noisy entries — UserService.UpdateProfileAsync and
+    // the native-plugin UpdateUserCb both route through here.
+    public static Dictionary<string, object> ComputeUserDiff(User oldU, User newU)
+    {
+        var oldFlat = FlattenUser(oldU);
+        var newFlat = FlattenUser(newU);
+        var keys = new HashSet<string>(oldFlat.Keys, StringComparer.Ordinal);
+        keys.UnionWith(newFlat.Keys);
+
+        var diff = new Dictionary<string, object>(StringComparer.Ordinal);
+        foreach (var k in keys)
+        {
+            oldFlat.TryGetValue(k, out var o);
+            newFlat.TryGetValue(k, out var n);
+            if (ValuesEqual(o, n)) continue;
+            diff[k] = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["old"] = o,
+                ["new"] = n,
+            };
+        }
+        return diff;
+    }
+
+    private static Dictionary<string, object?> FlattenUser(User u)
+    {
+        var d = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["email"] = u.Email,
+            ["msisdn"] = u.Msisdn,
+            // dmart's wire format for Language is the EnumMember string
+            // ("english"/"arabic"/...), not the lowered C# enum name
+            // ("en"/"ar"/...). Python's history diff carries the wire form,
+            // so use JsonbHelpers.EnumMember to match.
+            ["language"] = JsonbHelpers.EnumMember(u.Language),
+            ["is_email_verified"] = u.IsEmailVerified,
+            ["is_msisdn_verified"] = u.IsMsisdnVerified,
+            ["force_password_change"] = u.ForcePasswordChange,
+            ["device_id"] = u.DeviceId,
+        };
+        if (u.Displayname is not null)
+        {
+            d["displayname.en"] = u.Displayname.En;
+            d["displayname.ar"] = u.Displayname.Ar;
+            d["displayname.ku"] = u.Displayname.Ku;
+        }
+        if (u.Description is not null)
+        {
+            d["description.en"] = u.Description.En;
+            d["description.ar"] = u.Description.Ar;
+            d["description.ku"] = u.Description.Ku;
+        }
+        if (u.Payload?.Body is JsonElement body)
+            FlattenJson(body, "payload.body", d);
+        return d;
     }
 }

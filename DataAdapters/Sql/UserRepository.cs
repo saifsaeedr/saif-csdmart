@@ -172,6 +172,131 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
         await refresher.RefreshAsync(ct);
     }
 
+    // Atomic prior-fetch + upsert for the native-plugin update_user path.
+    // See EntryRepository.UpsertWithPriorAsync for the full rationale —
+    // same pattern (SELECT FOR UPDATE, INSERT ON CONFLICT, RETURNING
+    // xmax = 0) and the same residual race for concurrent inserts of a
+    // brand-new shortname.
+    public async Task<(User? prior, bool inserted)> UpsertWithPriorAsync(User u, CancellationToken ct = default)
+    {
+        u = u with { QueryPolicies = Utils.QueryPolicies.Generate(u) };
+
+        await using var conn = await db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+
+        // users' unique key is `shortname` only — that's also what the
+        // ON CONFLICT below resolves on.
+        User? prior = null;
+        await using (var sel = new NpgsqlCommand(
+            $"{SelectAllColumns} WHERE shortname = $1 FOR UPDATE",
+            conn, tx))
+        {
+            sel.Parameters.Add(new() { Value = u.Shortname });
+            await using var reader = await sel.ExecuteReaderAsync(ct);
+            if (await reader.ReadAsync(ct)) prior = Hydrate(reader);
+        }
+
+        await using var cmd = new NpgsqlCommand("""
+            INSERT INTO users (uuid, shortname, space_name, subpath, is_active, slug,
+                               displayname, description, tags, created_at, updated_at,
+                               owner_shortname, owner_group_shortname, payload,
+                               last_checksum_history, resource_type,
+                               password, roles, groups, acl, relationships,
+                               type, language, email, msisdn, locked_to_device,
+                               is_email_verified, is_msisdn_verified, force_password_change,
+                               device_id, google_id, facebook_id, social_avatar_url,
+                               attempt_count, last_login, notes, query_policies)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,
+                    $22::usertype,$23::language,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37)
+            ON CONFLICT (shortname) DO UPDATE SET
+                space_name = EXCLUDED.space_name,
+                subpath = EXCLUDED.subpath,
+                is_active = EXCLUDED.is_active,
+                slug = EXCLUDED.slug,
+                displayname = EXCLUDED.displayname,
+                description = EXCLUDED.description,
+                tags = EXCLUDED.tags,
+                updated_at = NOW(),
+                owner_shortname = EXCLUDED.owner_shortname,
+                owner_group_shortname = EXCLUDED.owner_group_shortname,
+                payload = EXCLUDED.payload,
+                last_checksum_history = EXCLUDED.last_checksum_history,
+                password = EXCLUDED.password,
+                roles = EXCLUDED.roles,
+                groups = EXCLUDED.groups,
+                acl = EXCLUDED.acl,
+                relationships = EXCLUDED.relationships,
+                type = EXCLUDED.type,
+                language = EXCLUDED.language,
+                email = EXCLUDED.email,
+                msisdn = EXCLUDED.msisdn,
+                locked_to_device = EXCLUDED.locked_to_device,
+                is_email_verified = EXCLUDED.is_email_verified,
+                is_msisdn_verified = EXCLUDED.is_msisdn_verified,
+                force_password_change = EXCLUDED.force_password_change,
+                device_id = EXCLUDED.device_id,
+                google_id = EXCLUDED.google_id,
+                facebook_id = EXCLUDED.facebook_id,
+                social_avatar_url = EXCLUDED.social_avatar_url,
+                attempt_count = EXCLUDED.attempt_count,
+                last_login = EXCLUDED.last_login,
+                notes = EXCLUDED.notes,
+                query_policies = EXCLUDED.query_policies
+            RETURNING (xmax = 0) AS inserted
+            """, conn, tx);
+
+        cmd.Parameters.Add(new() { Value = Guid.Parse(u.Uuid) });
+        cmd.Parameters.Add(new() { Value = u.Shortname });
+        cmd.Parameters.Add(new() { Value = u.SpaceName });
+        cmd.Parameters.Add(new() { Value = u.Subpath });
+        cmd.Parameters.Add(new() { Value = u.IsActive });
+        cmd.Parameters.Add(new() { Value = (object?)u.Slug ?? DBNull.Value });
+        AddJsonb(cmd, JsonbHelpers.ToJsonb(u.Displayname));
+        AddJsonb(cmd, JsonbHelpers.ToJsonb(u.Description));
+        AddJsonbNotNull(cmd, JsonbHelpers.ToJsonbList(u.Tags));
+        cmd.Parameters.Add(new() { Value = u.CreatedAt == default ? TimeUtils.Now() : u.CreatedAt });
+        cmd.Parameters.Add(new() { Value = TimeUtils.Now() });
+        cmd.Parameters.Add(new() { Value = u.OwnerShortname });
+        cmd.Parameters.Add(new() { Value = (object?)u.OwnerGroupShortname ?? DBNull.Value });
+        AddJsonb(cmd, JsonbHelpers.ToJsonb(u.Payload));
+        cmd.Parameters.Add(new() { Value = (object?)u.LastChecksumHistory ?? DBNull.Value });
+        cmd.Parameters.Add(new() { Value = JsonbHelpers.EnumMember(u.ResourceType) });
+        cmd.Parameters.Add(new() { Value = (object?)u.Password ?? DBNull.Value });
+        AddJsonbNotNull(cmd, JsonbHelpers.ToJsonbList(u.Roles));
+        AddJsonbNotNull(cmd, JsonbHelpers.ToJsonbList(u.Groups));
+        AddJsonb(cmd, JsonbHelpers.ToJsonb(u.Acl));
+        AddJsonb(cmd, JsonbHelpers.ToJsonb(u.Relationships));
+        cmd.Parameters.Add(new() { Value = JsonbHelpers.EnumNameLower(u.Type) });
+        cmd.Parameters.Add(new() { Value = JsonbHelpers.EnumNameLower(u.Language) });
+        cmd.Parameters.Add(new() { Value = (object?)u.Email ?? DBNull.Value });
+        cmd.Parameters.Add(new() { Value = (object?)u.Msisdn ?? DBNull.Value });
+        cmd.Parameters.Add(new() { Value = u.LockedToDevice });
+        cmd.Parameters.Add(new() { Value = u.IsEmailVerified });
+        cmd.Parameters.Add(new() { Value = u.IsMsisdnVerified });
+        cmd.Parameters.Add(new() { Value = u.ForcePasswordChange });
+        cmd.Parameters.Add(new() { Value = (object?)u.DeviceId ?? DBNull.Value });
+        cmd.Parameters.Add(new() { Value = (object?)u.GoogleId ?? DBNull.Value });
+        cmd.Parameters.Add(new() { Value = (object?)u.FacebookId ?? DBNull.Value });
+        cmd.Parameters.Add(new() { Value = (object?)u.SocialAvatarUrl ?? DBNull.Value });
+#pragma warning disable CA1508 // Analyzer limitation: int? boxed via (object?) cast IS null when source is null; the ?? is load-bearing.
+        cmd.Parameters.Add(new() { Value = (object?)u.AttemptCount ?? DBNull.Value });
+#pragma warning restore CA1508
+        AddJsonb(cmd, JsonbHelpers.ToJsonb(u.LastLogin));
+        cmd.Parameters.Add(new() { Value = (object?)u.Notes ?? DBNull.Value });
+        cmd.Parameters.Add(new()
+        {
+            Value = u.QueryPolicies.ToArray(),
+            NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text,
+        });
+
+        var raw = await cmd.ExecuteScalarAsync(ct);
+        var inserted = raw is bool flag && flag;
+        await tx.CommitAsync(ct);
+        // user.roles may have changed → clear the in-memory permission cache.
+        await refresher.RefreshAsync(ct);
+        return (prior, inserted);
+    }
+
     public async Task DeleteAsync(string shortname, CancellationToken ct = default)
     {
         await using var conn = await db.OpenAsync(ct);

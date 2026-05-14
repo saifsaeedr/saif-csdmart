@@ -2,12 +2,14 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using Dmart.Config;
 using Dmart.DataAdapters.Sql;
 using Dmart.Models.Api;
 using Dmart.Models.Core;
 using Dmart.Models.Enums;
 using Dmart.Models.Json;
 using Dmart.Services;
+using Microsoft.Extensions.Options;
 
 namespace Dmart.Plugins.Native;
 
@@ -22,10 +24,17 @@ namespace Dmart.Plugins.Native;
 // non-zero = error.
 //
 // Thread model: callbacks are sync (the plugin's hook() is sync from the C
-// side — see NativePluginHandle.CallHook). Async dmart services are bridged
-// with GetAwaiter().GetResult(). This is safe because:
+// side — see NativePluginHandle.CallHook). The [UnmanagedCallersOnly] ABI
+// imposes this: a managed `await` cannot suspend back through a native frame,
+// so every callback must return synchronously or the runtime tears down.
+// Async dmart services are bridged with GetAwaiter().GetResult(). This is
+// safe because:
 //   - each callback invocation runs on a thread-pool thread that dmart
-//     already allocated for the hook dispatch;
+//     already allocated for the hook dispatch — no captured
+//     SynchronizationContext to deadlock against;
+//   - downstream repositories (`EntryRepository`, `UserRepository`,
+//     `HistoryRepository`) use library-style `await` with no
+//     `.ConfigureAwait(true)`, so their continuations run on the pool;
 //   - we never call back into managed code from inside the sync wait, so
 //     no deadlock risk.
 //
@@ -102,6 +111,14 @@ public static unsafe class NativePluginCallbacks
     // so a Volatile.Read isn't strictly necessary.
     private static ILoggerFactory? _loggerFactoryCache;
 
+    // DmartSettings is bound via `services.AddOptions<DmartSettings>().Bind(...)`
+    // in Program.cs and has no IOptionsMonitor registration, so its value is
+    // effectively immutable for the process lifetime. Cache the management
+    // space name to skip a CreateScope + IOptions resolve on every
+    // update_user call. Cleared by SetServicesForTesting so test swaps see
+    // the new settings rather than the prior fixture's.
+    private static string? _mgmtSpaceCache;
+
     // Fills the struct with function pointers and returns a stable pointer
     // that can be handed to every plugin's init() export.
     public static IntPtr GetCallbacksPtr()
@@ -137,14 +154,19 @@ public static unsafe class NativePluginCallbacks
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     private static byte* LoadEntryCb(byte* space, byte* subpath, byte* shortname, byte* resourceType)
     {
+        var logger = GetCallbackLogger();
+        var sp = PtrToString(space) ?? "";
+        var sub = PtrToString(subpath) ?? "";
+        var sn = PtrToString(shortname) ?? "";
         try
         {
-            var sp = PtrToString(space) ?? "";
-            var sub = PtrToString(subpath) ?? "";
-            var sn = PtrToString(shortname) ?? "";
             var rtStr = PtrToString(resourceType);
 
-            if (Services is null) return AllocUtf8("""{"error":"services_not_initialized"}""");
+            if (Services is null)
+            {
+                logger?.LogWarning("load_entry called before services initialized");
+                return AllocUtf8("""{"error":"services_not_initialized"}""");
+            }
             using var scope = Services.CreateScope();
             var entries = scope.ServiceProvider.GetRequiredService<EntryRepository>();
 
@@ -154,12 +176,18 @@ public static unsafe class NativePluginCallbacks
             else
                 entry = entries.GetAsync(sp, sub, sn).GetAwaiter().GetResult();
 
-            if (entry is null) return AllocUtf8("""{"entry":null}""");
+            if (entry is null)
+            {
+                logger?.LogDebug("load_entry miss {Space}/{Subpath}/{Shortname}", sp, sub, sn);
+                return AllocUtf8("""{"entry":null}""");
+            }
+            logger?.LogDebug("load_entry hit {Space}/{Subpath}/{Shortname}", sp, sub, sn);
             var json = JsonSerializer.Serialize(entry, DmartJsonContext.Default.Entry);
             return AllocUtf8(json);
         }
         catch (Exception ex)
         {
+            logger?.LogError(ex, "load_entry failed for {Space}/{Subpath}/{Shortname}", sp, sub, sn);
             return AllocUtf8($$"""{"error":{{JsonEncode(ex.Message)}}}""");
         }
     }
@@ -167,19 +195,30 @@ public static unsafe class NativePluginCallbacks
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     private static byte* LoadUserCb(byte* shortname)
     {
+        var logger = GetCallbackLogger();
+        var sn = PtrToString(shortname) ?? "";
         try
         {
-            var sn = PtrToString(shortname) ?? "";
-            if (Services is null) return AllocUtf8("""{"error":"services_not_initialized"}""");
+            if (Services is null)
+            {
+                logger?.LogWarning("load_user called before services initialized");
+                return AllocUtf8("""{"error":"services_not_initialized"}""");
+            }
             using var scope = Services.CreateScope();
             var users = scope.ServiceProvider.GetRequiredService<UserRepository>();
             var user = users.GetByShortnameAsync(sn).GetAwaiter().GetResult();
-            if (user is null) return AllocUtf8("""{"user":null}""");
+            if (user is null)
+            {
+                logger?.LogDebug("load_user miss {User}", sn);
+                return AllocUtf8("""{"user":null}""");
+            }
+            logger?.LogDebug("load_user hit {User}", sn);
             var json = JsonSerializer.Serialize(user, DmartJsonContext.Default.User);
             return AllocUtf8(json);
         }
         catch (Exception ex)
         {
+            logger?.LogError(ex, "load_user failed for {User}", sn);
             return AllocUtf8($$"""{"error":{{JsonEncode(ex.Message)}}}""");
         }
     }
@@ -187,20 +226,83 @@ public static unsafe class NativePluginCallbacks
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     private static int SaveEntryCb(byte* entryJson)
     {
+        // Marshal-only here; the typed work lives in EmitSaveEntry so tests
+        // can drive history-write + logging without synthesising UTF-8 byte
+        // buffers. Mirrors the LogCb → EmitPluginLog split.
+        var logger = GetCallbackLogger();
         try
         {
             var json = PtrToString(entryJson);
-            if (string.IsNullOrEmpty(json) || Services is null) return 1;
+            if (string.IsNullOrEmpty(json) || Services is null)
+            {
+                logger?.LogWarning("save_entry rejected: empty payload or services not ready");
+                return 1;
+            }
             var entry = JsonSerializer.Deserialize(json, DmartJsonContext.Default.Entry);
-            if (entry is null) return 2;
+            if (entry is null)
+            {
+                logger?.LogWarning("save_entry rejected: deserialize returned null");
+                return 2;
+            }
+            return EmitSaveEntry(entry, logger);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError(ex, "save_entry failed (deserialize)");
+            return 3;
+        }
+    }
+
+    // internal for testing via dmart.Tests. Performs an atomic
+    // prior-fetch + upsert via UpsertWithPriorAsync (SELECT FOR UPDATE +
+    // INSERT ON CONFLICT in one transaction), computes a {field: {old, new}}
+    // diff against the prior row, and appends a history record for non-empty
+    // diffs on the update path. Returns the same 0/1/3 codes the raw cb
+    // surfaces so the C ABI contract is unchanged.
+    //
+    // Create path (`inserted == true`) writes no history row — Python parity
+    // with EntryService.UpdateAsync, which only logs on update.
+    // See the file-header thread-model block for the sync-over-async rationale.
+    internal static int EmitSaveEntry(Entry entry, ILogger? logger)
+    {
+        if (Services is null)
+        {
+            logger?.LogWarning("save_entry rejected: services not ready");
+            return 1;
+        }
+        try
+        {
             using var scope = Services.CreateScope();
             var repo = scope.ServiceProvider.GetRequiredService<EntryRepository>();
-            repo.UpsertAsync(entry).GetAwaiter().GetResult();
+            var history = scope.ServiceProvider.GetRequiredService<HistoryRepository>();
+
+            var (prior, inserted) = repo.UpsertWithPriorAsync(entry).GetAwaiter().GetResult();
+
+            Dictionary<string, object>? diff = null;
+            if (!inserted && prior is not null)
+            {
+                diff = HistoryDiffUtil.ComputeEntryDiff(prior, entry);
+                if (diff.Count > 0)
+                {
+                    history.AppendAsync(entry.SpaceName, entry.Subpath, entry.Shortname,
+                                        PluginInvocationContext.CurrentActor,
+                                        BuildPluginMarkerHeaders(logger, "save_entry"),
+                                        diff).GetAwaiter().GetResult();
+                }
+            }
+
+            logger?.LogInformation(
+                "save_entry ok {Space}/{Subpath}/{Shortname} byPlugin={Plugin} actor={Actor} inserted={Inserted} diffKeys={DiffKeys}",
+                entry.SpaceName, entry.Subpath, entry.Shortname,
+                PluginInvocationContext.CurrentShortname,
+                PluginInvocationContext.CurrentActor,
+                inserted, diff?.Count ?? 0);
             return 0;
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[plugin_cb] save_entry failed: {ex.Message}");
+            logger?.LogError(ex, "save_entry failed for {Space}/{Subpath}/{Shortname}",
+                             entry.SpaceName, entry.Subpath, entry.Shortname);
             return 3;
         }
     }
@@ -208,41 +310,140 @@ public static unsafe class NativePluginCallbacks
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     private static int UpdateUserCb(byte* userJson)
     {
+        var logger = GetCallbackLogger();
         try
         {
             var json = PtrToString(userJson);
-            if (string.IsNullOrEmpty(json) || Services is null) return 1;
+            if (string.IsNullOrEmpty(json) || Services is null)
+            {
+                logger?.LogWarning("update_user rejected: empty payload or services not ready");
+                return 1;
+            }
             var user = JsonSerializer.Deserialize(json, DmartJsonContext.Default.User);
-            if (user is null) return 2;
+            if (user is null)
+            {
+                logger?.LogWarning("update_user rejected: deserialize returned null");
+                return 2;
+            }
+            return EmitUpdateUser(user, logger);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError(ex, "update_user failed (deserialize)");
+            return 3;
+        }
+    }
+
+    // internal for testing via dmart.Tests. Same shape as EmitSaveEntry —
+    // atomic upsert (single-tx SELECT FOR UPDATE + INSERT ON CONFLICT)
+    // followed by a conditional history-append addressing the user under the
+    // configured management space. See EmitSaveEntry for the file-header
+    // sync-over-async rationale.
+    internal static int EmitUpdateUser(User user, ILogger? logger)
+    {
+        if (Services is null)
+        {
+            logger?.LogWarning("update_user rejected: services not ready");
+            return 1;
+        }
+        try
+        {
             using var scope = Services.CreateScope();
             var repo = scope.ServiceProvider.GetRequiredService<UserRepository>();
-            repo.UpsertAsync(user).GetAwaiter().GetResult();
+            var history = scope.ServiceProvider.GetRequiredService<HistoryRepository>();
+
+            var (prior, inserted) = repo.UpsertWithPriorAsync(user).GetAwaiter().GetResult();
+
+            Dictionary<string, object>? diff = null;
+            if (!inserted && prior is not null)
+            {
+                diff = HistoryDiffUtil.ComputeUserDiff(prior, user);
+                if (diff.Count > 0)
+                {
+                    history.AppendAsync(ResolveManagementSpace(scope), "/users", user.Shortname,
+                                        PluginInvocationContext.CurrentActor,
+                                        BuildPluginMarkerHeaders(logger, "update_user"),
+                                        diff).GetAwaiter().GetResult();
+                }
+            }
+
+            logger?.LogInformation(
+                "update_user ok {User} byPlugin={Plugin} actor={Actor} inserted={Inserted} diffKeys={DiffKeys}",
+                user.Shortname,
+                PluginInvocationContext.CurrentShortname,
+                PluginInvocationContext.CurrentActor,
+                inserted, diff?.Count ?? 0);
             return 0;
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[plugin_cb] update_user failed: {ex.Message}");
+            logger?.LogError(ex, "update_user failed for {User}", user.Shortname);
             return 3;
         }
+    }
+
+    // Resolves the management-space name from DmartSettings, caching across
+    // calls. The first call goes through DI; later calls return the cached
+    // value (settings are immutable for the process lifetime — see
+    // _mgmtSpaceCache for the rationale).
+    private static string ResolveManagementSpace(IServiceScope scope)
+    {
+        var cached = Volatile.Read(ref _mgmtSpaceCache);
+        if (cached is not null) return cached;
+        var resolved = scope.ServiceProvider.GetRequiredService<IOptions<DmartSettings>>()
+            .Value.ManagementSpace;
+        Interlocked.CompareExchange(ref _mgmtSpaceCache, resolved, null);
+        return Volatile.Read(ref _mgmtSpaceCache) ?? resolved;
+    }
+
+    // Builds the {x-source: "plugin", x-plugin: <shortname>} marker so audit
+    // consumers can tell plugin-written rows apart from REST writes. When the
+    // dispatcher hasn't seeded PluginInvocationContext.CurrentShortname — a
+    // bug, not a normal path — log a warning and return null so the history
+    // row carries no marker rather than the misleading literal "unknown".
+    private static Dictionary<string, object>? BuildPluginMarkerHeaders(ILogger? logger, string opName)
+    {
+        if (PluginInvocationContext.CurrentShortname is { } shortname)
+        {
+            return new Dictionary<string, object>
+            {
+                ["x-source"] = "plugin",
+                ["x-plugin"] = shortname,
+            };
+        }
+        logger?.LogWarning(
+            "{Op}: PluginInvocationContext.CurrentShortname is null — history row will lack plugin marker",
+            opName);
+        return null;
     }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     private static int SendEmailCb(byte* to, byte* subject, byte* html)
     {
+        var logger = GetCallbackLogger();
+        string? t = null;
         try
         {
-            var t = PtrToString(to);
+            t = PtrToString(to);
             var s = PtrToString(subject);
             var b = PtrToString(html);
-            if (string.IsNullOrEmpty(t) || Services is null) return 1;
+            if (string.IsNullOrEmpty(t) || Services is null)
+            {
+                logger?.LogWarning("send_email rejected: empty 'to' or services not ready");
+                return 1;
+            }
             using var scope = Services.CreateScope();
             var smtp = scope.ServiceProvider.GetRequiredService<SmtpSender>();
             var ok = smtp.SendEmailAsync(t!, s ?? "", b ?? "").GetAwaiter().GetResult();
+            if (ok)
+                logger?.LogInformation("send_email ok to={To} subjectLen={SubjectLen}", t, s?.Length ?? 0);
+            else
+                logger?.LogWarning("send_email returned false to={To}", t);
             return ok ? 0 : 4;
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[plugin_cb] send_email failed: {ex.Message}");
+            logger?.LogError(ex, "send_email failed to={To}", t);
             return 3;
         }
     }
@@ -250,22 +451,32 @@ public static unsafe class NativePluginCallbacks
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     private static int WsBroadcastCb(byte* channel, byte* message)
     {
+        var logger = GetCallbackLogger();
+        string? ch = null;
         try
         {
-            var ch = PtrToString(channel);
+            ch = PtrToString(channel);
             var msg = PtrToString(message);
-            if (string.IsNullOrEmpty(ch) || Services is null) return 1;
+            if (string.IsNullOrEmpty(ch) || Services is null)
+            {
+                logger?.LogWarning("ws_broadcast rejected: empty channel or services not ready");
+                return 1;
+            }
             // WsConnectionManager is a singleton so no scope needed, but use
             // CreateScope for consistency — the resolver short-circuits on
             // singletons.
             using var scope = Services.CreateScope();
             var ws = scope.ServiceProvider.GetRequiredService<WsConnectionManager>();
             var ok = ws.BroadcastToChannelAsync(ch!, msg ?? "").GetAwaiter().GetResult();
+            if (ok)
+                logger?.LogDebug("ws_broadcast ok channel={Channel} bytes={Bytes}", ch, msg?.Length ?? 0);
+            else
+                logger?.LogWarning("ws_broadcast returned false channel={Channel}", ch);
             return ok ? 0 : 4;
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[plugin_cb] ws_broadcast failed: {ex.Message}");
+            logger?.LogError(ex, "ws_broadcast failed channel={Channel}", ch);
             return 3;
         }
     }
@@ -286,12 +497,16 @@ public static unsafe class NativePluginCallbacks
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     private static byte* QueryCb(byte* queryJson)
     {
+        var logger = GetCallbackLogger();
         try
         {
             var json = PtrToString(queryJson);
             if (string.IsNullOrEmpty(json) || Services is null)
+            {
+                logger?.LogWarning("query rejected: empty payload or services not ready");
                 return AllocUtf8(BuildQueryFailJson(InternalErrorCode.SOMETHING_WRONG,
                     "empty query or services not initialized", ErrorTypes.Internal));
+            }
 
             // Single-parse: pull both the actor override (if any) and the
             // typed Query out of the same JsonDocument. Deserializing twice
@@ -300,6 +515,7 @@ public static unsafe class NativePluginCallbacks
             try { doc = JsonDocument.Parse(json); }
             catch (JsonException jex)
             {
+                logger?.LogWarning("query rejected: invalid json: {Message}", jex.Message);
                 return AllocUtf8(BuildQueryFailJson(InternalErrorCode.INVALID_DATA,
                     $"invalid query json: {jex.Message}", ErrorTypes.Request));
             }
@@ -311,12 +527,18 @@ public static unsafe class NativePluginCallbacks
                 try { query = doc.RootElement.Deserialize(DmartJsonContext.Default.Query); }
                 catch (JsonException jex)
                 {
+                    logger?.LogWarning("query rejected: invalid json: {Message}", jex.Message);
                     return AllocUtf8(BuildQueryFailJson(InternalErrorCode.INVALID_DATA,
                         $"invalid query json: {jex.Message}", ErrorTypes.Request));
                 }
                 if (query is null)
+                {
+                    logger?.LogWarning("query rejected: deserialize returned null");
                     return AllocUtf8(BuildQueryFailJson(InternalErrorCode.INVALID_DATA,
                         "invalid query json", ErrorTypes.Request));
+                }
+                logger?.LogDebug("query type={Type} space={Space} actor={Actor}",
+                    query.Type, query.SpaceName, actor);
                 using var scope = Services.CreateScope();
                 var qsvc = scope.ServiceProvider.GetRequiredService<QueryService>();
                 var resp = qsvc.ExecuteAsync(query, actor).GetAwaiter().GetResult();
@@ -325,6 +547,7 @@ public static unsafe class NativePluginCallbacks
         }
         catch (Exception ex)
         {
+            logger?.LogError(ex, "query failed");
             return AllocUtf8(BuildQueryFailJson(InternalErrorCode.SOMETHING_WRONG, ex.Message, ErrorTypes.Exception));
         }
     }
@@ -354,27 +577,45 @@ public static unsafe class NativePluginCallbacks
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     private static byte* GetMediaAttachmentCb(byte* space, byte* subpath, byte* shortname, int* outBufLen)
     {
+        var logger = GetCallbackLogger();
+        var sp = "";
+        var sub = "";
+        var sn = "";
         try
         {
             if (outBufLen != null) *outBufLen = 0;
-            var sp = PtrToString(space) ?? "";
-            var sub = PtrToString(subpath) ?? "";
-            var sn = PtrToString(shortname) ?? "";
-            if (Services is null) return null;
+            sp = PtrToString(space) ?? "";
+            sub = PtrToString(subpath) ?? "";
+            sn = PtrToString(shortname) ?? "";
+            if (Services is null)
+            {
+                logger?.LogWarning("get_media called before services initialized");
+                return null;
+            }
             using var scope = Services.CreateScope();
             var atts = scope.ServiceProvider.GetRequiredService<AttachmentRepository>();
             var att = atts.GetAsync(sp, sub, sn).GetAwaiter().GetResult();
-            if (att is null || !Guid.TryParse(att.Uuid, out var uuid)) return null;
+            if (att is null || !Guid.TryParse(att.Uuid, out var uuid))
+            {
+                logger?.LogDebug("get_media miss {Space}/{Subpath}/{Shortname}", sp, sub, sn);
+                return null;
+            }
             var (bytes, _) = atts.GetMediaAsync(uuid).GetAwaiter().GetResult();
-            if (bytes is null || bytes.Length == 0) return null;
+            if (bytes is null || bytes.Length == 0)
+            {
+                logger?.LogDebug("get_media miss {Space}/{Subpath}/{Shortname}", sp, sub, sn);
+                return null;
+            }
             var ptr = (byte*)Marshal.AllocHGlobal(bytes.Length);
             Marshal.Copy(bytes, 0, (IntPtr)ptr, bytes.Length);
             if (outBufLen != null) *outBufLen = bytes.Length;
+            logger?.LogDebug("get_media ok {Space}/{Subpath}/{Shortname} bytes={Bytes}",
+                sp, sub, sn, bytes.Length);
             return ptr;
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[plugin_cb] get_media_attachment failed: {ex.Message}");
+            logger?.LogError(ex, "get_media failed {Space}/{Subpath}/{Shortname}", sp, sub, sn);
             if (outBufLen != null) *outBufLen = 0;
             return null;
         }
@@ -434,6 +675,35 @@ public static unsafe class NativePluginCallbacks
     {
         Services = services;
         _loggerFactoryCache = null;
+        _mgmtSpaceCache = null;
+    }
+
+    // Host-side logger for callback operations. Uses `plugin.<shortname>.callbacks`
+    // so operator filter rules that already target `plugin.*` cover plugin-driven
+    // host activity. `LogCb` writes to `plugin.<shortname>[.<sub>]` directly —
+    // these two categories share a family but are distinct subcategories so
+    // host-emitted vs plugin-emitted lines are filterable independently.
+    //
+    // Must never throw: every callback caches this at the very top (outside
+    // its try block), and a managed throw in an [UnmanagedCallersOnly] method
+    // would tear down the plugin's hook with no recourse. `Services` can be
+    // mid-disposal during test teardown or shutdown, in which case
+    // `GetService` / `CreateLogger` raise `ObjectDisposedException`. Swallow
+    // and return null — the rest of the callback uses `logger?.Log…` so the
+    // call becomes a no-op.
+    private static ILogger? GetCallbackLogger()
+    {
+        try
+        {
+            var factory = GetLoggerFactory();
+            if (factory is null) return null;
+            var sn = PluginInvocationContext.CurrentShortname ?? "unknown";
+            return factory.CreateLogger($"plugin.{sn}.callbacks");
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static ILoggerFactory? GetLoggerFactory()

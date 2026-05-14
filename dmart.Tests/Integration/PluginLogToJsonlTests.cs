@@ -21,6 +21,11 @@ namespace Dmart.Tests.Integration;
 // runs assertions, then resets shared static state. Tests in this class
 // share NativePluginCallbacks.Services / _loggerFactoryCache, so they are
 // NOT parallelizable — xUnit runs facts in the same class serially.
+//
+// [Collection] join: PluginInvocationContext.CurrentShortname is ThreadStatic
+// and these tests mutate it. Sharing the collection with
+// PluginCallbackHistoryTests forces sequential class execution.
+[Collection(PluginInvocationContextCollection.Name)]
 public sealed class PluginLogToJsonlTests : IDisposable
 {
     private readonly string _logPath;

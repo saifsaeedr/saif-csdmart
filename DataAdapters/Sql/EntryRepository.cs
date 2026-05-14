@@ -166,6 +166,119 @@ public sealed class EntryRepository(Db db)
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    // Atomic prior-fetch + upsert for the native-plugin save_entry path.
+    // Returns the row as it stood before the write (null for inserts) and a
+    // boolean indicating whether this call inserted vs updated. SELECT FOR
+    // UPDATE locks the existing row (if any) so a concurrent REST or plugin
+    // writer can't slip a write between our probe and our upsert — eliminates
+    // the race window the two-statement variant used to expose.
+    //
+    // The "was this an INSERT vs UPDATE" signal comes from RETURNING
+    // (xmax = 0): Postgres sets xmax to 0 on a freshly inserted tuple and to
+    // a non-zero transaction id on an updated one, so the boolean reflects
+    // exactly what the ON CONFLICT branch chose.
+    //
+    // Residual race: under READ COMMITTED, two concurrent inserts of the same
+    // new key can both see "no prior" before the unique-index conflict
+    // resolves. One inserts, one updates — the updater sees `inserted = false`
+    // with a null prior and so writes no history row. That window is narrow
+    // (plugin writers rarely race each other on a brand-new key) and is
+    // acceptable for the plugin audit path. REST `EntryService.UpdateAsync`
+    // already has a separately loaded prior via the service layer, so this
+    // method exists specifically for the plugin callback.
+    public async Task<(Entry? prior, bool inserted)> UpsertWithPriorAsync(Entry e, CancellationToken ct = default)
+    {
+        e = e with { QueryPolicies = Utils.QueryPolicies.Generate(e) };
+
+        await using var conn = await db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+
+        // Lock the existing row (if any). The unique index is
+        // (shortname, space_name, subpath) — same key the ON CONFLICT below
+        // resolves on — so no resource_type filter; if the row exists under
+        // a different type, that change should surface in the diff.
+        Entry? prior = null;
+        await using (var sel = new NpgsqlCommand(
+            $"{SelectAllColumns} WHERE space_name = $1 AND subpath = $2 AND shortname = $3 FOR UPDATE",
+            conn, tx))
+        {
+            sel.Parameters.Add(new() { Value = e.SpaceName });
+            sel.Parameters.Add(new() { Value = e.Subpath });
+            sel.Parameters.Add(new() { Value = e.Shortname });
+            await using var reader = await sel.ExecuteReaderAsync(ct);
+            if (await reader.ReadAsync(ct)) prior = Hydrate(reader);
+        }
+
+        await using var cmd = new NpgsqlCommand("""
+            INSERT INTO entries (uuid, shortname, space_name, subpath, is_active, slug,
+                                 displayname, description, tags, created_at, updated_at,
+                                 owner_shortname, owner_group_shortname, acl, payload, relationships,
+                                 last_checksum_history, resource_type,
+                                 state, is_open, reporter, workflow_shortname, collaborators,
+                                 resolution_reason, query_policies)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
+            ON CONFLICT (shortname, space_name, subpath) DO UPDATE SET
+                is_active = EXCLUDED.is_active,
+                slug = EXCLUDED.slug,
+                displayname = EXCLUDED.displayname,
+                description = EXCLUDED.description,
+                tags = EXCLUDED.tags,
+                updated_at = EXCLUDED.updated_at,
+                owner_shortname = EXCLUDED.owner_shortname,
+                owner_group_shortname = EXCLUDED.owner_group_shortname,
+                acl = EXCLUDED.acl,
+                payload = EXCLUDED.payload,
+                relationships = EXCLUDED.relationships,
+                last_checksum_history = EXCLUDED.last_checksum_history,
+                resource_type = EXCLUDED.resource_type,
+                state = EXCLUDED.state,
+                is_open = EXCLUDED.is_open,
+                reporter = EXCLUDED.reporter,
+                workflow_shortname = EXCLUDED.workflow_shortname,
+                collaborators = EXCLUDED.collaborators,
+                resolution_reason = EXCLUDED.resolution_reason,
+                query_policies = EXCLUDED.query_policies
+            RETURNING (xmax = 0) AS inserted
+            """, conn, tx);
+
+        cmd.Parameters.Add(new() { Value = Guid.Parse(e.Uuid) });
+        cmd.Parameters.Add(new() { Value = e.Shortname });
+        cmd.Parameters.Add(new() { Value = e.SpaceName });
+        cmd.Parameters.Add(new() { Value = e.Subpath });
+        cmd.Parameters.Add(new() { Value = e.IsActive });
+        cmd.Parameters.Add(new() { Value = (object?)e.Slug ?? DBNull.Value });
+        AddJsonb(cmd, JsonbHelpers.ToJsonb(e.Displayname));
+        AddJsonb(cmd, JsonbHelpers.ToJsonb(e.Description));
+        AddJsonbNotNull(cmd, JsonbHelpers.ToJsonbList(e.Tags));
+        cmd.Parameters.Add(new() { Value = e.CreatedAt == default ? TimeUtils.Now() : e.CreatedAt });
+        cmd.Parameters.Add(new() { Value = e.UpdatedAt == default ? TimeUtils.Now() : e.UpdatedAt });
+        cmd.Parameters.Add(new() { Value = e.OwnerShortname });
+        cmd.Parameters.Add(new() { Value = (object?)e.OwnerGroupShortname ?? DBNull.Value });
+        AddJsonb(cmd, JsonbHelpers.ToJsonb(e.Acl));
+        AddJsonb(cmd, JsonbHelpers.ToJsonb(e.Payload));
+        AddJsonb(cmd, JsonbHelpers.ToJsonb(e.Relationships));
+        cmd.Parameters.Add(new() { Value = (object?)e.LastChecksumHistory ?? DBNull.Value });
+        cmd.Parameters.Add(new() { Value = JsonbHelpers.EnumMember(e.ResourceType) });
+        cmd.Parameters.Add(new() { Value = (object?)e.State ?? DBNull.Value });
+#pragma warning disable CA1508 // Analyzer limitation: bool? boxed via (object?) cast IS null when source is null; the ?? is load-bearing.
+        cmd.Parameters.Add(new() { Value = (object?)e.IsOpen ?? DBNull.Value });
+#pragma warning restore CA1508
+        AddJsonb(cmd, JsonbHelpers.ToJsonb(e.Reporter));
+        cmd.Parameters.Add(new() { Value = (object?)e.WorkflowShortname ?? DBNull.Value });
+        AddJsonb(cmd, JsonbHelpers.ToJsonb(e.Collaborators));
+        cmd.Parameters.Add(new() { Value = (object?)e.ResolutionReason ?? DBNull.Value });
+        cmd.Parameters.Add(new()
+        {
+            Value = (e.QueryPolicies ?? new()).ToArray(),
+            NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text,
+        });
+
+        var raw = await cmd.ExecuteScalarAsync(ct);
+        var inserted = raw is bool b && b;
+        await tx.CommitAsync(ct);
+        return (prior, inserted);
+    }
+
     public async Task<bool> DeleteAsync(string spaceName, string subpath, string shortname, ResourceType type, CancellationToken ct = default)
     {
         await using var conn = await db.OpenAsync(ct);
