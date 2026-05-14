@@ -1456,25 +1456,89 @@ app.UseChannelAuth();
 
     app.Use(async (ctx, next) =>
     {
-        await next();
-        // GetEndpoint() is non-null iff a route matched and its handler ran.
-        // Without this guard, buffering middleware (JsonStripEmpties) keeps
-        // HasStarted=false after a handler returns 404, so the legacy
-        // HasStarted/ContentLength check would clobber handler-emitted 404s
-        // (e.g. /managed/entry for a missing resource) with INVALID_ROUTE.
-        if (ctx.Response.StatusCode == 404
-            && ctx.GetEndpoint() is null
-            && !ctx.Response.HasStarted
-            && !ctx.Request.Path.StartsWithSegments(cxbPath)
-            && !ctx.Request.Path.StartsWithSegments(catPath))
+        // Wrap Response.Body in a byte counter so we can distinguish
+        // "handler wrote something" from "handler wrote nothing" regardless
+        // of TestServer / Kestrel buffering semantics. HasStarted alone is
+        // unreliable: TestServer may buffer writes without flipping the
+        // flag, and ContentLength may not be set on small WriteAsync calls.
+        var originalBody = ctx.Response.Body;
+        var counter = new BodyByteCounterStream(originalBody);
+        ctx.Response.Body = counter;
+        try
         {
-            var body = Dmart.Models.Api.Response.Fail(
-                Dmart.Models.Api.InternalErrorCode.INVALID_ROUTE,
-                $"Route not found: {ctx.Request.Method} {ctx.Request.Path}",
-                ErrorTypes.Request);
-            ctx.Response.StatusCode = 422;
-            await ctx.Response.WriteAsJsonAsync(body, Dmart.Models.Json.DmartJsonContext.Default.Response);
+            await next();
         }
+        finally
+        {
+            ctx.Response.Body = originalBody;
+        }
+
+        if (ctx.Response.HasStarted) return;
+        if (counter.BytesWritten > 0) return;
+        if (ctx.Request.Path.StartsWithSegments(cxbPath)) return;
+        if (ctx.Request.Path.StartsWithSegments(catPath)) return;
+
+        // Wrap empty-body request-side errors in the canonical envelope so
+        // every dmart response shape is uniform. Auth (401/403), rate-limit
+        // (429), and 5xx are intentionally NOT wrapped here: JwtBearer,
+        // AuthorizationMiddleware, and the exception handler each emit
+        // their own typed bodies via paths we don't want to clobber.
+        var status = ctx.Response.StatusCode;
+        if (status is not (400 or 404 or 405 or 415)) return;
+
+        var method = ctx.Request.Method;
+        var path = ctx.Request.Path.ToString();
+        int code;
+        string message;
+        // Preserve the wire status code so the HTTP semantic the handler
+        // (or routing) chose survives. The one exception is the existing
+        // "unmapped route" case, which the Python parity convention maps
+        // to 422 — keep that mapping so the established INVALID_ROUTE
+        // contract doesn't shift.
+        int wireStatus = status;
+
+        switch (status)
+        {
+            // GetEndpoint() is non-null iff a route matched and its handler
+            // ran. Null endpoint = unmapped URL.
+            case 404 when ctx.GetEndpoint() is null:
+                code = Dmart.Models.Api.InternalErrorCode.INVALID_ROUTE;
+                message = $"Route not found: {method} {path}";
+                wireStatus = 422;
+                break;
+            case 404:
+                code = Dmart.Models.Api.InternalErrorCode.OBJECT_NOT_FOUND;
+                message = $"Resource not found: {method} {path}";
+                break;
+            // 405 from ASP.NET's routing: URL pattern matched but the HTTP
+            // method did not. Routing populates `Allow: <methods>` on the
+            // empty response; surface the list in the message.
+            case 405:
+                var allowed = ctx.Response.Headers.Allow.ToString();
+                code = Dmart.Models.Api.InternalErrorCode.INVALID_ROUTE;
+                message = string.IsNullOrEmpty(allowed)
+                    ? $"Method not allowed: {method} {path}"
+                    : $"Method not allowed: {method} {path}; allowed: {allowed}";
+                break;
+            case 415:
+                code = Dmart.Models.Api.InternalErrorCode.INVALID_DATA;
+                message = $"Unsupported media type: {method} {path}";
+                break;
+            case 400:
+                code = Dmart.Models.Api.InternalErrorCode.INVALID_DATA;
+                message = $"Bad request: {method} {path}";
+                break;
+            default:
+                return;
+        }
+
+        var body = Dmart.Models.Api.Response.Fail(code, message, ErrorTypes.Request);
+        // Clear any Content-Length the framework set on its empty error
+        // response, otherwise Kestrel refuses to overwrite with the body
+        // length we're about to write.
+        ctx.Response.ContentLength = null;
+        ctx.Response.StatusCode = wireStatus;
+        await ctx.Response.WriteAsJsonAsync(body, Dmart.Models.Json.DmartJsonContext.Default.Response);
     });
 }
 
