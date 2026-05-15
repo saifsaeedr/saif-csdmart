@@ -14,7 +14,14 @@ namespace Dmart.Plugins.Native;
 //   plugin → dmart stdout: {"status":"success","attributes":{...}}
 //
 //   dmart → plugin stdin:  {"type":"info"}
-//   plugin → dmart stdout: {"shortname":"x","type":"hook|api",...}
+//   plugin → dmart stdout: {"shortname":"x","type":"hook|api","version":"1.2.3",...}
+//
+// `version` on the info response is OPTIONAL — when absent the loader
+// records "0.0.0" as a sentinel for "no version declared". The version
+// literal is expected to live in the plugin's build artifact (Python
+// __version__, Go `var Version` set via `-ldflags "-X main.Version=…"`,
+// etc.) so it's baked into the binary the operator deploys, mirroring how
+// dmart bakes its own version via AssemblyInformationalVersion.
 internal sealed class SubprocessPluginHost : IDisposable
 {
     private readonly string _executablePath;

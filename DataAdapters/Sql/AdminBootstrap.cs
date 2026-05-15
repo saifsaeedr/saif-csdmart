@@ -139,7 +139,8 @@ public sealed class AdminBootstrap(
                     Displayname = new Translation(En: "Management"),
                     Description = new Translation(En: "Management space"),
                     Languages = new() { Language.En },
-                    ActivePlugins = new() { "resource_folders_creation", "audit" },
+                    // active_plugins removed: plugins self-declare scope via
+                    // their own filters now (see EventFilter.cs).
                     CreatedAt = TimeUtils.Now(),
                     UpdatedAt = TimeUtils.Now(),
                 };

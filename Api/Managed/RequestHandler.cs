@@ -183,10 +183,8 @@ public static class RequestHandler
                     if (rec.ResourceType is ResourceType.User or ResourceType.Role
                         or ResourceType.Permission or ResourceType.Space)
                     {
-                        // Invalidate the space cache so AfterAction hooks see
-                        // the freshly created/updated space's active_plugins.
-                        if (rec.ResourceType is ResourceType.Space)
-                            plugins.InvalidateSpaceCache(rec.Shortname);
+                        // (No space-cache invalidation — PluginManager no
+                        // longer caches per-space active_plugins.)
 
                         var actionType = req.RequestType switch
                         {
@@ -519,12 +517,11 @@ public static class RequestHandler
         // there's no `unique_fields` carrier in the model. Shortname uniqueness
         // is enforced by the spaces.UpsertAsync conflict target above.
 
-        // Python's Meta.from_record passes ALL attributes to the Space constructor,
-        // including active_plugins. Without active_plugins, no hooks fire for this
-        // space — the resource_folders_creation plugin won't create the /schema folder.
-        var activePlugins = ExtractStringList(attrs, "active_plugins")
-            ?? new() { "resource_folders_creation", "audit" };
-
+        // active_plugins is no longer part of the Space model — plugins
+        // self-declare scope via their own filters. Any "active_plugins"
+        // attribute on the request is ignored (left in attrs for forward-
+        // compat with clients that still send it; the field is dropped at
+        // model construction time).
         var space = new Space
         {
             Uuid = string.IsNullOrEmpty(rec.Uuid) ? Guid.NewGuid().ToString() : rec.Uuid,
@@ -542,7 +539,6 @@ public static class RequestHandler
             HideSpace = attrs.TryGetValue("hide_space", out var hs) ? IsTruthy(hs) : null,
             IndexingEnabled = attrs.TryGetValue("indexing_enabled", out var ie) && IsTruthy(ie),
             Languages = new() { Language.En },
-            ActivePlugins = activePlugins,
             CreatedAt = TimeUtils.Now(),
             UpdatedAt = TimeUtils.Now(),
         };
@@ -710,7 +706,8 @@ public static class RequestHandler
                     Mirrors = attrs.ContainsKey("mirrors") ? ExtractStringList(attrs, "mirrors") : existing.Mirrors,
                     HideFolders = attrs.ContainsKey("hide_folders") ? ExtractStringList(attrs, "hide_folders") : existing.HideFolders,
                     HideSpace = attrs.TryGetValue("hide_space", out var hs) ? IsTruthy(hs) : existing.HideSpace,
-                    ActivePlugins = attrs.ContainsKey("active_plugins") ? ExtractStringList(attrs, "active_plugins") : existing.ActivePlugins,
+                    // active_plugins removed from Space — silently dropped
+                    // here even if the client still sends it.
                     Ordinal = attrs.TryGetValue("ordinal", out var ord) ? ParseInt(ord) ?? existing.Ordinal : existing.Ordinal,
 
                     UpdatedAt = TimeUtils.Now(),

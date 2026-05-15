@@ -18,9 +18,13 @@ public sealed class SpaceRepository(Db db)
                last_checksum_history, resource_type,
                root_registration_signature, primary_website, indexing_enabled,
                capture_misses, check_health, languages, icon, mirrors,
-               hide_folders, hide_space, active_plugins, ordinal, query_policies
+               hide_folders, hide_space, ordinal, query_policies
         FROM spaces
         """;
+        // active_plugins column intentionally NOT selected: the per-space
+        // plugin opt-in list was removed in favor of self-declared plugin
+        // filters (see EventFilter.cs). The DB column stays so older
+        // server versions can downgrade without a schema migration.
 
     public async Task<Space?> GetAsync(string shortname, CancellationToken ct = default)
     {
@@ -54,8 +58,8 @@ public sealed class SpaceRepository(Db db)
                                 last_checksum_history, resource_type,
                                 root_registration_signature, primary_website, indexing_enabled,
                                 capture_misses, check_health, languages, icon, mirrors,
-                                hide_folders, hide_space, active_plugins, ordinal, query_policies)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)
+                                hide_folders, hide_space, ordinal, query_policies)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)
             -- dmart's spaces table has its UNIQUE constraint on the full Unique tuple
             -- (shortname, space_name, subpath), not on shortname alone.
             ON CONFLICT (shortname, space_name, subpath) DO UPDATE SET
@@ -81,10 +85,11 @@ public sealed class SpaceRepository(Db db)
                 mirrors = EXCLUDED.mirrors,
                 hide_folders = EXCLUDED.hide_folders,
                 hide_space = EXCLUDED.hide_space,
-                active_plugins = EXCLUDED.active_plugins,
                 ordinal = EXCLUDED.ordinal,
                 query_policies = EXCLUDED.query_policies
             """, conn);
+            // active_plugins column NOT touched on writes — see SelectAllColumns
+            // comment for the rationale.
 
         cmd.Parameters.Add(new() { Value = Guid.Parse(space.Uuid) });
         cmd.Parameters.Add(new() { Value = space.Shortname });
@@ -124,7 +129,6 @@ public sealed class SpaceRepository(Db db)
         AddJsonb(cmd, JsonbHelpers.ToJsonb(space.HideFolders));
 #pragma warning disable CA1508 // Analyzer limitation: bool?/int? boxed via (object?) cast IS null when source is null; the ?? is load-bearing.
         cmd.Parameters.Add(new() { Value = (object?)space.HideSpace ?? DBNull.Value });
-        AddJsonb(cmd, JsonbHelpers.ToJsonb(space.ActivePlugins));
         cmd.Parameters.Add(new() { Value = (object?)space.Ordinal ?? DBNull.Value });
 #pragma warning restore CA1508
         cmd.Parameters.Add(new()
@@ -216,9 +220,10 @@ public sealed class SpaceRepository(Db db)
             Mirrors = JsonbHelpers.FromListString(r.IsDBNull(25) ? null : r.GetString(25)),
             HideFolders = JsonbHelpers.FromListString(r.IsDBNull(26) ? null : r.GetString(26)),
             HideSpace = r.IsDBNull(27) ? null : r.GetBoolean(27),
-            ActivePlugins = JsonbHelpers.FromListString(r.IsDBNull(28) ? null : r.GetString(28)),
-            Ordinal = r.IsDBNull(29) ? null : r.GetInt32(29),
-            QueryPolicies = r.IsDBNull(30) ? new() : ((string[])r.GetValue(30)).ToList(),
+            // Index 28 was active_plugins (now unread) — Ordinal/QueryPolicies
+            // shifted up by one in SelectAllColumns to match.
+            Ordinal = r.IsDBNull(28) ? null : r.GetInt32(28),
+            QueryPolicies = r.IsDBNull(29) ? new() : ((string[])r.GetValue(29)).ToList(),
         };
     }
 }

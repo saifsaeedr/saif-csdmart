@@ -131,14 +131,16 @@ public sealed class OAuthEndpointsTests : IClassFixture<DmartFactory>
         var users = host.Services.GetRequiredService<UserRepository>();
 
         // Register the two test plugins, one each in the before / after dispatch
-        // tables. always_active=true bypasses the management space's active_plugins
-        // gate. Concurrent=false on the after wrapper so the count is observable
-        // synchronously — the default fire-and-forget branch would race the assert.
+        // tables. The new filter shape mirrors permissions: subpaths is a
+        // dict keyed by space (or __all_spaces__) so the plugin self-declares
+        // scope. Concurrent=false on the after wrapper so the count is
+        // observable synchronously — the default fire-and-forget branch would
+        // race the assert.
         var filter = new EventFilter
         {
-            Subpaths = new() { "users", "/users" },
+            Subpaths = new() { ["__all_spaces__"] = new() { "users" } },
             ResourceTypes = new() { "user" },
-            SchemaShortnames = new() { "__ALL__" },
+            // SchemaShortnames left empty = match every schema (mirrors permissions).
             Actions = new() { "create" },
         };
         plugins.Register(new[]
@@ -147,7 +149,6 @@ public sealed class OAuthEndpointsTests : IClassFixture<DmartFactory>
             {
                 Shortname = beforePlugin.Shortname,
                 IsActive = true,
-                AlwaysActive = true,
                 Filters = filter,
                 ListenTime = EventListenTime.Before,
                 Type = PluginType.Hook,
@@ -156,7 +157,6 @@ public sealed class OAuthEndpointsTests : IClassFixture<DmartFactory>
             {
                 Shortname = afterPlugin.Shortname,
                 IsActive = true,
-                AlwaysActive = true,
                 Filters = filter,
                 ListenTime = EventListenTime.After,
                 Type = PluginType.Hook,

@@ -48,7 +48,6 @@ public sealed class PluginCallbackHistoryTests : IClassFixture<DmartFactory>
             Shortname = spaceName, SpaceName = spaceName, Subpath = "/",
             OwnerShortname = _factory.AdminShortname,
             IsActive = true, Languages = new() { Language.En },
-            ActivePlugins = new(),
             CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
         });
         var sn = "t_" + Guid.NewGuid().ToString("N")[..6];
@@ -127,7 +126,6 @@ public sealed class PluginCallbackHistoryTests : IClassFixture<DmartFactory>
             Shortname = spaceName, SpaceName = spaceName, Subpath = "/",
             OwnerShortname = _factory.AdminShortname,
             IsActive = true, Languages = new() { Language.En },
-            ActivePlugins = new(),
             CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
         });
         var sn = "t_" + Guid.NewGuid().ToString("N")[..6];
@@ -186,7 +184,6 @@ public sealed class PluginCallbackHistoryTests : IClassFixture<DmartFactory>
             Shortname = spaceName, SpaceName = spaceName, Subpath = "/",
             OwnerShortname = _factory.AdminShortname,
             IsActive = true, Languages = new() { Language.En },
-            ActivePlugins = new(),
             CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
         });
         var sn = "t_" + Guid.NewGuid().ToString("N")[..6];

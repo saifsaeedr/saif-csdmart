@@ -7,6 +7,7 @@ public static class InfoEndpoints
         MeHandler.Map(g);
         SettingsHandler.Map(g);
         ManifestHandler.Map(g);
+        PluginsHandler.Map(g);
         return g;
     }
 }

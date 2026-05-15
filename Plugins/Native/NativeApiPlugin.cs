@@ -6,18 +6,26 @@ namespace Dmart.Plugins.Native;
 // Adapts a native .so API plugin behind IApiPlugin. Routes declared in
 // get_info() are mounted, and each request is forwarded to the native
 // handle_request() function as a JSON envelope.
-internal sealed class NativeApiPlugin : IApiPlugin
+//
+// `pluginVersion` is the version string the loader read from the .so via
+// dlsym(dmart_plugin_version) (see NativePluginHandle.CallGetVersion).
+// Surfaced via IPluginVersionSource so PluginManager.ResolveVersion can
+// prefer it over reflective assembly lookup.
+internal sealed class NativeApiPlugin : IApiPlugin, IPluginVersionSource
 {
     private readonly NativePluginHandle _handle;
     private readonly List<NativeRoute> _routes;
 
     public string Shortname { get; }
+    public string PluginVersion { get; }
 
-    public NativeApiPlugin(NativePluginHandle handle, string shortname, List<NativeRoute> routes)
+    public NativeApiPlugin(NativePluginHandle handle, string shortname, List<NativeRoute> routes,
+        string pluginVersion = "0.0.0")
     {
         _handle = handle;
         Shortname = shortname;
         _routes = routes;
+        PluginVersion = pluginVersion;
     }
 
     public void MapRoutes(RouteGroupBuilder group)

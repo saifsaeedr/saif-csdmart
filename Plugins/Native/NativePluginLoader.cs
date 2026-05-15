@@ -65,17 +65,22 @@ public static class NativePluginLoader
                 ? sn.GetString() ?? dirName : dirName;
             var typeStr = root.TryGetProperty("type", out var tp)
                 ? tp.GetString() ?? "hook" : "hook";
+            // Optional version, baked into the subprocess binary by its own
+            // build pipeline (e.g. Go ldflags, Python __version__, npm
+            // package.json read at startup) and surfaced via the info channel.
+            var version = root.TryGetProperty("version", out var ver)
+                ? (ver.GetString() ?? "0.0.0") : "0.0.0";
 
             if (typeStr == "hook")
             {
-                services.AddSingleton<IHookPlugin>(new SubprocessHookPlugin(host));
-                Console.Error.WriteLine($"SUBPROCESS_PLUGIN_REGISTERED: {shortname} (hook) from {execPath}");
+                services.AddSingleton<IHookPlugin>(new SubprocessHookPlugin(host, version));
+                Console.Error.WriteLine($"SUBPROCESS_PLUGIN_REGISTERED: {shortname} v{version} (hook) from {execPath}");
             }
             else if (typeStr == "api")
             {
                 var routes = ParseRoutes(root);
-                services.AddSingleton<IApiPlugin>(new SubprocessApiPlugin(host, routes));
-                Console.Error.WriteLine($"SUBPROCESS_PLUGIN_REGISTERED: {shortname} (api, {routes.Count} routes) from {execPath}");
+                services.AddSingleton<IApiPlugin>(new SubprocessApiPlugin(host, routes, version));
+                Console.Error.WriteLine($"SUBPROCESS_PLUGIN_REGISTERED: {shortname} v{version} (api, {routes.Count} routes) from {execPath}");
             }
             else
             {
@@ -112,6 +117,10 @@ public static class NativePluginLoader
                 ? sn.GetString() ?? dirName : dirName;
             var typeStr = root.TryGetProperty("type", out var tp)
                 ? tp.GetString() ?? "hook" : "hook";
+            // Read the version baked into the .so via the optional
+            // dmart_plugin_version() export. Falls back to "0.0.0" for plugins
+            // that don't declare one — same sentinel used elsewhere.
+            var version = handle.CallGetVersion() ?? "0.0.0";
 
             if (typeStr == "hook")
             {
@@ -121,8 +130,8 @@ public static class NativePluginLoader
                     handle.Dispose();
                     return;
                 }
-                services.AddSingleton<IHookPlugin>(new NativeHookPlugin(handle, shortname));
-                Console.Error.WriteLine($"NATIVE_PLUGIN_REGISTERED: {shortname} (hook, in-process) from {soPath}");
+                services.AddSingleton<IHookPlugin>(new NativeHookPlugin(handle, shortname, version));
+                Console.Error.WriteLine($"NATIVE_PLUGIN_REGISTERED: {shortname} v{version} (hook, in-process) from {soPath}");
             }
             else if (typeStr == "api")
             {
@@ -133,8 +142,8 @@ public static class NativePluginLoader
                     return;
                 }
                 var routes = ParseRoutes(root);
-                services.AddSingleton<IApiPlugin>(new NativeApiPlugin(handle, shortname, routes));
-                Console.Error.WriteLine($"NATIVE_PLUGIN_REGISTERED: {shortname} (api, in-process) from {soPath}");
+                services.AddSingleton<IApiPlugin>(new NativeApiPlugin(handle, shortname, routes, version));
+                Console.Error.WriteLine($"NATIVE_PLUGIN_REGISTERED: {shortname} v{version} (api, in-process) from {soPath}");
             }
             else
             {

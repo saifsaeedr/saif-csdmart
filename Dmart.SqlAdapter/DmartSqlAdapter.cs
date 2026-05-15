@@ -578,7 +578,7 @@ public sealed partial class DmartSqlAdapter
     private const string SpaceColumns = """
         uuid, shortname, is_active, displayname, description,
         created_at, updated_at, owner_shortname, owner_group_shortname, acl,
-        root_registration_signature, active_plugins, languages,
+        root_registration_signature, languages,
         capture_misses, check_health
         """;
 
@@ -886,7 +886,9 @@ public sealed partial class DmartSqlAdapter
         // also requires a SpaceName + Subpath ("/" by convention) for the
         // Metas base, so populate them from the same column.
         var shortname = r.GetString(1);
-        var rawLangs = r.ReadJsonb<List<string>>(12, _json);
+        // active_plugins column was removed from SpaceColumns when the
+        // per-space opt-in list went away; languages shifted to ordinal 11.
+        var rawLangs = r.ReadJsonb<List<string>>(11, _json);
         return new Space
         {
             Uuid = r.GetGuid(0).ToString(),
@@ -902,10 +904,9 @@ public sealed partial class DmartSqlAdapter
             OwnerGroupShortname = r.IsDBNull(8) ? null : r.GetString(8),
             Acl = r.ReadJsonb<List<AclEntry>>(9, _json),
             RootRegistrationSignature = r.IsDBNull(10) ? "" : r.GetString(10),
-            ActivePlugins = r.ReadJsonb<List<string>>(11, _json),
             Languages = (rawLangs ?? new()).Select(JsonbHelpers.ParseEnumMember<Language>).ToList(),
-            CaptureMisses = !r.IsDBNull(13) && r.GetBoolean(13),
-            CheckHealth = !r.IsDBNull(14) && r.GetBoolean(14),
+            CaptureMisses = !r.IsDBNull(12) && r.GetBoolean(12),
+            CheckHealth = !r.IsDBNull(13) && r.GetBoolean(13),
         };
     }
 

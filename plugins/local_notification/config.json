@@ -2,9 +2,9 @@
   "shortname": "local_notification",
   "is_active": false,
   "filters": {
-    "subpaths": ["__ALL__"],
+    "subpaths": { "__all_spaces__": ["__all_subpaths__"] },
     "resource_types": ["ticket", "reaction", "comment"],
-    "schema_shortnames": ["__ALL__"],
+    "schema_shortnames": [],
     "actions": ["create", "update", "progress_ticket"]
   },
   "type": "hook",

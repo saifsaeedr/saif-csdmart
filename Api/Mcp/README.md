@@ -187,25 +187,27 @@ EMBEDDING_API_URL=http://localhost:8080/v1/embeddings
 EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
 ```
 
-### 3. Activate the indexer per space
+### 3. Verify the indexer is active
 
-The `semantic_indexer` plugin is registered but inactive by default. To
-index a space, add it to the space's `active_plugins`:
+The per-space `active_plugins` opt-in list has been removed — plugins
+now declare their own scope via `filters` in their `config.json`. The
+shipped `semantic_indexer` config covers every space with
+`{ "__all_spaces__": ["__all_subpaths__"] }`, so it fires on every
+create/update once the plugin is enabled at the global level.
+
+Confirm it's loaded via `GET /info/plugins`:
+
+```bash
+curl -s http://localhost:5099/info/plugins -H "Authorization: Bearer $TOKEN" | jq
+# Expect a record with shortname "semantic_indexer" in the response.
+```
+
+If you want to LIMIT the indexer to a subset of spaces, edit
+`plugins/semantic_indexer/config.json` and replace the wildcard with
+explicit space keys:
 
 ```json
-POST /managed/request
-{
-  "space_name": "my_space",
-  "request_type": "update",
-  "records": [{
-    "resource_type": "space",
-    "shortname": "my_space",
-    "subpath": "/",
-    "attributes": {
-      "active_plugins": ["resource_folders_creation", "audit", "semantic_indexer"]
-    }
-  }]
-}
+"subpaths": { "my_space": ["__all_subpaths__"], "another_space": ["__all_subpaths__"] }
 ```
 
 From the next create/update onward, entries get embedded automatically.

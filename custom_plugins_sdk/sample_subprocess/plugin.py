@@ -15,8 +15,14 @@ Deploy:
 import json
 import sys
 
+# Single source of truth for the plugin's version. Baked into the binary
+# you ship: dmart reads this back via the {"type":"info"} response and
+# surfaces it on GET /info/plugins and the SUBPROCESS_PLUGIN_REGISTERED
+# log line. Bump alongside any behavior change.
+__version__ = "1.0.0"
+
 def handle_info():
-    return {"shortname": "sample_subprocess", "type": "hook"}
+    return {"shortname": "sample_subprocess", "version": __version__, "type": "hook"}
 
 def handle_hook(event):
     action = event.get("action_type", "?")

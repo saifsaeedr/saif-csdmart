@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Text;
 using Dmart.Models.Core;
 using Dmart.Models.Enums;
 using Dmart.Plugins;
@@ -8,80 +9,125 @@ using Xunit;
 namespace Dmart.Tests.Unit.Services;
 
 // Unit tests for the pure filter-matching logic in PluginManager. Covers the
-// dmart-python-parity behaviors that are easy to regress if someone tweaks the
-// predicate: __ALL__ wildcards, hierarchical subpath matching, the
-// content+schema_shortname special case, and resource-type gating.
+// permission-style filter shape: subpaths is a dict keyed by space, with
+// __all_spaces__ / __all_subpaths__ / __current_user__ sentinels, and empty
+// lists for resource_types / schema_shortnames / actions mean "match all".
+// Legacy flat-array `subpaths` is detected and rejected by HasLegacySubpathsShape.
 public class PluginManagerTests
 {
+    // Helper: builds the "match everything" filter (the most-permissive
+    // equivalent of the old { __ALL__, __ALL__, __ALL__ } setup).
     private static EventFilter AllFilter(params string[] actions) => new()
     {
-        Subpaths = new() { "__ALL__" },
-        ResourceTypes = new() { "__ALL__" },
-        SchemaShortnames = new() { "__ALL__" },
+        Subpaths = new() { ["__all_spaces__"] = new() { "__all_subpaths__" } },
+        ResourceTypes = new(),       // empty = all
+        SchemaShortnames = new(),    // empty = all
         Actions = new(actions),
     };
 
-    private static Event Evt(string subpath, ResourceType? type = null, string? schema = null) => new()
+    private static Event Evt(string subpath, ResourceType? type = null, string? schema = null,
+        string space = "myspace", string user = "tester") => new()
     {
-        SpaceName = "myspace",
+        SpaceName = space,
         Subpath = subpath,
         Shortname = "foo",
         ActionType = ActionType.Create,
         ResourceType = type,
         SchemaShortname = schema,
-        UserShortname = "tester",
+        UserShortname = user,
     };
 
     // ==================== Subpath matching ====================
 
     [Fact]
-    public void AllSubpathsWildcard_Matches_Everything()
+    public void AllSpaces_AllSubpaths_Matches_Everything()
     {
         PluginManager.MatchedFilters(AllFilter("create"), Evt("/any/thing"))
             .ShouldBeTrue();
     }
 
     [Fact]
-    public void Literal_Subpath_Matches_Exact()
+    public void Per_Space_Filter_Matches_Only_That_Space()
     {
-        var f = AllFilter("create") with { Subpaths = new() { "users" } };
-        PluginManager.MatchedFilters(f, Evt("users")).ShouldBeTrue();
-        PluginManager.MatchedFilters(f, Evt("/users")).ShouldBeTrue();
+        var f = AllFilter("create") with
+        {
+            Subpaths = new() { ["myspace"] = new() { "__all_subpaths__" } },
+        };
+        PluginManager.MatchedFilters(f, Evt("/x", space: "myspace")).ShouldBeTrue();
+        PluginManager.MatchedFilters(f, Evt("/x", space: "otherspace")).ShouldBeFalse();
     }
 
     [Fact]
-    public void Literal_Subpath_Matches_Children()
+    public void Literal_Subpath_Matches_Exact_And_Children()
     {
-        // Hierarchical startswith — filter "users" matches event "users/alice"
-        // and "users/alice/profile", but NOT "usersearch".
-        var f = AllFilter("create") with { Subpaths = new() { "users" } };
+        var f = AllFilter("create") with
+        {
+            Subpaths = new() { ["__all_spaces__"] = new() { "users" } },
+        };
+        // Exact match, with and without leading slash on the event.
+        PluginManager.MatchedFilters(f, Evt("users")).ShouldBeTrue();
+        PluginManager.MatchedFilters(f, Evt("/users")).ShouldBeTrue();
+        // Hierarchical startswith — children match.
         PluginManager.MatchedFilters(f, Evt("users/alice")).ShouldBeTrue();
         PluginManager.MatchedFilters(f, Evt("users/alice/profile")).ShouldBeTrue();
+        // Prefix-confusable name must NOT match.
         PluginManager.MatchedFilters(f, Evt("usersearch")).ShouldBeFalse();
     }
 
     [Fact]
-    public void Literal_Subpath_With_Trailing_Slash_Behaves_Same_As_Stripped()
+    public void CurrentUser_Sentinel_Resolves_To_Event_User()
     {
-        var f = AllFilter("create") with { Subpaths = new() { "users/" } };
-        PluginManager.MatchedFilters(f, Evt("users")).ShouldBeTrue();
-        PluginManager.MatchedFilters(f, Evt("users/alice")).ShouldBeTrue();
+        // Mirrors the permission engine's __current_user__ substitution: the
+        // sentinel is replaced by the event's user_shortname before matching,
+        // so a plugin can scope to a user's own subtree.
+        var f = AllFilter("create") with
+        {
+            Subpaths = new() { ["__all_spaces__"] = new() { "users/__current_user__" } },
+        };
+        PluginManager.MatchedFilters(f, Evt("users/alice", user: "alice")).ShouldBeTrue();
+        PluginManager.MatchedFilters(f, Evt("users/bob", user: "alice")).ShouldBeFalse();
     }
 
     [Fact]
-    public void Subpath_Mismatch_Rejects()
+    public void Per_Space_Beats_AllSpaces_Independent_Of_Order()
     {
-        var f = AllFilter("create") with { Subpaths = new() { "groups" } };
-        PluginManager.MatchedFilters(f, Evt("users")).ShouldBeFalse();
+        // Both entries cover the event; either match path should succeed.
+        var f = AllFilter("create") with
+        {
+            Subpaths = new()
+            {
+                ["myspace"] = new() { "tickets" },
+                ["__all_spaces__"] = new() { "shared" },
+            },
+        };
+        PluginManager.MatchedFilters(f, Evt("tickets/open", space: "myspace")).ShouldBeTrue();
+        PluginManager.MatchedFilters(f, Evt("shared/x", space: "anyspace")).ShouldBeTrue();
+        PluginManager.MatchedFilters(f, Evt("other", space: "myspace")).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void Empty_Subpaths_Dict_Matches_Nothing()
+    {
+        // Mirrors the permission engine: an empty subpaths dict means the
+        // plugin doesn't fire on any event. Authors must explicitly opt
+        // in to "everything" via { __all_spaces__: [__all_subpaths__] }.
+        var f = new EventFilter
+        {
+            Subpaths = new(),
+            Actions = new() { "create" },
+        };
+        PluginManager.MatchedFilters(f, Evt("/x")).ShouldBeFalse();
     }
 
     // ==================== Resource type matching ====================
 
     [Fact]
-    public void ResourceType_All_Wildcard_Matches()
+    public void Empty_ResourceTypes_Matches_All()
     {
+        // Empty list = unconstrained, matching permissions' convention.
         var f = AllFilter("create");
         PluginManager.MatchedFilters(f, Evt("/", ResourceType.Ticket)).ShouldBeTrue();
+        PluginManager.MatchedFilters(f, Evt("/", ResourceType.Content)).ShouldBeTrue();
     }
 
     [Fact]
@@ -89,31 +135,27 @@ public class PluginManagerTests
     {
         var f = AllFilter("create") with { ResourceTypes = new() { "user" } };
         PluginManager.MatchedFilters(f, Evt("/", ResourceType.User)).ShouldBeTrue();
-    }
-
-    [Fact]
-    public void ResourceType_Mismatch_Rejects()
-    {
-        var f = AllFilter("create") with { ResourceTypes = new() { "user" } };
         PluginManager.MatchedFilters(f, Evt("/", ResourceType.Ticket)).ShouldBeFalse();
     }
 
     // ==================== Schema shortname (content-only) ====================
 
     [Fact]
-    public void ContentWithoutMatchingSchema_Rejected()
+    public void Empty_SchemaShortnames_Matches_All_Schemas()
     {
-        var f = AllFilter("create") with { SchemaShortnames = new() { "widget" } };
-        PluginManager.MatchedFilters(f, Evt("/", ResourceType.Content, schema: "gadget"))
-            .ShouldBeFalse();
+        var f = AllFilter("create");
+        PluginManager.MatchedFilters(f, Evt("/", ResourceType.Content, schema: "anything"))
+            .ShouldBeTrue();
     }
 
     [Fact]
-    public void ContentWithMatchingSchema_Accepted()
+    public void Content_With_Schema_Filter_Gates_On_Schema()
     {
         var f = AllFilter("create") with { SchemaShortnames = new() { "widget" } };
         PluginManager.MatchedFilters(f, Evt("/", ResourceType.Content, schema: "widget"))
             .ShouldBeTrue();
+        PluginManager.MatchedFilters(f, Evt("/", ResourceType.Content, schema: "gadget"))
+            .ShouldBeFalse();
     }
 
     [Fact]
@@ -124,5 +166,32 @@ public class PluginManagerTests
         var f = AllFilter("create") with { SchemaShortnames = new() { "widget" } };
         PluginManager.MatchedFilters(f, Evt("/", ResourceType.Ticket, schema: "gadget"))
             .ShouldBeTrue();
+    }
+
+    // ==================== Legacy-shape detection ====================
+
+    [Fact]
+    public void HasLegacySubpathsShape_Detects_Old_Flat_Array()
+    {
+        var legacy = Encoding.UTF8.GetBytes(
+            "{ \"shortname\":\"x\", \"filters\": { \"subpaths\": [\"__ALL__\"], \"actions\": [\"create\"] } }");
+        PluginManager.HasLegacySubpathsShape(legacy).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void HasLegacySubpathsShape_Accepts_New_Dict_Shape()
+    {
+        var modern = Encoding.UTF8.GetBytes(
+            "{ \"shortname\":\"x\", \"filters\": { \"subpaths\": { \"__all_spaces__\": [\"__all_subpaths__\"] } } }");
+        PluginManager.HasLegacySubpathsShape(modern).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void HasLegacySubpathsShape_Tolerates_Missing_Filter_Block()
+    {
+        // API-only plugins ship without `filters`; the probe must NOT
+        // mis-classify them as legacy.
+        var apiOnly = Encoding.UTF8.GetBytes("{ \"shortname\":\"api\", \"type\":\"api\" }");
+        PluginManager.HasLegacySubpathsShape(apiOnly).ShouldBeFalse();
     }
 }

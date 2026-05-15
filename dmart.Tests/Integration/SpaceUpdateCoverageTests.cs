@@ -90,7 +90,10 @@ public sealed class SpaceUpdateCoverageTests : IClassFixture<DmartFactory>
                             ["mirrors"] = new List<string> { "https://mirror1", "https://mirror2" },
                             ["hide_folders"] = new List<string> { "_internal", "scratch" },
                             ["hide_space"] = true,
-                            ["active_plugins"] = new List<string> { "plugin_a", "plugin_b" },
+                            // active_plugins on the wire is now silently
+                            // dropped (the field was removed from the Space
+                            // model) — verified below by NOT asserting it
+                            // round-trips.
                             ["ordinal"] = 7,
                         },
                     },
@@ -126,8 +129,8 @@ public sealed class SpaceUpdateCoverageTests : IClassFixture<DmartFactory>
             saved.HideFolders.ShouldNotBeNull();
             saved.HideFolders!.ShouldBe(new[] { "_internal", "scratch" });
             saved.HideSpace.ShouldBe(true);
-            saved.ActivePlugins.ShouldNotBeNull();
-            saved.ActivePlugins!.ShouldBe(new[] { "plugin_a", "plugin_b" });
+            // active_plugins was removed from the Space model — the field
+            // on the request is silently dropped on the way through.
             saved.Ordinal.ShouldBe(7);
         }
         finally

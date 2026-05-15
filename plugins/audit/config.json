@@ -2,9 +2,9 @@
   "shortname": "audit",
   "is_active": true,
   "filters": {
-    "subpaths": ["__ALL__"],
-    "resource_types": ["__ALL__"],
-    "schema_shortnames": ["__ALL__"],
+    "subpaths": { "__all_spaces__": ["__all_subpaths__"] },
+    "resource_types": [],
+    "schema_shortnames": [],
     "actions": ["create", "update", "delete", "move", "progress_ticket", "attach", "lock", "unlock"]
   },
   "type": "hook",

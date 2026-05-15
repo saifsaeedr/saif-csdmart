@@ -2,9 +2,9 @@
   "shortname": "resource_folders_creation",
   "is_active": true,
   "filters": {
-    "subpaths": ["__ALL__"],
+    "subpaths": { "__all_spaces__": ["__all_subpaths__"] },
     "resource_types": ["user", "space"],
-    "schema_shortnames": ["__ALL__"],
+    "schema_shortnames": [],
     "actions": ["create"]
   },
   "type": "hook",

@@ -6,9 +6,17 @@ namespace Dmart.Plugins.Native;
 
 // Adapts a native .so hook plugin behind IHookPlugin so PluginManager
 // dispatches to it identically to built-in plugins.
-internal sealed class NativeHookPlugin(NativePluginHandle handle, string shortname) : IHookPlugin
+//
+// `pluginVersion` is the version string the loader read from the .so via
+// dlsym(dmart_plugin_version) (see NativePluginHandle.CallGetVersion).
+// Surfaced via IPluginVersionSource so PluginManager.ResolveVersion can
+// prefer it over reflective assembly lookup (which would incorrectly return
+// dmart's own version for this wrapper).
+internal sealed class NativeHookPlugin(NativePluginHandle handle, string shortname,
+    string pluginVersion = "0.0.0") : IHookPlugin, IPluginVersionSource
 {
     public string Shortname => shortname;
+    public string PluginVersion { get; } = pluginVersion;
 
     public Task HookAsync(Event e, CancellationToken ct = default)
     {

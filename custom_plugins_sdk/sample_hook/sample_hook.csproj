@@ -6,5 +6,9 @@
     <PublishAot>true</PublishAot>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <OutputType>Library</OutputType>
+    <!-- Baked into the .so as AssemblyInformationalVersion + AssemblyVersion.
+         For native .so plugins it's surfaced via the optional
+         `dmart_plugin_version` C export (see Plugin.cs). -->
+    <Version>1.0.0</Version>
   </PropertyGroup>
 </Project>

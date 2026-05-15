@@ -1364,7 +1364,6 @@ internal static class SpaceMapper
             ["mirrors"] = s.Mirrors,
             ["hide_folders"] = s.HideFolders,
             ["hide_space"] = s.HideSpace,
-            ["active_plugins"] = s.ActivePlugins,
             ["ordinal"] = s.Ordinal,
             ["space_name"] = s.SpaceName,
         };

@@ -50,7 +50,6 @@ public class QueryJoinTests : IClassFixture<DmartFactory>
                 OwnerShortname = "dmart",
                 IsActive = true,
                 Languages = new() { Language.En },
-                ActivePlugins = new(),
                 CreatedAt = DateTime.UtcNow,
                 UpdatedAt = DateTime.UtcNow,
             });

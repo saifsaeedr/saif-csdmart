@@ -41,7 +41,6 @@ public class ImportExportRoundTripTests : IClassFixture<DmartFactory>
             OwnerShortname = "dmart",
             IsActive = true,
             Languages = new() { Language.En },
-            ActivePlugins = new(),
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow,
         });
@@ -179,7 +178,7 @@ public class ImportExportRoundTripTests : IClassFixture<DmartFactory>
             Uuid = Guid.NewGuid().ToString(),
             Shortname = spaceName, SpaceName = spaceName, Subpath = "/",
             OwnerShortname = "dmart", IsActive = true,
-            Languages = new() { Language.En }, ActivePlugins = new(),
+            Languages = new() { Language.En },
             CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
         });
 

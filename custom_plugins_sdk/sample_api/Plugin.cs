@@ -23,6 +23,13 @@ public static class Plugin
             }
             """);
 
+    // Optional: surfaces the plugin's version on GET /info/plugins. See
+    // sample_hook/Plugin.cs for the rationale + ownership rules.
+    [UnmanagedCallersOnly(EntryPoint = "dmart_plugin_version")]
+    public static IntPtr GetVersion() => StaticVersionPtr;
+
+    private static readonly IntPtr StaticVersionPtr = Marshal.StringToHGlobalAnsi("1.0.0");
+
     // Receives JSON: {"method":"GET","path":"/sample_api/greet/alice","query":{},"headers":{},"body":null,"user":"dmart"}
     // Returns JSON: dmart Response shape
     [UnmanagedCallersOnly(EntryPoint = "handle_request")]

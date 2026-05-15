@@ -5,8 +5,9 @@ namespace Dmart.Plugins.BuiltIn;
 
 // Local C# extension — there's no audit plugin in upstream dmart. Logs every
 // dispatched event at Information level. Useful for debugging the plugin
-// pipeline and is intentionally ungated by filters: any space that adds
-// "audit" to its active_plugins list will see every create/update/delete.
+// pipeline. The shipped config.json declares
+// `subpaths: { "__all_spaces__": ["__all_subpaths__"] }` so it fires on every
+// create/update/delete/etc. across every space.
 public sealed class AuditPlugin(ILogger<AuditPlugin> log) : IHookPlugin
 {
     public string Shortname => "audit";

@@ -1,13 +1,15 @@
+using System.Reflection;
 using System.Text.Json;
-using Dmart.DataAdapters.Sql;
+using Dmart.DataAdapters.Sql;  // JsonbHelpers — enum wire-name resolver.
 using Dmart.Models.Core;
 using Dmart.Models.Enums;
 using Dmart.Models.Json;
+using Dmart.Plugins.Native;
 using Dmart.Services;
 
 namespace Dmart.Plugins;
 
-// Port of dmart/backend/utils/plugin_manager.py::PluginManager.
+// Routes dmart action-events to the registered hook plugins.
 //
 // Responsibilities:
 //   1. At startup, scan {BaseDir}/plugins/<name>/config.json files, decode each
@@ -15,12 +17,15 @@ namespace Dmart.Plugins;
 //      API plugin instances, and build indexed before/after dispatch tables.
 //   2. Expose BeforeActionAsync / AfterActionAsync so EntryService (and future
 //      handlers) can fire events at the corresponding points in a request.
-//   3. Filter events against each plugin's config.json filters (subpaths with
-//      hierarchical startswith semantics, resource_types, schema_shortnames,
-//      actions) before invoking a plugin.
-//   4. Gate dispatch by the event's Space.ActivePlugins list (matching Python).
-//   5. Run after-action concurrent plugins as fire-and-forget background tasks
-//      so slow hooks don't block the response.
+//   3. Filter events against each plugin's `filters` block — subpaths keyed by
+//      space (with __all_spaces__ / __all_subpaths__ / __current_user__
+//      sentinels), resource_types, schema_shortnames, actions. The filter
+//      vocabulary mirrors the permission engine so authors learn one model.
+//
+// Per-space gating is the plugin's own concern: each plugin declares which
+// (space, subpath) combinations it fires on. The previous Space.ActivePlugins
+// opt-in list and the `always_active` PluginWrapper flag both went away in
+// favor of self-declared filters.
 //
 // What's different from Python:
 //   - .NET AOT forbids dynamic assembly loading, so there's no equivalent of
@@ -32,7 +37,6 @@ namespace Dmart.Plugins;
 public sealed class PluginManager(
     IEnumerable<IHookPlugin> hookPluginInstances,
     IEnumerable<IApiPlugin> apiPluginInstances,
-    SpaceRepository spaces,
     SpaceEventLogger eventLogger,
     ILogger<PluginManager> log)
 {
@@ -54,15 +58,18 @@ public sealed class PluginManager(
     // Flat list of active shortnames, exposed to /info/manifest.
     private readonly List<string> _activePlugins = new();
 
-    // Short-lived cache for space lookups, matching Python's 2-second cache so
-    // a before+after pair for the same request doesn't double-fetch the space
-    // row. Keyed by space name.
-    private readonly Dictionary<string, (DateTime At, Space? Space)> _spaceCache = new(StringComparer.Ordinal);
-    private static readonly TimeSpan SpaceCacheTtl = TimeSpan.FromSeconds(2);
+    // Parallel registry carrying the resolved version + type per active plugin.
+    // Populated alongside _activePlugins in Register(); exposed to /info/plugins.
+    private readonly List<PluginInfo> _activePluginInfos = new();
 
     public IReadOnlyList<string> ActivePlugins => _activePlugins;
 
     public IReadOnlyList<IApiPlugin> ActiveApiPlugins => _activeApiPlugins;
+
+    // Per-plugin (shortname, version, type) view, populated during Register().
+    // Exposed to the new GET /info/plugins endpoint. Order matches _activePlugins
+    // (insertion order, which mirrors the wrapper sort by ordinal).
+    public IReadOnlyList<PluginInfo> ActivePluginInfos => _activePluginInfos;
 
     // ========================================================================
     // LOAD
@@ -99,6 +106,21 @@ public sealed class PluginManager(
                 try
                 {
                     var bytes = await File.ReadAllBytesAsync(configPath, ct);
+
+                    // Detect the legacy flat-array `subpaths: [...]` shape
+                    // and emit a clear migration error before the JSON
+                    // deserializer fails with a generic conversion exception.
+                    if (HasLegacySubpathsShape(bytes))
+                    {
+                        log.LogError(
+                            "PLUGIN_ERROR: {Config} uses the legacy flat 'subpaths' array. " +
+                            "Convert to the permission-style dict, e.g. " +
+                            "\"subpaths\": {{ \"__all_spaces__\": [\"__all_subpaths__\"] }}. " +
+                            "See custom_plugins_sdk/README.md for the migration guide.",
+                            configPath);
+                        continue;
+                    }
+
                     var wrapper = JsonSerializer.Deserialize(bytes, DmartJsonContext.Default.PluginWrapper);
                     if (wrapper is null) continue;
                     wrapper.Shortname = Path.GetFileName(dir);
@@ -133,6 +155,7 @@ public sealed class PluginManager(
         _after.Clear();
         _activePlugins.Clear();
         _activeApiPlugins.Clear();
+        _activePluginInfos.Clear();
 
         // Python loads in directory order then sorts by ordinal within action_type
         // buckets. We match that so "ordinal" ordering works across hook plugins.
@@ -151,7 +174,12 @@ public sealed class PluginManager(
                     {
                         _activeApiPlugins.Add(apiInstance);
                         _activePlugins.Add(w.Shortname);
-                        log.LogInformation("PLUGIN_LOADED: {Shortname} (api)", w.Shortname);
+                        var apiVersion = ResolveVersion(apiInstance);
+                        _activePluginInfos.Add(new PluginInfo(w.Shortname, apiVersion, "api"));
+                        // Version is rendered verbatim (no leading "v") so a
+                        // git-describe-style "v0.8.68-…" doesn't double up to
+                        // "vv0.8.68-…", and a plain "1.2.3" stays unadorned.
+                        log.LogInformation("PLUGIN_LOADED: {Shortname} {Version} (api)", w.Shortname, apiVersion);
                     }
                     else
                     {
@@ -172,7 +200,12 @@ public sealed class PluginManager(
                     }
                     var loaded = new LoadedHook(w, hookInstance);
                     var targetDict = w.ListenTime == EventListenTime.Before ? _before : _after;
-                    foreach (var actionStr in w.Filters.Actions)
+                    // Empty Actions list ⇒ "every action" (mirrors the empty-list
+                    // convention for resource_types and schema_shortnames).
+                    var actionsToRegister = w.Filters.Actions.Count == 0
+                        ? Enum.GetValues<ActionType>().Select(JsonbHelpers.EnumMember).ToList()
+                        : w.Filters.Actions;
+                    foreach (var actionStr in actionsToRegister)
                     {
                         if (!TryParseAction(actionStr, out var action)) continue;
                         if (!targetDict.TryGetValue(action, out var list))
@@ -183,7 +216,9 @@ public sealed class PluginManager(
                         list.Add(loaded);
                     }
                     _activePlugins.Add(w.Shortname);
-                    log.LogInformation("PLUGIN_LOADED: {Shortname} (hook, {Listen})", w.Shortname, w.ListenTime);
+                    var hookVersion = ResolveVersion(hookInstance);
+                    _activePluginInfos.Add(new PluginInfo(w.Shortname, hookVersion, "hook"));
+                    log.LogInformation("PLUGIN_LOADED: {Shortname} {Version} (hook, {Listen})", w.Shortname, hookVersion, w.ListenTime);
                     break;
 
                 default:
@@ -208,15 +243,9 @@ public sealed class PluginManager(
     public async Task BeforeActionAsync(Event e, CancellationToken ct = default)
     {
         if (!_before.TryGetValue(e.ActionType, out var plugins)) return;
-        var spaceActive = await GetSpaceActivePluginsAsync(e.SpaceName, ct);
-        if (spaceActive is null) return;
 
         foreach (var hook in plugins)
         {
-            // `always_active` bypasses the per-space opt-in — system plugins
-            // (e.g. semantic_indexer) run on every space's events.
-            if (!hook.Wrapper.AlwaysActive &&
-                !spaceActive.Contains(hook.Wrapper.Shortname)) continue;
             if (hook.Wrapper.Filters is null) continue;
             if (!MatchedFilters(hook.Wrapper.Filters, e)) continue;
 
@@ -241,23 +270,16 @@ public sealed class PluginManager(
         // Logging first means the trail captures actions even if a plugin later
         // throws (it's an after-the-fact record of what already happened in PG).
         //
-        // DELIBERATE PARITY DIVERGENCE: Python implements action_log as a
-        // regular plugin, so a space whose `active_plugins` excludes
-        // `action_log` produces no audit lines. The C# port treats audit as
-        // first-class and runs it unconditionally — so the only switch is
-        // global (DmartSettings.SpacesFolder being non-empty). Operators
-        // relying on per-space disable should set SpacesFolder="" and
-        // surface the audit trail elsewhere (e.g. PG history).
+        // The audit trail itself is unconditional (no per-space gate) — the
+        // only switch is global (DmartSettings.SpacesFolder being non-empty).
+        // Operators who want per-space audit suppression should set
+        // SpacesFolder="" and surface the trail elsewhere (e.g. PG history).
         await eventLogger.LogAsync(e, ct);
 
         if (!_after.TryGetValue(e.ActionType, out var plugins)) return;
-        var spaceActive = await GetSpaceActivePluginsAsync(e.SpaceName, ct);
-        if (spaceActive is null) return;
 
         foreach (var hook in plugins)
         {
-            if (!hook.Wrapper.AlwaysActive &&
-                !spaceActive.Contains(hook.Wrapper.Shortname)) continue;
             if (hook.Wrapper.Filters is null) continue;
             if (!MatchedFilters(hook.Wrapper.Filters, e)) continue;
 
@@ -291,47 +313,111 @@ public sealed class PluginManager(
     }
 
     // ========================================================================
-    // FILTER MATCHING (mirrors Python matched_filters)
+    // FILTER MATCHING (permission-style subpath dictionary)
     // ========================================================================
+
+    internal const string AllSpacesMw = "__all_spaces__";
+    internal const string AllSubpathsMw = "__all_subpaths__";
+    internal const string CurrentUserMw = "__current_user__";
 
     internal static bool MatchedFilters(EventFilter filters, Event e)
     {
-        // Python builds two candidate subpath forms: the event's subpath and the
-        // same with/without a leading slash. We normalize the same way.
-        var subpaths = new List<string>(2) { e.Subpath };
-        if (!string.IsNullOrEmpty(e.Subpath) && e.Subpath[0] == '/')
-            subpaths.Add(e.Subpath[1..]);
-        else
-            subpaths.Add("/" + e.Subpath);
+        if (!MatchSpaceAndSubpath(filters.Subpaths, e)) return false;
 
-        if (!filters.Subpaths.Contains("__ALL__") &&
-            !subpaths.Any(sp => filters.Subpaths.Any(fp => SubpathMatches(sp, fp))))
-            return false;
-
-        // Content resources also gate on schema_shortname when the filter lists
-        // schemas — other resource kinds skip this rule.
+        // Content resources also gate on schema_shortname when the filter
+        // declares schemas. Empty list = "match every schema" (mirrors the
+        // permission engine's empty-list-means-all convention).
         if (e.ResourceType == ResourceType.Content
-            && !filters.SchemaShortnames.Contains("__ALL__")
-            && (e.SchemaShortname is null || !filters.SchemaShortnames.Contains(e.SchemaShortname)))
+            && filters.SchemaShortnames.Count > 0
+            && (e.SchemaShortname is null || !filters.SchemaShortnames.Contains(e.SchemaShortname, StringComparer.Ordinal)))
             return false;
 
+        // Empty resource_types = match every resource_type.
         if (filters.ResourceTypes.Count > 0
-            && !filters.ResourceTypes.Contains("__ALL__")
             && e.ResourceType is not null
-            && !filters.ResourceTypes.Contains(JsonbHelpers.EnumMember(e.ResourceType.Value)))
+            && !filters.ResourceTypes.Contains(JsonbHelpers.EnumMember(e.ResourceType.Value), StringComparer.Ordinal))
             return false;
 
         return true;
     }
 
-    // Python's hierarchical startswith: filter "foo" matches event subpath "foo",
-    // "foo/bar", "foo/bar/baz" but not "foobar". A trailing slash on the filter
-    // form is stripped so "foo/" and "foo" behave identically.
+    // Iterates the filter's per-space subpath patterns. Matches when the
+    // event's (space, subpath) is covered by EITHER the literal space entry
+    // OR the __all_spaces__ wildcard entry. Within each entry, an empty
+    // patterns list is treated as "no patterns ⇒ no match" so authors must
+    // explicitly opt in to "everything" via __all_subpaths__.
+    private static bool MatchSpaceAndSubpath(Dictionary<string, List<string>> subpathDict, Event e)
+    {
+        if (subpathDict.Count == 0) return false;
+        var normalizedEventSubpath = NormalizeEventSubpath(e.Subpath);
+
+        if (subpathDict.TryGetValue(e.SpaceName, out var perSpace)
+            && AnyPatternMatches(perSpace, normalizedEventSubpath, e.UserShortname))
+            return true;
+
+        if (subpathDict.TryGetValue(AllSpacesMw, out var anySpace)
+            && AnyPatternMatches(anySpace, normalizedEventSubpath, e.UserShortname))
+            return true;
+
+        return false;
+    }
+
+    private static bool AnyPatternMatches(List<string> patterns, string eventSubpath, string? actor)
+    {
+        foreach (var raw in patterns)
+        {
+            if (raw == AllSubpathsMw) return true;
+
+            var pattern = NormalizeFilterSubpath(raw);
+
+            if (actor is not null && pattern.Contains(CurrentUserMw, StringComparison.Ordinal))
+                pattern = pattern.Replace(CurrentUserMw, actor, StringComparison.Ordinal);
+
+            if (SubpathMatches(eventSubpath, pattern)) return true;
+        }
+        return false;
+    }
+
+    // Drop the leading slash so filter and event use the same form. Empty /
+    // root subpaths normalize to "" so they match a filter pattern of "".
+    private static string NormalizeEventSubpath(string subpath)
+    {
+        if (string.IsNullOrEmpty(subpath) || subpath == "/") return "";
+        return subpath.Trim('/');
+    }
+
+    private static string NormalizeFilterSubpath(string subpath)
+    {
+        if (string.IsNullOrEmpty(subpath) || subpath == "/") return "";
+        return subpath.Trim('/');
+    }
+
+    // Hierarchical startswith: filter "foo" matches event subpath "foo",
+    // "foo/bar", "foo/bar/baz" but not "foobar". A filter of "" matches
+    // any event subpath at the space root and below — same as
+    // __all_subpaths__ (which short-circuits earlier).
     private static bool SubpathMatches(string eventSubpath, string filterSubpath)
     {
-        var normalized = filterSubpath.TrimEnd('/');
-        if (eventSubpath == normalized) return true;
-        return eventSubpath.StartsWith(normalized + "/", StringComparison.Ordinal);
+        if (filterSubpath.Length == 0) return true;
+        if (eventSubpath == filterSubpath) return true;
+        return eventSubpath.StartsWith(filterSubpath + "/", StringComparison.Ordinal);
+    }
+
+    // Cheap shape probe: open the JSON, look for filters.subpaths, and check
+    // whether it's an array (legacy shape) vs an object (new dict shape).
+    // Anything that's neither — missing, null, malformed — falls through and
+    // lets the regular deserializer surface its own error.
+    internal static bool HasLegacySubpathsShape(byte[] configBytes)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(configBytes);
+            if (!doc.RootElement.TryGetProperty("filters", out var filters)) return false;
+            if (filters.ValueKind != JsonValueKind.Object) return false;
+            if (!filters.TryGetProperty("subpaths", out var subpaths)) return false;
+            return subpaths.ValueKind == JsonValueKind.Array;
+        }
+        catch (JsonException) { return false; }
     }
 
     private static bool TryParseAction(string raw, out ActionType value)
@@ -350,48 +436,45 @@ public sealed class PluginManager(
     }
 
     // ========================================================================
-    // SPACE LOOKUP (with Python-matching 2s cache)
+    // VERSION RESOLUTION
     // ========================================================================
 
-    // Returns the HashSet of active_plugins declared on the space row, or null
-    // if the space doesn't exist (matches Python: "space is None → return").
-    // Null active_plugins list is normalized to an empty set so no plugins fire
-    // but the method still returns non-null (the dispatch loop then no-ops).
-    private async Task<HashSet<string>?> GetSpaceActivePluginsAsync(string spaceName, CancellationToken ct)
+    // Resolve a plugin's version following the same "baked into the binary"
+    // model dmart uses for itself (see Api/Info/ManifestHandler.cs):
+    //   1. Wrapper-supplied version (IPluginVersionSource): for native .so and
+    //      subprocess plugins, the source of truth is the external artifact —
+    //      the loader extracted it via dlsym(dmart_plugin_version) or from the
+    //      info-response JSON, then handed it to the wrapper at construction.
+    //   2. AssemblyInformationalVersion on the plugin's runtime-type assembly:
+    //      for in-process .NET plugins (the BuiltIn classes plus any
+    //      externally-loaded .dll), this reads the same attribute that
+    //      Api/Info/ManifestHandler.cs reads on dmart's own assembly. Built-in
+    //      plugins ship inside the dmart assembly so they inherit dmart's
+    //      version automatically — no per-plugin override needed.
+    //   3. AssemblyVersion fallback for assemblies that don't stamp the
+    //      informational variant.
+    //   4. "0.0.0" sentinel meaning "no version declared anywhere".
+    internal static string ResolveVersion(object pluginInstance)
     {
-        var space = await GetSpaceCachedAsync(spaceName, ct);
-        if (space is null) return null;
-        return new HashSet<string>(space.ActivePlugins ?? new(), StringComparer.Ordinal);
-    }
+        if (pluginInstance is IPluginVersionSource src && !string.IsNullOrEmpty(src.PluginVersion))
+            return src.PluginVersion;
 
-    // Invalidate the cached space entry so the next lookup hits the DB.
-    // Call this after creating, updating, or deleting a space so that
-    // AfterActionAsync sees the fresh active_plugins list.
-    public void InvalidateSpaceCache(string spaceName)
-    {
-        lock (_spaceCache) { _spaceCache.Remove(spaceName); }
-    }
+        var asm = pluginInstance.GetType().Assembly;
+        var info = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        if (!string.IsNullOrEmpty(info))
+        {
+            // Mirrors ManifestHandler.ResolveVersion: dmart's build pipeline
+            // stamps "v0.8.70 branch=master date=2026-05-14" into the
+            // informational version and we want just the leading version token.
+            if (info.Contains("branch=", StringComparison.Ordinal))
+                return info.Split(' ', StringSplitOptions.RemoveEmptyEntries)[0];
+            return info;
+        }
 
-    private async Task<Space?> GetSpaceCachedAsync(string spaceName, CancellationToken ct)
-    {
-        var now = TimeUtils.Now();
-        lock (_spaceCache)
-        {
-            if (_spaceCache.TryGetValue(spaceName, out var cached) && (now - cached.At) < SpaceCacheTtl)
-                return cached.Space;
-        }
-        var space = await spaces.GetAsync(spaceName, ct);
-        // Only cache non-null results — caching a null for a not-yet-created
-        // space prevents AfterAction hooks from firing after the space is
-        // created within the cache TTL window.
-        if (space is not null)
-        {
-            lock (_spaceCache)
-            {
-                _spaceCache[spaceName] = (TimeUtils.Now(), space);
-            }
-        }
-        return space;
+        var simple = asm.GetName().Version?.ToString();
+        if (!string.IsNullOrEmpty(simple)) return simple;
+
+        return "0.0.0";
     }
 
     // ========================================================================
@@ -400,3 +483,9 @@ public sealed class PluginManager(
 
     private sealed record LoadedHook(PluginWrapper Wrapper, IHookPlugin Plugin);
 }
+
+// Public surface for the new GET /info/plugins endpoint. Fields:
+//   - Shortname: the plugin's stable identifier (matches config.json + dispatch)
+//   - Version: the resolved version string (see PluginManager.ResolveVersion)
+//   - Type: "hook" or "api" — the plugin's wire type
+public sealed record PluginInfo(string Shortname, string Version, string Type);

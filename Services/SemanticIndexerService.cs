@@ -56,10 +56,10 @@ public sealed class SemanticIndexerService(
         }
     }
 
-    // Bulk reindex. When spaceName is null, walks every space with
-    // "semantic_indexer" in its active_plugins — matches the per-space
-    // opt-in convention. When spaceName is set, walks only that one and
-    // skips the active_plugins check (admin-forced).
+    // Bulk reindex. When spaceName is null, walks every space (the
+    // semantic_indexer plugin's shipped filters cover __all_spaces__). When
+    // spaceName is set, walks only that one. Per-space activation lists
+    // are gone — scope is governed by the plugin's own filters block.
     public async Task<ReindexStats> ReindexAllAsync(
         string? spaceName, bool onlyMissing, int? maxPerSpace,
         CancellationToken ct = default)
@@ -88,9 +88,9 @@ public sealed class SemanticIndexerService(
     {
         if (!string.IsNullOrEmpty(explicitSpace)) return [explicitSpace];
 
-        // semantic_indexer runs with always_active=true — fires on every
-        // space's events regardless of per-space opt-in. Bulk reindex with
-        // no space argument therefore walks every space that exists.
+        // The shipped semantic_indexer filter covers __all_spaces__ so the
+        // hook fires on every space's events. Bulk reindex with no space
+        // argument therefore walks every space that exists.
         var all = await spaces.ListAsync(ct);
         return all.Select(s => s.Shortname).ToList();
     }

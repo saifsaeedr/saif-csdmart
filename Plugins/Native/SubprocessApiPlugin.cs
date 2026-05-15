@@ -4,17 +4,25 @@ using Dmart.Models.Json;
 namespace Dmart.Plugins.Native;
 
 // IApiPlugin adapter that delegates to a subprocess via stdin/stdout JSON lines.
-internal sealed class SubprocessApiPlugin : IApiPlugin
+//
+// `pluginVersion` is the version string the subprocess reported in its
+// {"type":"info"} response. Surfaced via IPluginVersionSource so
+// PluginManager.ResolveVersion can prefer it over reflective assembly lookup
+// (which would incorrectly return dmart's own version for this wrapper).
+internal sealed class SubprocessApiPlugin : IApiPlugin, IPluginVersionSource
 {
     private readonly SubprocessPluginHost _host;
     private readonly List<NativeApiPlugin.NativeRoute> _routes;
 
     public string Shortname => _host.Shortname;
+    public string PluginVersion { get; }
 
-    public SubprocessApiPlugin(SubprocessPluginHost host, List<NativeApiPlugin.NativeRoute> routes)
+    public SubprocessApiPlugin(SubprocessPluginHost host, List<NativeApiPlugin.NativeRoute> routes,
+        string pluginVersion = "0.0.0")
     {
         _host = host;
         _routes = routes;
+        PluginVersion = pluginVersion;
     }
 
     public void MapRoutes(RouteGroupBuilder group)

@@ -8,11 +8,14 @@ namespace Dmart.Plugins.BuiltIn;
 // Maintains `entries.embedding` vectors for semantic search.
 //
 // Runs on every after-create / after-update event, fetches the entry, and
-// delegates to `SemanticIndexerService.ReindexEntryAsync`. Opt-in at three
+// delegates to `SemanticIndexerService.ReindexEntryAsync`. Opt-in at two
 // levels:
 //   1. pgvector extension installed + `entries.embedding` column present.
 //   2. EmbeddingApiUrl configured in DmartSettings.
-//   3. The triggering space has "semantic_indexer" in its active_plugins.
+//
+// Scope is governed by the shipped `plugins/semantic_indexer/config.json`
+// filters block (defaults to every space + subpath). Edit that config to
+// restrict to specific spaces.
 //
 // Failures are logged and swallowed — indexing never blocks a write.
 public sealed class SemanticIndexerPlugin(

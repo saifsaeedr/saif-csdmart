@@ -66,14 +66,10 @@ public class PluginManagerIntegrationTests : IClassFixture<DmartFactory>
 
         try
         {
-            // Create the test space directly through SpaceRepository (NOT through
-            // the plugin pipeline) because we need the space row to exist BEFORE
-            // the plugin dispatch fires — otherwise PluginManager's before-action
-            // space lookup would return null and skip every hook.
-            //
-            // We opt this space into the resource_folders_creation plugin via
-            // active_plugins. Without that, PluginManager would refuse to fire
-            // the hook for events coming from this space.
+            // Create the test space directly through SpaceRepository (NOT
+            // through the plugin pipeline). The per-space `active_plugins`
+            // opt-in is gone — the plugin self-declares scope via its own
+            // filters now, so nothing on the space row gates dispatch.
             await spaces.UpsertAsync(new Space
             {
                 Uuid = Guid.NewGuid().ToString(),
@@ -83,7 +79,6 @@ public class PluginManagerIntegrationTests : IClassFixture<DmartFactory>
                 OwnerShortname = "dmart",
                 IsActive = true,
                 Languages = new() { Language.En },
-                ActivePlugins = new() { "resource_folders_creation" },
                 CreatedAt = DateTime.UtcNow,
                 UpdatedAt = DateTime.UtcNow,
             });
@@ -147,18 +142,23 @@ public class PluginManagerIntegrationTests : IClassFixture<DmartFactory>
         }
     }
 
-    // ==================== space active_plugins gating ====================
+    // ==================== plugins fire regardless of any leftover ====================
+    // ==================== active_plugins JSONB on the space row     ====================
 
     [FactIfPg]
-    public async Task AfterAction_Skips_Plugins_Not_Listed_In_Space_ActivePlugins()
+    public async Task AfterAction_Fires_Regardless_Of_Space_ActivePlugins()
     {
+        // The per-space `active_plugins` opt-in was removed in favor of
+        // plugin-self-declared filters. Pins the new contract: a fresh
+        // space with no per-space hook list MUST still trigger
+        // resource_folders_creation, because the plugin's own filter
+        // declares it fires on every space's create event.
         var (plugins, spaces, _, entryRepo) = Resolve();
         await plugins.LoadAsync();
 
         var spaceName = $"pitest2_{Guid.NewGuid():N}".Substring(0, 16);
         try
         {
-            // No active_plugins list → plugin should NOT fire for this space.
             await spaces.UpsertAsync(new Space
             {
                 Uuid = Guid.NewGuid().ToString(),
@@ -168,7 +168,6 @@ public class PluginManagerIntegrationTests : IClassFixture<DmartFactory>
                 OwnerShortname = "dmart",
                 IsActive = true,
                 Languages = new() { Language.En },
-                ActivePlugins = new(),
                 CreatedAt = DateTime.UtcNow,
                 UpdatedAt = DateTime.UtcNow,
             });
@@ -182,16 +181,26 @@ public class PluginManagerIntegrationTests : IClassFixture<DmartFactory>
                 ResourceType = ResourceType.Space,
                 UserShortname = "dmart",
             });
-            // Give any fire-and-forget tasks time to land — we want to verify
-            // they DID NOT land, so waiting is load-bearing here.
-            await Task.Delay(500);
 
-            var schemaFolder = await entryRepo.GetAsync(spaceName, "/", "schema", ResourceType.Folder);
-            schemaFolder.ShouldBeNull("plugin must not fire when space active_plugins doesn't include it");
+            Entry? schemaFolder = null;
+            await WaitFor.UntilAsync(async () =>
+            {
+                schemaFolder = await entryRepo.GetAsync(spaceName, "/", "schema", ResourceType.Folder);
+                return schemaFolder is not null;
+            }, TimeSpan.FromSeconds(2));
+            schemaFolder.ShouldNotBeNull(
+                "resource_folders_creation must fire regardless of any leftover " +
+                "space.active_plugins — plugins now self-declare scope via filters.subpaths");
+            await Task.Delay(500);
         }
         finally
         {
-            await spaces.DeleteAsync(spaceName);
+            try { await spaces.DeleteAsync(spaceName); }
+            catch (Npgsql.PostgresException ex) when (ex.SqlState == "40P01")
+            {
+                await Task.Delay(500);
+                await spaces.DeleteAsync(spaceName);
+            }
         }
     }
 }

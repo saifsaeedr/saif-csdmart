@@ -92,7 +92,6 @@ public class ManagedRequestCreateResponseTests : IClassFixture<DmartFactory>
             OwnerShortname = _factory.AdminShortname,
             IsActive = true,
             Languages = new() { Language.En },
-            ActivePlugins = new(),
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow,
         });

@@ -37,7 +37,6 @@ public class HistoryQueryShapeTests : IClassFixture<DmartFactory>
             Shortname = spaceName, SpaceName = spaceName, Subpath = "/",
             OwnerShortname = _factory.AdminShortname,
             IsActive = true, Languages = new() { Language.En },
-            ActivePlugins = new(),
             CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
         });
         var sn = "c_" + Guid.NewGuid().ToString("N")[..6];
@@ -118,7 +117,6 @@ public class HistoryQueryShapeTests : IClassFixture<DmartFactory>
             Shortname = spaceName, SpaceName = spaceName, Subpath = "/",
             OwnerShortname = _factory.AdminShortname,
             IsActive = true, Languages = new() { Language.En },
-            ActivePlugins = new(),
             CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
         });
         var sn = "t_" + Guid.NewGuid().ToString("N")[..6];
@@ -216,7 +214,6 @@ public class HistoryQueryShapeTests : IClassFixture<DmartFactory>
             Shortname = spaceName, SpaceName = spaceName, Subpath = "/",
             OwnerShortname = _factory.AdminShortname,
             IsActive = true, Languages = new() { Language.En },
-            ActivePlugins = new(),
             CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
         });
         var sn = "t_" + Guid.NewGuid().ToString("N")[..6];
