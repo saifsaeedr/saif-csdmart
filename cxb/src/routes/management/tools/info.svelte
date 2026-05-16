@@ -51,16 +51,7 @@
             manifest = _manifest.attributes;
         }
         try {
-            // Direct axios call against the same instance tsdmart configures,
-            // intentionally NOT going through Dmart.getPlugins() (added in
-            // tsdmart 5.3.4). The workspace yarn.lock currently pins
-            // @edraj/tsdmart to 5.3.3, and bumping the cxb package.json
-            // floor to ^5.3.4 has surfaced a not-yet-explained CI
-            // regression in dmart's admin-login integration tests — see the
-            // reverted commit on PR #32 for the trail. Calling axios here
-            // dodges the version dependency entirely and ships the feature.
-            const { data: _plugins } = await Dmart.axiosDmartInstance.get(
-                "info/plugins", { headers: Dmart.getHeaders() });
+            const _plugins = await Dmart.getPlugins();
             if (_plugins.status === "success" && Array.isArray(_plugins.records)) {
                 plugins = _plugins.records.map((r: any) => ({
                     shortname: r.shortname ?? "",
