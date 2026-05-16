@@ -33,6 +33,7 @@ public static class RequestHandler
                                   Plugins.PluginManager plugins, PermissionService perms,
                                   InvitationService invitations,
                                   UniquenessValidator uniqueness,
+                                  HistoryRepository history,
                                   IOptions<DmartSettings> dmartSettings,
                                   HttpContext http, CancellationToken ct) =>
             {
@@ -139,30 +140,46 @@ public static class RequestHandler
                         }
                     }
 
-                    var result = req.RequestType switch
+                    // Update/Patch returns a 3-tuple including the history
+                    // diff so we can attach it to AfterActionAsync below.
+                    // Other dispatchers stay 2-tuple — Create/Delete have no
+                    // {old,new} to surface, and the entry default branch's
+                    // diff is owned by EntryService's own after-event.
+                    (Response Response, Record UpdatedRecord) result;
+                    Dictionary<string, object>? updateDiff = null;
+                    if (req.RequestType is RequestType.Update or RequestType.Patch)
                     {
-                        RequestType.Create =>
-                            await DispatchCreateAsync(rec, req.SpaceName, actor,
-                                entries, users, access, spaces, attachments, hasher, perms, invitations, uniqueness, ct),
-                        RequestType.Update or RequestType.Patch =>
-                            await DispatchUpdateAsync(rec, req.SpaceName, actor,
-                                entries, users, access, spaces, attachments, hasher, perms, uniqueness, ct),
-                        RequestType.Delete =>
-                            await DispatchDeleteAsync(rec, req.SpaceName, actor, managementSpace,
-                                entries, users, access, spaces, attachments, perms, ct),
-                        RequestType.Move =>
-                            await DispatchMoveAsync(rec, req.SpaceName, actor, entries, ct),
-                        // Python: Assign sets collaborators on an entry.
-                        RequestType.Assign =>
-                            await DispatchAssignAsync(rec, req.SpaceName, actor, entries, users, ct),
-                        // Python: UpdateAcl sets the per-entry ACL.
-                        RequestType.UpdateAcl =>
-                            await DispatchUpdateAclAsync(rec, req.SpaceName, actor, entries, ct),
-                        _ =>
-                            ((Response Response, Record UpdatedRecord))(Response.Fail(InternalErrorCode.NOT_SUPPORTED_TYPE,
-                                $"{req.RequestType} not supported", ErrorTypes.Request),
-                             rec),
-                    };
+                        var (resp, updated, diff) = await DispatchUpdateAsync(
+                            rec, req.SpaceName, actor,
+                            entries, users, access, spaces, attachments, hasher, perms, uniqueness,
+                            history, ct);
+                        result = (resp, updated);
+                        updateDiff = diff;
+                    }
+                    else
+                    {
+                        result = req.RequestType switch
+                        {
+                            RequestType.Create =>
+                                await DispatchCreateAsync(rec, req.SpaceName, actor,
+                                    entries, users, access, spaces, attachments, hasher, perms, invitations, uniqueness, ct),
+                            RequestType.Delete =>
+                                await DispatchDeleteAsync(rec, req.SpaceName, actor, managementSpace,
+                                    entries, users, access, spaces, attachments, perms, ct),
+                            RequestType.Move =>
+                                await DispatchMoveAsync(rec, req.SpaceName, actor, entries, ct),
+                            // Python: Assign sets collaborators on an entry.
+                            RequestType.Assign =>
+                                await DispatchAssignAsync(rec, req.SpaceName, actor, entries, users, ct),
+                            // Python: UpdateAcl sets the per-entry ACL.
+                            RequestType.UpdateAcl =>
+                                await DispatchUpdateAclAsync(rec, req.SpaceName, actor, entries, ct),
+                            _ =>
+                                ((Response Response, Record UpdatedRecord))(Response.Fail(InternalErrorCode.NOT_SUPPORTED_TYPE,
+                                    $"{req.RequestType} not supported", ErrorTypes.Request),
+                                 rec),
+                        };
+                    }
 
                     if (result.Response.Status != Status.Success)
                     {
@@ -204,7 +221,7 @@ public static class RequestHandler
                             // block on the call. PluginManager catches and logs
                             // hook exceptions itself (PluginManager.cs:252,264);
                             // after-hook failures never fail the originating action.
-                            await plugins.AfterActionAsync(new Models.Core.Event
+                            var afterEvent = new Models.Core.Event
                             {
                                 SpaceName = req.SpaceName,
                                 Subpath = rec.Subpath,
@@ -212,7 +229,14 @@ public static class RequestHandler
                                 ActionType = actionType.Value,
                                 ResourceType = rec.ResourceType,
                                 UserShortname = actor,
-                            }, ct);
+                            };
+                            // Mirror EntryService.UpdateAsync:413 and
+                            // UserService.UpdateProfileAsync:854 — plugins read
+                            // {field_path: {old, new}} off attributes.history_diff.
+                            // Only set on Update/Patch; Create/Delete have no diff.
+                            if (updateDiff is not null && updateDiff.Count > 0)
+                                afterEvent.Attributes["history_diff"] = updateDiff;
+                            await plugins.AfterActionAsync(afterEvent, ct);
                         }
                     }
                 }
@@ -600,11 +624,19 @@ public static class RequestHandler
     // UPDATE
     // ============================================================================
 
-    private static async Task<(Response Response, Record UpdatedRecord)> DispatchUpdateAsync(
+    // Returns the computed history diff alongside the response so the
+    // dispatcher loop can attach it to AfterActionAsync's event payload —
+    // mirrors EntryService.UpdateAsync:413 and UserService.UpdateProfileAsync:854,
+    // where plugins (e.g. action_log) read field-level deltas off
+    // attributes.history_diff. The default (entry) branch returns null
+    // because EntryService fires its own after-event with the diff and
+    // the dispatcher loop's re-fire is gated to non-entry types.
+    private static async Task<(Response Response, Record UpdatedRecord, Dictionary<string, object>? Diff)> DispatchUpdateAsync(
         Record rec, string space, string actor,
         EntryService entries, UserRepository users, AccessRepository access,
         SpaceRepository spaces, AttachmentRepository attachments, PasswordHasher hasher,
-        PermissionService perms, UniquenessValidator uniqueness, CancellationToken ct)
+        PermissionService perms, UniquenessValidator uniqueness,
+        HistoryRepository history, CancellationToken ct)
     {
         var locator = new Locator(rec.ResourceType, space, rec.Subpath, rec.Shortname);
 
@@ -614,16 +646,16 @@ public static class RequestHandler
             {
                 var existing = await users.GetByShortnameAsync(rec.Shortname, ct);
                 if (existing is null)
-                    return (Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "user not found", ErrorTypes.Request), rec);
+                    return (Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "user not found", ErrorTypes.Request), rec, null);
                 var attrs = rec.Attributes ?? new();
                 var userLocator = new Locator(ResourceType.User, existing.SpaceName, existing.Subpath, existing.Shortname);
                 if (!await perms.CanUpdateAsync(actor, userLocator, PermissionService.FromUser(existing), attrs, ct))
-                    return (Response.Fail(InternalErrorCode.NOT_ALLOWED, "not allowed to update user", ErrorTypes.Request), rec);
+                    return (Response.Fail(InternalErrorCode.NOT_ALLOWED, "not allowed to update user", ErrorTypes.Request), rec, null);
                 var userUniq = await uniqueness.ValidateRawAsync(
                     existing.SpaceName, existing.Subpath, existing.Shortname,
                     ResourceType.User, attrs, ActionType.Update, ct);
                 if (!userUniq.IsOk)
-                    return (Response.Fail(userUniq.ErrorCode!, userUniq.ErrorMessage!, userUniq.ErrorType ?? ErrorTypes.Request), rec);
+                    return (Response.Fail(userUniq.ErrorCode!, userUniq.ErrorMessage!, userUniq.ErrorType ?? ErrorTypes.Request), rec, null);
                 var passwordRaw = attrs.TryGetValue("password", out var p) ? ConvertToString(p) : null;
                 var newIsActive = attrs.TryGetValue("is_active", out var ia) ? !IsExplicitlyFalse(ia) : existing.IsActive;
                 var reactivating = !existing.IsActive && newIsActive;
@@ -662,18 +694,41 @@ public static class RequestHandler
                     UpdatedAt = TimeUtils.Now(),
                 };
                 await users.UpsertAsync(updated, ct);
+
+                // Append a history row mirroring the self-service profile
+                // update path (UserService.UpdateProfileAsync). Without this
+                // /managed/query?type=history is silent for users edited via
+                // the admin /managed/request endpoint even though the entry
+                // path already audits its own writes. The diff omits the
+                // password hash and the AttemptCount bookkeeping — see
+                // HistoryDiffUtil.ComputeUserDiff for the field list.
+                //
+                // The UpsertAsync → AppendAsync pair is intentionally NOT
+                // transactional, matching UserService.UpdateProfileAsync.
+                // Wrapping both in a single transaction would expand the
+                // lock scope across `users` + `histories` on every update
+                // and serialize unrelated writers. The tradeoff: if
+                // AppendAsync throws after UpsertAsync commits (PG hiccup,
+                // FK conflict, ct cancellation in between), the user row
+                // is updated but the audit row is missing. Acceptable for
+                // an audit trail that isn't itself a source of truth.
+                var userDiff = HistoryDiffUtil.ComputeUserDiff(existing, updated);
+                if (userDiff.Count > 0)
+                    await history.AppendAsync(updated.SpaceName, updated.Subpath, updated.Shortname, actor, null, userDiff, ct);
+
                 return (Response.Ok(),
-                    WithCreatedMetaAttributes(rec, updated.Uuid, updated.CreatedAt, updated.UpdatedAt, updated.OwnerShortname));
+                    WithCreatedMetaAttributes(rec, updated.Uuid, updated.CreatedAt, updated.UpdatedAt, updated.OwnerShortname),
+                    userDiff);
             }
             case ResourceType.Space:
             {
                 var existing = await spaces.GetAsync(rec.Shortname, ct);
                 if (existing is null)
-                    return (Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "space not found", ErrorTypes.Request), rec);
+                    return (Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "space not found", ErrorTypes.Request), rec, null);
                 var attrs = rec.Attributes ?? new();
                 var spaceLocator = new Locator(ResourceType.Space, existing.SpaceName, existing.Subpath, existing.Shortname);
                 if (!await perms.CanUpdateAsync(actor, spaceLocator, PermissionService.FromSpace(existing), attrs, ct))
-                    return (Response.Fail(InternalErrorCode.NOT_ALLOWED, "not allowed to update space", ErrorTypes.Request), rec);
+                    return (Response.Fail(InternalErrorCode.NOT_ALLOWED, "not allowed to update space", ErrorTypes.Request), rec, null);
                 // Uniqueness validation doesn't apply to Spaces — see CreateSpaceAsync above.
 
                 // Python parity: every Space-specific attribute on the wire is
@@ -713,8 +768,14 @@ public static class RequestHandler
                     UpdatedAt = TimeUtils.Now(),
                 };
                 await spaces.UpsertAsync(updated, ct);
+
+                var spaceDiff = HistoryDiffUtil.ComputeSpaceDiff(existing, updated);
+                if (spaceDiff.Count > 0)
+                    await history.AppendAsync(updated.SpaceName, updated.Subpath, updated.Shortname, actor, null, spaceDiff, ct);
+
                 return (Response.Ok(),
-                    WithCreatedMetaAttributes(rec, updated.Uuid, updated.CreatedAt, updated.UpdatedAt, updated.OwnerShortname));
+                    WithCreatedMetaAttributes(rec, updated.Uuid, updated.CreatedAt, updated.UpdatedAt, updated.OwnerShortname),
+                    spaceDiff);
             }
             // Role/Permission live in their own tables, not `entries` — falling
             // through to EntryService.UpdateAsync would silently no-op.
@@ -722,16 +783,16 @@ public static class RequestHandler
             {
                 var existing = await access.GetRoleAsync(rec.Shortname, ct);
                 if (existing is null)
-                    return (Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "role not found", ErrorTypes.Request), rec);
+                    return (Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "role not found", ErrorTypes.Request), rec, null);
                 var attrs = rec.Attributes ?? new();
                 var roleLocator = new Locator(ResourceType.Role, existing.SpaceName, existing.Subpath, existing.Shortname);
                 if (!await perms.CanUpdateAsync(actor, roleLocator, PermissionService.FromRole(existing), attrs, ct))
-                    return (Response.Fail(InternalErrorCode.NOT_ALLOWED, "not allowed to update role", ErrorTypes.Request), rec);
+                    return (Response.Fail(InternalErrorCode.NOT_ALLOWED, "not allowed to update role", ErrorTypes.Request), rec, null);
                 var roleUniq = await uniqueness.ValidateRawAsync(
                     existing.SpaceName, existing.Subpath, existing.Shortname,
                     ResourceType.Role, attrs, ActionType.Update, ct);
                 if (!roleUniq.IsOk)
-                    return (Response.Fail(roleUniq.ErrorCode!, roleUniq.ErrorMessage!, roleUniq.ErrorType ?? ErrorTypes.Request), rec);
+                    return (Response.Fail(roleUniq.ErrorCode!, roleUniq.ErrorMessage!, roleUniq.ErrorType ?? ErrorTypes.Request), rec, null);
                 var updated = existing with
                 {
                     Permissions = ExtractStringList(attrs, "permissions") ?? existing.Permissions,
@@ -743,23 +804,29 @@ public static class RequestHandler
                     UpdatedAt = TimeUtils.Now(),
                 };
                 await access.UpsertRoleAsync(updated, ct);
+
+                var roleDiff = HistoryDiffUtil.ComputeRoleDiff(existing, updated);
+                if (roleDiff.Count > 0)
+                    await history.AppendAsync(updated.SpaceName, updated.Subpath, updated.Shortname, actor, null, roleDiff, ct);
+
                 return (Response.Ok(),
-                    WithCreatedMetaAttributes(rec, updated.Uuid, updated.CreatedAt, updated.UpdatedAt, updated.OwnerShortname));
+                    WithCreatedMetaAttributes(rec, updated.Uuid, updated.CreatedAt, updated.UpdatedAt, updated.OwnerShortname),
+                    roleDiff);
             }
             case ResourceType.Permission:
             {
                 var existing = await access.GetPermissionAsync(rec.Shortname, ct);
                 if (existing is null)
-                    return (Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "permission not found", ErrorTypes.Request), rec);
+                    return (Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "permission not found", ErrorTypes.Request), rec, null);
                 var attrs = rec.Attributes ?? new();
                 var permLocator = new Locator(ResourceType.Permission, existing.SpaceName, existing.Subpath, existing.Shortname);
                 if (!await perms.CanUpdateAsync(actor, permLocator, PermissionService.FromPermission(existing), attrs, ct))
-                    return (Response.Fail(InternalErrorCode.NOT_ALLOWED, "not allowed to update permission", ErrorTypes.Request), rec);
+                    return (Response.Fail(InternalErrorCode.NOT_ALLOWED, "not allowed to update permission", ErrorTypes.Request), rec, null);
                 var permUniq = await uniqueness.ValidateRawAsync(
                     existing.SpaceName, existing.Subpath, existing.Shortname,
                     ResourceType.Permission, attrs, ActionType.Update, ct);
                 if (!permUniq.IsOk)
-                    return (Response.Fail(permUniq.ErrorCode!, permUniq.ErrorMessage!, permUniq.ErrorType ?? ErrorTypes.Request), rec);
+                    return (Response.Fail(permUniq.ErrorCode!, permUniq.ErrorMessage!, permUniq.ErrorType ?? ErrorTypes.Request), rec, null);
                 var updated = existing with
                 {
                     // Subpaths has no "missing" form: ExtractSubpathsDict returns
@@ -780,22 +847,33 @@ public static class RequestHandler
                     UpdatedAt = TimeUtils.Now(),
                 };
                 await access.UpsertPermissionAsync(updated, ct);
+
+                var permDiff = HistoryDiffUtil.ComputePermissionDiff(existing, updated);
+                if (permDiff.Count > 0)
+                    await history.AppendAsync(updated.SpaceName, updated.Subpath, updated.Shortname, actor, null, permDiff, ct);
+
                 return (Response.Ok(),
-                    WithCreatedMetaAttributes(rec, updated.Uuid, updated.CreatedAt, updated.UpdatedAt, updated.OwnerShortname));
+                    WithCreatedMetaAttributes(rec, updated.Uuid, updated.CreatedAt, updated.UpdatedAt, updated.OwnerShortname),
+                    permDiff);
             }
             default:
             {
                 var result = await entries.UpdateAsync(locator, rec.Attributes ?? new(), actor, ct);
                 if (!result.IsOk)
-                    return (Response.Fail(result.ErrorCode!, result.ErrorMessage!, ErrorTypes.Request), rec);
+                    return (Response.Fail(result.ErrorCode!, result.ErrorMessage!, ErrorTypes.Request), rec, null);
                 var saved = result.Value!;
                 // Python parity: update responses echo the fresh created_at /
                 // updated_at / owner_shortname from the saved entry (same
                 // helper the create branch uses). Previously only Uuid flowed
                 // back, so clients couldn't tell whether the server touched
                 // updated_at.
+                // Diff is null here: EntryService.UpdateAsync already fired
+                // its own AfterActionAsync with history_diff attached, and
+                // the dispatcher loop's after-event re-fire is gated to
+                // non-entry resource types.
                 return (Response.Ok(),
-                    WithCreatedMetaAttributes(rec, saved.Uuid, saved.CreatedAt, saved.UpdatedAt, saved.OwnerShortname));
+                    WithCreatedMetaAttributes(rec, saved.Uuid, saved.CreatedAt, saved.UpdatedAt, saved.OwnerShortname),
+                    null);
             }
         }
     }
