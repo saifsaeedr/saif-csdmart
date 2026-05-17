@@ -219,7 +219,7 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
                 updated_at = NOW(),
                 owner_shortname = EXCLUDED.owner_shortname,
                 owner_group_shortname = EXCLUDED.owner_group_shortname,
-                payload = EXCLUDED.payload,
+                payload = COALESCE(EXCLUDED.payload, users.payload),
                 last_checksum_history = EXCLUDED.last_checksum_history,
                 password = EXCLUDED.password,
                 roles = EXCLUDED.roles,

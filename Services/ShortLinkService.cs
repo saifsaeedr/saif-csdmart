@@ -11,20 +11,29 @@ public sealed class ShortLinkService(LinkRepository links, IOptions<DmartSetting
         var url = await links.ResolveAsync(token, ct);
         if (url is null) return null;
 
-        // The resolver runs anonymously (ShortLinkHandler.cs:21 .AllowAnonymous).
-        // Today the creator only ever stores `{AppUrl}/managed/entry/content/...`,
-        // so off-host stored URLs would be the result of a bug or a future writer
-        // that bypasses the creator. Reject them at the redirect site so the
-        // public endpoint can never become an open redirect.
-        var appUrl = settings.Value.AppUrl;
-        if (string.IsNullOrEmpty(appUrl)) return url;
+        // The resolver runs anonymously (ShortLinkHandler.cs:21 .AllowAnonymous),
+        // so it must refuse to redirect anywhere that wasn't written by a
+        // server-controlled path. Two such writers exist:
+        //   * ShortLinkHandler /managed/shortening/... stores {AppUrl}/managed/entry/...
+        //   * InvitationService.ShortenAsync stores {InvitationLink}/auth/invitation?...
+        // Allow either; reject everything else so the public endpoint can
+        // never become an open redirect.
+        var s = settings.Value;
+        if (string.IsNullOrWhiteSpace(s.AppUrl) && string.IsNullOrWhiteSpace(s.InvitationLink))
+            return url;
         if (!Uri.TryCreate(url, UriKind.Absolute, out var stored)) return null;
-        if (!Uri.TryCreate(appUrl, UriKind.Absolute, out var app)) return url;
-        if (!string.Equals(stored.Scheme, app.Scheme, StringComparison.OrdinalIgnoreCase)
-            || !string.Equals(stored.Host, app.Host, StringComparison.OrdinalIgnoreCase)
-            || stored.Port != app.Port)
-            return null;
-        return url;
+        if (MatchesBase(stored, s.AppUrl) || MatchesBase(stored, s.InvitationLink))
+            return url;
+        return null;
+    }
+
+    private static bool MatchesBase(Uri stored, string? baseUrl)
+    {
+        if (string.IsNullOrWhiteSpace(baseUrl)) return false;
+        if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var b)) return false;
+        return string.Equals(stored.Scheme, b.Scheme, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(stored.Host, b.Host, StringComparison.OrdinalIgnoreCase)
+            && stored.Port == b.Port;
     }
 
     public Task<string> CreateAsync(string targetUrl, CancellationToken ct = default)
