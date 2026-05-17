@@ -74,6 +74,7 @@ public static unsafe class NativePluginCallbacks
         //   2 — Query, GetMediaAttachment appended; Query was ACL-free
         //   3 — Query honors caller's actor by default; "as_actor" override
         //   4 — Log appended (plugin → ILogger pipeline)
+        //   5 — GetSessionFirebaseTokens appended
         public int Version;
 
         // Plugin → host structured logging. Routes the message through
@@ -85,11 +86,18 @@ public static unsafe class NativePluginCallbacks
         // host — pass NULL for the default. `message` is required.
         // APPENDED in V4.
         public delegate* unmanaged[Cdecl]<int, byte*, byte*, void> Log;
+
+        // Returns a JSON array of firebase_token strings for the user's
+        // active sessions. Args: (shortname, inactivityTtlSeconds).
+        // inactivityTtlSeconds <= 0 disables the TTL filter (all sessions).
+        // Returns "[]" when the user has no sessions or on error.
+        // Returned pointer must be released via DmartFree. APPENDED in V5.
+        public delegate* unmanaged[Cdecl]<byte*, int, byte*> GetSessionFirebaseTokens;
     }
 
     // Single source of truth for the version number written into every
     // DmartCallbacks struct. Matches the comment in the field above.
-    public const int CurrentVersion = 4;
+    public const int CurrentVersion = 5;
 
     // Allocated once, stays alive for the process lifetime. Plugins keep
     // the pointer we hand them in their `init()` and dereference it as
@@ -138,6 +146,7 @@ public static unsafe class NativePluginCallbacks
             GetMediaAttachment = &GetMediaAttachmentCb,
             Version = CurrentVersion,
             Log = &LogCb,
+            GetSessionFirebaseTokens = &GetSessionFirebaseTokensCb,
         };
         // Copy into unmanaged memory so the pointer doesn't move under the
         // GC. The struct is small and ABI-stable; the pointer lives until
@@ -667,6 +676,32 @@ public static unsafe class NativePluginCallbacks
         var lvl = ClampLevel(level);
         var logger = factory.CreateLogger(fullCategory);
         if (logger.IsEnabled(lvl)) logger.Log(lvl, "{Message}", msg);
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static byte* GetSessionFirebaseTokensCb(byte* shortname, int inactivityTtlSeconds)
+    {
+        var logger = GetCallbackLogger();
+        var sn = PtrToString(shortname) ?? "";
+        try
+        {
+            if (Services is null)
+            {
+                logger?.LogWarning("get_session_firebase_tokens called before services initialized");
+                return AllocUtf8("[]");
+            }
+            using var scope = Services.CreateScope();
+            var users = scope.ServiceProvider.GetRequiredService<UserRepository>();
+            int? ttl = inactivityTtlSeconds > 0 ? inactivityTtlSeconds : null;
+            var tokens = users.GetSessionFirebaseTokensAsync(sn, ttl).GetAwaiter().GetResult();
+            logger?.LogDebug("get_session_firebase_tokens {User} count={Count}", sn, tokens.Count);
+            return AllocUtf8(JsonSerializer.Serialize(tokens, DmartJsonContext.Default.ListString));
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError(ex, "get_session_firebase_tokens failed for {User}", sn);
+            return AllocUtf8("[]");
+        }
     }
 
     // internal for testing — lets tests inject a fake ILoggerFactory or
