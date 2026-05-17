@@ -681,26 +681,52 @@ public static unsafe class NativePluginCallbacks
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     private static byte* GetSessionFirebaseTokensCb(byte* shortname, int inactivityTtlSeconds)
     {
+        // Marshal-only here; the typed work lives in EmitGetSessionFirebaseTokens
+        // so tests can call it with already-typed string + nullable-int args.
+        // Mirrors the SaveEntryCb → EmitSaveEntry / LogCb → EmitPluginLog
+        // split used throughout this file.
         var logger = GetCallbackLogger();
         var sn = PtrToString(shortname) ?? "";
+        int? ttl = inactivityTtlSeconds > 0 ? inactivityTtlSeconds : null;
+        return AllocUtf8(EmitGetSessionFirebaseTokens(sn, ttl, logger));
+    }
+
+    // internal for testing via dmart.Tests. Returns a serialized JSON array
+    // of firebase_token strings; never returns null.
+    //
+    // The empty-array "[]" on the error path is a deliberate deviation from
+    // LoadEntry/LoadUser/SaveEntry's JSON error envelope. This callback's
+    // sole consumer is push-notification dispatch, where "no devices to
+    // push to" and "lookup failed" are functionally equivalent — the
+    // plugin skips the push either way — so collapsing both cases keeps
+    // the plugin code path uniform. Don't switch to an error envelope
+    // without auditing every plugin that parses the result.
+    internal static string EmitGetSessionFirebaseTokens(
+        string shortname, int? inactivityTtlSeconds, ILogger? logger)
+    {
+        // Short-circuit empty shortname before opening a DI scope + DB
+        // round-trip. The repository would return [] anyway, but a
+        // null/empty pointer from the plugin is almost certainly a bug
+        // and isn't worth the per-call overhead.
+        if (string.IsNullOrEmpty(shortname)) return "[]";
         try
         {
             if (Services is null)
             {
                 logger?.LogWarning("get_session_firebase_tokens called before services initialized");
-                return AllocUtf8("[]");
+                return "[]";
             }
             using var scope = Services.CreateScope();
             var users = scope.ServiceProvider.GetRequiredService<UserRepository>();
-            int? ttl = inactivityTtlSeconds > 0 ? inactivityTtlSeconds : null;
-            var tokens = users.GetSessionFirebaseTokensAsync(sn, ttl).GetAwaiter().GetResult();
-            logger?.LogDebug("get_session_firebase_tokens {User} count={Count}", sn, tokens.Count);
-            return AllocUtf8(JsonSerializer.Serialize(tokens, DmartJsonContext.Default.ListString));
+            var tokens = users.GetSessionFirebaseTokensAsync(shortname, inactivityTtlSeconds)
+                .GetAwaiter().GetResult();
+            logger?.LogDebug("get_session_firebase_tokens {User} count={Count}", shortname, tokens.Count);
+            return JsonSerializer.Serialize(tokens, DmartJsonContext.Default.ListString);
         }
         catch (Exception ex)
         {
-            logger?.LogError(ex, "get_session_firebase_tokens failed for {User}", sn);
-            return AllocUtf8("[]");
+            logger?.LogError(ex, "get_session_firebase_tokens failed for {User}", shortname);
+            return "[]";
         }
     }
 

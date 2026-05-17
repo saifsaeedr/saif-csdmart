@@ -202,30 +202,19 @@ private static readonly IntPtr StaticVersionPtr =
 
 If the plugin exports `init`, dmart calls it once at load time (right after `get_info`) with a pointer to a stable `DmartCallbacks` struct. Store the struct in a static and use it from `hook()` to read/write entries, send email, or push WebSocket messages — no HTTP, no JWT, in-process.
 
-```c
-typedef struct {
-    // Reads — return malloc'd JSON string (must dmart_free); returns NULL on
-    // OOM. Empty body is an object like {"entry":null} or {"user":null}.
-    char* (*load_entry)(const char* space, const char* subpath,
-                        const char* shortname, const char* resource_type);
-    char* (*load_user)(const char* shortname);
+**Canonical struct layout** lives in [`shared/DmartCallbacks.cs`](shared/DmartCallbacks.cs) — that file is the single source of truth and is what the host emits (`Plugins/Native/NativePluginCallbacks.cs:DmartCallbacks`). Past V1-only inline snippets here drifted on every version bump; the pointer is now the contract.
 
-    // Writes — bypass plugin hooks (matches Python db.save semantics).
-    // 0 = ok, non-zero = error.
-    int (*save_entry)(const char* entry_json);
-    int (*update_user)(const char* user_json);
+Capability marker bumps so far:
 
-    // Side channels. 0 = ok.
-    int (*send_email)(const char* to, const char* subject, const char* html_body);
-    int (*ws_broadcast)(const char* channel, const char* message_json);
+- **V1** — initial release: `load_entry`, `load_user`, `save_entry`, `update_user`, `send_email`, `ws_broadcast`, `dmart_free`
+- **V2** — `query`, `get_media_attachment` appended (query was ACL-free)
+- **V3** — `query` honors the caller's actor by default; `"as_actor"` override
+- **V4** — `log` appended (plugin → ILogger pipeline)
+- **V5** — `get_session_firebase_tokens` appended (per-user push tokens)
 
-    // Parallel to the plugin's own free_string; use to release strings the
-    // callbacks above returned.
-    void (*dmart_free)(char* ptr);
-} DmartCallbacks;
-```
+Layout is **append-only** — fields are added at the end so plugins compiled against an older `DmartCallbacks` struct can still read the version they understand. Check `cb.Version >= N` before calling any field appended in V`N` (the `DmartSdk.*` C# wrappers do this automatically and fall back to a safe no-op return).
 
-Layout is append-only (new fields go at the end). `resource_type` in `load_entry` accepts the wire form (`"content"`, `"folder"`, `"ticket"`, …) or NULL for a type-agnostic lookup.
+`resource_type` in `load_entry` accepts the wire form (`"content"`, `"folder"`, `"ticket"`, …) or NULL for a type-agnostic lookup.
 
 **C# helper** — copy `custom_plugins_sdk/shared/DmartCallbacks.cs` into your plugin project. It gives you a ready-to-use `DmartCallbacks` struct plus `DmartSdk.LoadUser(_cb, shortname)` / `DmartSdk.SaveEntry(_cb, entryJson)` / etc. wrappers that handle UTF-8 marshaling and string freeing for you.
 
