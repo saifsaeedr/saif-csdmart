@@ -5,7 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
-// SDK header version: V4 (Log callback). Tracks
+// SDK header version: V5 (GetSessionFirebaseTokens callback). Tracks
 // NativePluginCallbacks.CurrentVersion in lock-step.
 namespace Dmart.Sdk;
 
@@ -68,6 +68,7 @@ public unsafe struct DmartCallbacks
     //   2 — Query, GetMediaAttachment appended; Query was ACL-free
     //   3 — Query honors caller's actor by default; "as_actor" override
     //   4 — Log appended (plugin → ILogger pipeline)
+    //   5 — GetSessionFirebaseTokens appended
     public int Version;
 
     // Plugin → host structured logging. Routes the message through dmart's
@@ -81,6 +82,15 @@ public unsafe struct DmartCallbacks
     // APPENDED in V4 — check Version >= 4 before calling, or use the
     // DmartSdk.Log* wrappers below which fall back to stderr.
     public delegate* unmanaged[Cdecl]<int, byte*, byte*, void> Log;
+
+    // Returns a JSON array of firebase_token strings for the user's active
+    // sessions. Args: (shortname, inactivityTtlSeconds).
+    // inactivityTtlSeconds <= 0 disables the TTL filter (returns all sessions).
+    // Returns "[]" when the user has no sessions or on error.
+    // Returned pointer must be released via DmartFree. APPENDED in V5 —
+    // check Version >= 5 before calling, or use the DmartSdk.GetSessionFirebaseTokens
+    // wrapper which guards the version check automatically.
+    public delegate* unmanaged[Cdecl]<byte*, int, byte*> GetSessionFirebaseTokens;
 }
 
 // Ergonomic wrappers that handle UTF-8 marshaling, null pointers, and
@@ -252,6 +262,34 @@ public static unsafe class DmartSdk
             Marshal.FreeHGlobal((IntPtr)subBuf);
             Marshal.FreeHGlobal((IntPtr)snBuf);
         }
+    }
+
+    // Returns the list of firebase_token strings for a user's active sessions.
+    // Pass inactivityTtlSeconds > 0 to filter out sessions older than that
+    // many seconds; pass 0 (default) for all sessions regardless of age.
+    // Requires Version >= 5 — returns an empty list on older hosts.
+    public static List<string> GetSessionFirebaseTokens(
+        in DmartCallbacks cb, string shortname, int inactivityTtlSeconds = 0)
+    {
+        if (cb.Version < 5 || cb.GetSessionFirebaseTokens == null) return [];
+        var buf = StringToUtf8(shortname);
+        try
+        {
+            var resultPtr = cb.GetSessionFirebaseTokens(buf, inactivityTtlSeconds);
+            var json = TakeAndFree(cb, resultPtr);
+            if (string.IsNullOrEmpty(json)) return [];
+            try
+            {
+                using var doc = JsonDocument.Parse(json);
+                var result = new List<string>();
+                foreach (var el in doc.RootElement.EnumerateArray())
+                    if (el.ValueKind == JsonValueKind.String)
+                        result.Add(el.GetString()!);
+                return result;
+            }
+            catch { return []; }
+        }
+        finally { Marshal.FreeHGlobal((IntPtr)buf); }
     }
 
     // ========================================================================
