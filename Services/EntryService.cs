@@ -343,7 +343,12 @@ public sealed class EntryService(
         // of "update". Used by RequestType.assign (Python parity:
         // serve_request_assign requires the `assign` action) and reusable
         // for any future dispatcher that needs a non-update action gate.
-        string? actionOverride = null)
+        string? actionOverride = null,
+        // Mirrors CreateAsync's `isBulkImport` — tags the emitted Event so
+        // logging-only hooks (AuditPlugin) skip per-row noise. Used by
+        // CsvService.ImportAsync's update branch to keep a 10k-row CSV
+        // from generating 10k audit history rows.
+        bool isBulkImport = false)
     {
         // Load existing first so the permission check has the resource context for
         // "own"/"is_active" conditions and the patch dict for field-restriction gating.
@@ -385,7 +390,7 @@ public sealed class EntryService(
                 return Result<Entry>.Fail(uniqRes.ErrorCode, uniqRes.ErrorMessage!, uniqRes.ErrorType!);
         }
 
-        var beforeEvent = BuildEvent(merged, ActionType.Update, actor);
+        var beforeEvent = BuildEvent(merged, ActionType.Update, actor, isBulkImport);
         try { await plugins.BeforeActionAsync(beforeEvent, ct); }
         catch (Exception ex)
         {
@@ -409,7 +414,7 @@ public sealed class EntryService(
         await history.AppendAsync(locator.SpaceName, locator.Subpath, locator.Shortname, actor, null,
             historyDiff.Count > 0 ? historyDiff : null, ct);
 
-        var afterEvent = BuildEvent(merged, ActionType.Update, actor);
+        var afterEvent = BuildEvent(merged, ActionType.Update, actor, isBulkImport);
         if (historyDiff.Count > 0) afterEvent.Attributes["history_diff"] = historyDiff;
         await plugins.AfterActionAsync(afterEvent, ct);
         return Result<Entry>.Ok(merged);

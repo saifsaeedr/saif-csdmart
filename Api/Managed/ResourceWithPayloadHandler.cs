@@ -63,10 +63,16 @@ public static class ResourceWithPayloadHandler
                 if (csvFile is null)
                     return Response.Fail(InternalErrorCode.MISSING_DATA, "csv file required", ErrorTypes.Request);
 
+                // Python parity: `?is_update=true` switches each row from CREATE to
+                // an UpdateAsync that deep-merges only the row's columns into the
+                // existing entry's payload.body. Tolerant flag parsing — same shape
+                // as other Python wire-flag toggles in this codebase ("true"/"1"/"yes").
+                var isUpdate = ParseBoolFlag(req.Query["is_update"].FirstOrDefault());
+
                 await using var stream = csvFile.OpenReadStream();
                 return await csv.ImportAsync(space, "/" + subpath.TrimStart('/'), rt,
                     string.IsNullOrEmpty(schema) ? null : schema,
-                    stream, http.Actor(), ct);
+                    stream, http.Actor(), ct, isUpdate);
             })
           .DisableAntiforgery();
     }
@@ -252,6 +258,16 @@ public static class ResourceWithPayloadHandler
     // the context so we don't trip IL2026/IL3050.
     private static JsonElement StringJsonElement(string value)
         => JsonSerializer.SerializeToElement(value, DmartJsonContext.Default.String);
+
+    // Tolerant wire-flag parser. Accepts the truthy values dmart Python uses
+    // ("true"/"1"/"yes", case-insensitive); everything else (including the
+    // empty/missing case) is false. Kept local — only the CSV endpoint reads
+    // a bool flag from the query string.
+    private static bool ParseBoolFlag(string? raw)
+        => raw is not null
+           && (raw.Equals("true", StringComparison.OrdinalIgnoreCase)
+               || raw.Equals("1", StringComparison.Ordinal)
+               || raw.Equals("yes", StringComparison.OrdinalIgnoreCase));
 
     // Pull `tags` out of a record's attributes dict. Accepts a JSON array, a
     // List<string>, or an IEnumerable<object>; returns an empty list otherwise

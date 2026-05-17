@@ -181,13 +181,15 @@ public sealed class DmartClient : IDisposable
         return UploadWithPayloadAsync(recordJson, filePath);
     }
 
-    public async Task<JsonElement> UploadCsvAsync(string resourceType, string subpath, string schemaShortname, string filePath)
+    public async Task<JsonElement> UploadCsvAsync(string resourceType, string subpath, string schemaShortname, string filePath, bool isUpdate = false)
     {
         using var form = new MultipartFormDataContent();
         await using var fs = File.OpenRead(filePath);
         form.Add(new StreamContent(fs), "resources_file", Path.GetFileName(filePath));
-        var resp = await SendWithRefreshAsync(() => _http.PostAsync(
-            $"/managed/resources_from_csv/{resourceType}/{CurrentSpace}/{subpath}/{schemaShortname}", form));
+        var path = $"/managed/resources_from_csv/{resourceType}/{CurrentSpace}/{subpath}/{schemaShortname}";
+        // `?` if no existing query string, `&` if one already present.
+        if (isUpdate) path += (path.Contains('?') ? "&" : "?") + "is_update=true";
+        var resp = await SendWithRefreshAsync(() => _http.PostAsync(path, form));
         return await ParseAsync(resp);
     }
 

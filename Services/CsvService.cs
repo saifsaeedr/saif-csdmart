@@ -67,7 +67,7 @@ public sealed class CsvService(QueryService queries, EntryService entries)
 
     public async Task<Response> ImportAsync(
         string spaceName, string subpath, ResourceType resourceType, string? schemaShortname,
-        Stream csv, string? actor, CancellationToken ct = default)
+        Stream csv, string? actor, CancellationToken ct = default, bool isUpdate = false)
     {
         using var reader = new StreamReader(csv, Encoding.UTF8);
         var headerLine = await reader.ReadLineAsync(ct);
@@ -127,6 +127,41 @@ public sealed class CsvService(QueryService queries, EntryService entries)
                 .ToDictionary(kv => kv.Key, kv => kv.Value);
             var bodyJson = JsonSerializer.Serialize(bodyDict, DmartJsonContext.Default.DictionaryStringObject);
             var bodyEl = JsonDocument.Parse(bodyJson).RootElement.Clone();
+
+            if (isUpdate)
+            {
+                // Deep-merge only payload.body into the existing entry.
+                // EntryService.ApplyPatch reads attrs["payload"]["body"] and
+                // hands it to JsonMerge.DeepMergeAndStripNulls; every other
+                // field falls back to the existing row, so only the body
+                // gets touched. Missing shortnames surface as OBJECT_NOT_FOUND
+                // in the row-level failed list — symmetric with the create
+                // branch's SHORTNAME_ALREADY_EXIST.
+                //
+                // isBulkImport: true mirrors the CreateAsync call below so a
+                // 10k-row CSV update produces one HTTP-level audit log line
+                // instead of 10k per-row history rows. AuditPlugin reads
+                // Event.IsBulkImport to decide whether to skip.
+                var patchAttrs = new Dictionary<string, object>
+                {
+                    ["payload"] = new Dictionary<string, object>
+                    {
+                        ["body"] = bodyEl,
+                    },
+                };
+                var locator = new Locator(resourceType, spaceName, subpath, shortname);
+                var updateResult = await entries.UpdateAsync(locator, patchAttrs, actor, ct,
+                    isBulkImport: true);
+                if (updateResult.IsOk) inserted++;
+                else failed.Add(new()
+                {
+                    ["row"] = rowNumber,
+                    ["shortname"] = shortname,
+                    ["error"] = updateResult.ErrorMessage ?? "unknown",
+                    ["code"] = updateResult.ErrorCode,
+                });
+                continue;
+            }
 
             var entry = new Entry
             {

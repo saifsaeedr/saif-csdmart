@@ -262,6 +262,163 @@ public class CsvRoundTripTests : IClassFixture<DmartFactory>
         }
     }
 
+    // `?is_update=true` switches the route from per-row create to per-row
+    // UpdateAsync, deep-merging the CSV's columns into the existing entry's
+    // payload.body. Pre-existing fields not mentioned in the CSV row must
+    // survive; conflicting fields win in favor of the CSV value.
+    [FactIfPg]
+    public async Task Csv_Import_UpdateMode_DeepMerges_PayloadBody()
+    {
+        const string space = "itest_csv_upd";
+        var (client, _, _, _) = await _factory.CreateLoggedInUserAsync();
+
+        try
+        {
+            await CleanupAsync(client, space);
+            await SeedSpaceAsync(client, space);
+
+            // Seed two entries with full payload.body. The CSV update below
+            // only sends a subset of keys per row — the keys it omits must
+            // remain unchanged after the deep merge.
+            (await PostOk(client, "/managed/request",
+                "{\"space_name\":\"" + space + "\",\"request_type\":\"create\",\"records\":[" +
+                "{\"resource_type\":\"content\",\"subpath\":\"items\",\"shortname\":\"alpha\"," +
+                "\"attributes\":{\"payload\":{\"content_type\":\"json\",\"schema_shortname\":\"goods\"," +
+                "\"body\":{\"name\":\"Alpha original\",\"price\":1.00,\"in_stock\":true}}}}]}"))
+                .ShouldBeTrue("alpha seed");
+            (await PostOk(client, "/managed/request",
+                "{\"space_name\":\"" + space + "\",\"request_type\":\"create\",\"records\":[" +
+                "{\"resource_type\":\"content\",\"subpath\":\"items\",\"shortname\":\"beta\"," +
+                "\"attributes\":{\"payload\":{\"content_type\":\"json\",\"schema_shortname\":\"goods\"," +
+                "\"body\":{\"name\":\"Beta original\",\"price\":2.00,\"in_stock\":true}}}}]}"))
+                .ShouldBeTrue("beta seed");
+
+            // Update CSV touches only `price` (overwrite) and adds `color` (new key).
+            // `name` and `in_stock` columns are omitted — they must survive untouched.
+            var csv =
+                "shortname,price,color\r\n" +
+                "alpha,9.99,red\r\n" +
+                "beta,8.88,blue\r\n";
+            var importResp = await UploadCsvAsync(client,
+                resourceType: "content", space: space, subpath: "items", schema: "goods",
+                csvBytes: Encoding.UTF8.GetBytes(csv), isUpdate: true);
+
+            importResp.Status.ShouldBe(Status.Success);
+            ExtractInt(importResp.Attributes!["inserted"]).ShouldBe(2);
+            ExtractInt(importResp.Attributes!["failed_count"]).ShouldBe(0);
+
+            // Verify the merge: original `name`/`in_stock` survive, `price` is
+            // overwritten, `color` is added.
+            var queryResp = await PostJson(client, "/managed/query",
+                "{\"space_name\":\"" + space + "\",\"type\":\"subpath\"," +
+                "\"subpath\":\"items\",\"filter_schema_names\":[],\"retrieve_json_payload\":true,\"limit\":50}");
+            queryResp.Status.ShouldBe(Status.Success);
+
+            var alpha = GetPayloadBody(queryResp.Records!.First(r => r.Shortname == "alpha"));
+            alpha.GetProperty("name").GetString().ShouldBe("Alpha original");
+            alpha.GetProperty("in_stock").GetBoolean().ShouldBeTrue();
+            // CSV cells come through as strings (no schema-driven type coercion —
+            // pinning Python parity behavior, see ParseCellValue comment).
+            alpha.GetProperty("price").GetString().ShouldBe("9.99");
+            alpha.GetProperty("color").GetString().ShouldBe("red");
+
+            var beta = GetPayloadBody(queryResp.Records!.First(r => r.Shortname == "beta"));
+            beta.GetProperty("name").GetString().ShouldBe("Beta original");
+            beta.GetProperty("in_stock").GetBoolean().ShouldBeTrue();
+            beta.GetProperty("price").GetString().ShouldBe("8.88");
+            beta.GetProperty("color").GetString().ShouldBe("blue");
+        }
+        finally
+        {
+            await CleanupAsync(client, space);
+        }
+    }
+
+    // Update mode against a CSV row whose shortname doesn't exist: the
+    // surrounding request must still return Status.Success (it's a partial-batch
+    // contract, not a fail-the-whole-import contract) but the missing row lands
+    // in `failed` with EntryService's OBJECT_NOT_FOUND. Symmetric with the
+    // create branch's SHORTNAME_ALREADY_EXIST handling.
+    [FactIfPg]
+    public async Task Csv_Import_UpdateMode_MissingShortname_Returns_ObjectNotFound_In_Failed_List()
+    {
+        const string space = "itest_csv_upd_miss";
+        var (client, _, _, _) = await _factory.CreateLoggedInUserAsync();
+
+        try
+        {
+            await CleanupAsync(client, space);
+            await SeedSpaceAsync(client, space);
+
+            // Single row pointing at a shortname that was never created.
+            var csv = "shortname,name\r\nghost,Nothing here\r\n";
+            var importResp = await UploadCsvAsync(client,
+                resourceType: "content", space: space, subpath: "items", schema: "goods",
+                csvBytes: Encoding.UTF8.GetBytes(csv), isUpdate: true);
+
+            importResp.Status.ShouldBe(Status.Success);
+            ExtractInt(importResp.Attributes!["inserted"]).ShouldBe(0);
+            ExtractInt(importResp.Attributes!["failed_count"]).ShouldBe(1);
+
+            // `failed` round-trips as a JsonElement array via the source-gen
+            // dict<string,object> path. Inspect the single entry's code +
+            // shortname so a regression that returns a different InternalErrorCode
+            // (e.g. NOT_ALLOWED for a permission miss) is caught explicitly.
+            var failedEl = (JsonElement)importResp.Attributes!["failed"];
+            failedEl.GetArrayLength().ShouldBe(1);
+            var row0 = failedEl[0];
+            row0.GetProperty("shortname").GetString().ShouldBe("ghost");
+            // Either int (raw) or string (round-tripped via JsonElement.GetRawText)
+            // depending on path — accept both shapes defensively.
+            var code = row0.GetProperty("code");
+            var codeAsInt = code.ValueKind == JsonValueKind.Number
+                ? code.GetInt32()
+                : int.Parse(code.GetString()!);
+            codeAsInt.ShouldBe(Dmart.Models.Api.InternalErrorCode.OBJECT_NOT_FOUND,
+                "missing-shortname update row should map to OBJECT_NOT_FOUND");
+        }
+        finally
+        {
+            await CleanupAsync(client, space);
+        }
+    }
+
+    // In create mode an empty shortname cell auto-generates `row-<8hex>`. In
+    // update mode the same auto-generation happens but no entry with that
+    // freshly-minted shortname exists yet → every empty-shortname row 404s
+    // into the failed list. Pin that contract so a future change that decides
+    // to (e.g.) silently skip empty-shortname rows under update mode is loud.
+    [FactIfPg]
+    public async Task Csv_Import_UpdateMode_EmptyShortnameCell_Falls_Into_Failed_List()
+    {
+        const string space = "itest_csv_upd_empty";
+        var (client, _, _, _) = await _factory.CreateLoggedInUserAsync();
+
+        try
+        {
+            await CleanupAsync(client, space);
+            await SeedSpaceAsync(client, space);
+
+            // Both rows have empty shortname cells; update mode auto-generates
+            // names that don't exist anywhere → both fail.
+            var csv =
+                "shortname,name\r\n" +
+                ",Orphan A\r\n" +
+                ",Orphan B\r\n";
+            var importResp = await UploadCsvAsync(client,
+                resourceType: "content", space: space, subpath: "items", schema: "goods",
+                csvBytes: Encoding.UTF8.GetBytes(csv), isUpdate: true);
+
+            importResp.Status.ShouldBe(Status.Success);
+            ExtractInt(importResp.Attributes!["inserted"]).ShouldBe(0);
+            ExtractInt(importResp.Attributes!["failed_count"]).ShouldBe(2);
+        }
+        finally
+        {
+            await CleanupAsync(client, space);
+        }
+    }
+
     // ---------------- helpers ----------------
 
     // Sets up space + items folder + schema folder + a permissive `goods` schema
@@ -337,7 +494,8 @@ public class CsvRoundTripTests : IClassFixture<DmartFactory>
     }
 
     private static async Task<Response> UploadCsvAsync(
-        HttpClient client, string resourceType, string space, string subpath, string schema, byte[] csvBytes)
+        HttpClient client, string resourceType, string space, string subpath, string schema, byte[] csvBytes,
+        bool isUpdate = false)
     {
         using var form = new MultipartFormDataContent();
         var csvPart = new ByteArrayContent(csvBytes);
@@ -345,6 +503,7 @@ public class CsvRoundTripTests : IClassFixture<DmartFactory>
         form.Add(csvPart, "resources_file", "rows.csv");
 
         var url = $"/managed/resources_from_csv/{resourceType}/{space}/{subpath}/{schema}";
+        if (isUpdate) url += "?is_update=true";
         var resp = await client.PostAsync(url, form);
         var parsed = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
         return parsed!;
