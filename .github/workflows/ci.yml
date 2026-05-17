@@ -34,6 +34,14 @@ jobs:
         env:
           PGPASSFILE: /home/githubrunner/.pgpass
         run: |
+          # set -e so a silent dropdb/createdb failure no longer cascades
+          # into a polluted-DB test run where the admin password is stale
+          # from a prior run and every login 401s. Without this guard, a
+          # dangling PG connection from a previous job that wasn't fully
+          # cleaned up blocks the drop, the create no-ops against the
+          # still-existing DB, and the next run inherits stale state.
+          # Fail loud at the drop step instead.
+          set -e
           cp /home/githubrunner/config.env ./
           # Ensure the test/smoke phases have everything the settings
           # validator requires. Append-if-missing so we don't clobber
@@ -44,6 +52,18 @@ jobs:
           grep -q '^DATABASE_USERNAME' config.env || echo 'DATABASE_USERNAME="dmart"' >> config.env
           grep -q '^DATABASE_PASSWORD' config.env || echo 'DATABASE_PASSWORD="dmart"' >> config.env
           grep -q '^DATABASE_NAME' config.env || echo 'DATABASE_NAME="dmart"' >> config.env
+          # Pre-amble: kick any sessions still attached to the dmart DB.
+          # PostgreSQL refuses to drop a database with open connections, and
+          # a prior CI run's `dmart serve` may not have fully released its
+          # pool before SIGTERM landed — those orphan backends block dropdb
+          # below and force the test phase to reuse stale schema + stale
+          # admin password from the prior run. `|| true` keeps a cold-PG
+          # / missing-DB case from blocking; only dropdb is required to
+          # succeed.
+          psql -w -h 127.0.0.1 -U dmart -d postgres -c \
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+             WHERE datname='dmart' AND pid <> pg_backend_pid();" \
+            >/dev/null || true
           # -w makes these fail fast (no password prompt) if PGPASSFILE miss.
           dropdb   -w --if-exists -h 127.0.0.1 -U dmart dmart
           createdb -w             -h 127.0.0.1 -U dmart dmart
