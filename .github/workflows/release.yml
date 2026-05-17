@@ -352,6 +352,94 @@ jobs:
           name: windows-zip
           path: dist/out/*-win-x64.zip
 
+  build-macos-arm64:
+    name: Build macOS (osx-arm64 AOT)
+    # macos-14 is the Apple Silicon (M1) GitHub-hosted runner image.
+    # NativeAOT cannot cross-compile from Linux/Windows, so the only way
+    # to produce an osx-arm64 native binary is to run the publish on an
+    # arm64 macOS host. Public repos get macOS minutes for free; private
+    # repos are billed at 10x the Linux rate, so think before flipping.
+    runs-on: macos-14
+    needs: build-ui-tarballs
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Download UI tarballs
+        uses: actions/download-artifact@v7
+        with:
+          name: ui-tarballs
+          path: dist/out
+
+      - name: Extract UI dists
+        run: |
+          V="${GITHUB_REF_NAME#v}"; V="${V:-0.1.0}"
+          mkdir -p cxb/dist/client catalog/dist/client
+          tar -xzf "dist/out/cxb-${V}.tar.gz"     -C cxb/dist/client
+          tar -xzf "dist/out/catalog-${V}.tar.gz" -C catalog/dist/client
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', '**/Directory.Packages.props', '**/Directory.Build.props') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Set version
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=${VERSION:-0.1.0}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish AOT osx-arm64
+        # build.sh's --rid flag drives the publish. UI dists are already
+        # extracted above so build.sh's "needs_build" check skips the
+        # yarn/npm path (the macos-14 runner does ship Node, but we don't
+        # need it here — the dists came from the build-ui-tarballs job).
+        run: ./build.sh --aot --rid osx-arm64
+
+      - name: Ad-hoc codesign
+        # Ad-hoc (-) signing satisfies macOS's cohesive-signature check
+        # that an AOT-stripped Mach-O binary can fail post-publish.
+        # Downloaders still need a one-time `xattr -d com.apple.quarantine`
+        # to clear Gatekeeper after extracting the zip; full notarization
+        # would require an Apple Developer ID cert + secrets wiring.
+        run: |
+          codesign --force --sign - bin/Release/net10.0/osx-arm64/publish/dmart
+          codesign --verify --verbose bin/Release/net10.0/osx-arm64/publish/dmart
+
+      - name: Package zip
+        run: |
+          mkdir -p dist/out
+          ZIP="dist/out/dmart-${{ steps.version.outputs.version }}-osx-arm64.zip"
+          # -j strips the bin/Release/net10.0/osx-arm64/publish prefix so
+          # the archive extracts flat into wherever the user unzips it —
+          # matches the layout of the win-x64 zip.
+          (cd bin/Release/net10.0/osx-arm64/publish && zip -9 -r "$OLDPWD/$ZIP" .)
+          ls -lh "$ZIP"
+
+      - name: Upload macOS zip to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ZIP=$(ls dist/out/*-osx-arm64.zip 2>/dev/null | head -1)
+          if [ -n "$ZIP" ]; then
+            gh release upload "$GITHUB_REF_NAME" "$ZIP" --clobber
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-arm64-zip
+          path: dist/out/*-osx-arm64.zip
+
   build-container:
     name: Build & Push Container Image
     runs-on: self-hosted

@@ -11,20 +11,29 @@ set -e
 #                     contained native binary. Right for release artifacts
 #                     and CI / RPM packaging.
 MODE="fast"
-for arg in "$@"; do
-  case "$arg" in
-    --aot|--full|--release) MODE="aot" ;;
-    --fast|--dev)           MODE="fast" ;;
+# Default RID is linux-x64; --rid overrides for cross-platform AOT publish
+# (osx-arm64 on Apple Silicon, win-x64 on Windows, etc.). NativeAOT cannot
+# cross-compile, so the host must match the requested RID's OS+arch.
+RID="linux-x64"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --aot|--full|--release) MODE="aot"; shift ;;
+    --fast|--dev)           MODE="fast"; shift ;;
+    --rid)                  RID="$2"; shift 2 ;;
+    --rid=*)                RID="${1#*=}"; shift ;;
     -h|--help)
       cat <<-EOF
-Usage: $0 [--aot]
-  (default)   fast JIT build via \`dotnet build\` (~5-30s, dev iteration)
-              -> bin/dmart symlinks framework-dependent apphost
-  --aot       full native AOT publish (~3-4m, self-contained binary)
-              -> bin/dmart is a standalone 40 MB native binary
+Usage: $0 [--aot] [--rid <runtime-id>]
+  (default)         fast JIT build via \`dotnet build\` (~5-30s, dev iteration)
+                    -> bin/dmart symlinks framework-dependent apphost
+  --aot             full native AOT publish (~3-4m, self-contained binary)
+                    -> bin/dmart is a standalone 40 MB native binary
+  --rid <runtime>   target runtime identifier for --aot publish
+                    (default: linux-x64; e.g. osx-arm64, win-x64)
+                    NativeAOT cannot cross-compile — host OS+arch must match
 EOF
       exit 0 ;;
-    *) echo "Unknown arg: $arg (try --help)" >&2; exit 2 ;;
+    *) echo "Unknown arg: $1 (try --help)" >&2; exit 2 ;;
   esac
 done
 
@@ -72,7 +81,9 @@ fi
 mkdir -p bin
 
 if [ "$MODE" = "aot" ]; then
-    RID="linux-x64"
+    # AOT publish the single binary (server + CLI client). RID is set
+    # by the --rid flag (default linux-x64) parsed at the top of this file.
+    echo "RID:     $RID"
 
     # AOT publish the single binary (server + CLI client)
     dotnet publish dmart.csproj -r "$RID" \
