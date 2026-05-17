@@ -1,0 +1,20 @@
+#!/bin/sh
+# Seed /etc/dmart/config.env from the shipped sample on first install,
+# preserving any prior file on upgrades (Alpine runs post-install on
+# both install and upgrade — guard the copy with -f).
+if [ ! -f /etc/dmart/config.env ]; then
+	cp /usr/share/dmart/config.env.sample /etc/dmart/config.env
+	chmod 0640 /etc/dmart/config.env
+	chown root:dmart /etc/dmart/config.env
+	cat <<-EOF
+	Installed default config: /etc/dmart/config.env
+	Edit it with your database credentials and JWT secret, then:
+	  rc-update add dmart
+	  rc-service dmart start
+	EOF
+fi
+# Make the runtime dirs owned by dmart (Alpine's tar-extract path doesn't
+# always preserve the install -d ownership we set in package()).
+chown dmart:dmart /var/lib/dmart /var/lib/dmart/spaces \
+	/var/lib/dmart/custom_plugins /var/log/dmart 2>/dev/null || true
+exit 0

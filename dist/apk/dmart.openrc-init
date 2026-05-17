@@ -1,0 +1,37 @@
+#!/sbin/openrc-run
+# OpenRC service unit for dmart on Alpine. Mirrors the runtime contract
+# of dist/dmart.service (the systemd unit) — same user, same EnvFile,
+# same `serve` subcommand.
+
+name="dmart"
+description="dmart — Unified Data Platform"
+
+command="/usr/bin/dmart"
+command_args="serve"
+command_user="dmart:dmart"
+command_background="yes"
+
+# Sourced into the environment of the spawned dmart process. Same file
+# the systemd unit reads from /etc/dmart/config.env — keeping one
+# config source across both service managers is the whole point.
+output_log="/var/log/dmart/dmart.log"
+error_log="/var/log/dmart/dmart.log"
+pidfile="/run/dmart.pid"
+
+start_pre() {
+	# Sourcing config.env into the supervisor's environment so it
+	# propagates to the child. OpenRC doesn't have systemd's EnvFile=
+	# directive — explicit dot-source is the canonical pattern.
+	if [ -r /etc/dmart/config.env ]; then
+		# shellcheck disable=SC1091
+		. /etc/dmart/config.env
+		export $(grep -v '^#' /etc/dmart/config.env | sed -e 's/=.*//' | tr '\n' ' ')
+	fi
+	checkpath -d -m 0755 -o dmart:dmart /var/log/dmart
+}
+
+depend() {
+	need net
+	use postgresql
+	after firewall
+}

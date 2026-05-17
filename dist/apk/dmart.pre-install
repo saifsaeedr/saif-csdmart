@@ -1,0 +1,9 @@
+#!/bin/sh
+# Create the dmart system user/group before files are unpacked, so
+# `install -d` directives in package() that target dmart-owned dirs
+# resolve cleanly. On Alpine this uses busybox addgroup/adduser
+# (shadow-utils is RPM-land).
+addgroup -S dmart 2>/dev/null || true
+adduser -S -D -H -h /var/lib/dmart -s /sbin/nologin \
+	-G dmart -g "dmart data platform" dmart 2>/dev/null || true
+exit 0

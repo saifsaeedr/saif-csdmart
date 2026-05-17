@@ -1,0 +1,12 @@
+#!/bin/sh
+# Stop and disable the service before tearing down the user. delgroup
+# safely no-ops if the group is gone (e.g. on a second uninstall after
+# the user already removed it manually). Deliberately leaves
+# /etc/dmart/config.env and /var/lib/dmart in place — destroying
+# operator data on package removal is the wrong default for a CMS.
+rc-service dmart stop 2>/dev/null || true
+rc-update del dmart 2>/dev/null || true
+
+deluser dmart 2>/dev/null || true
+delgroup dmart 2>/dev/null || true
+exit 0

@@ -440,6 +440,105 @@ jobs:
           name: macos-arm64-zip
           path: dist/out/*-osx-arm64.zip
 
+  build-apk-x86_64:
+    name: Build Alpine APK (x86_64)
+    # Self-hosted runner is already x86_64; the Alpine container the
+    # build script spins up will resolve to amd64 automatically, no
+    # --platform flag, no QEMU. Same shape as fedora-rpm / el9-rpm.
+    runs-on: self-hosted
+    needs: build-ui-tarballs
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download UI tarballs
+        uses: actions/download-artifact@v7
+        with:
+          name: ui-tarballs
+          path: dist/out
+
+      - name: Extract UI dists
+        run: |
+          V="${GITHUB_REF_NAME#v}"; V="${V:-0.1.0}"
+          mkdir -p cxb/dist/client catalog/dist/client
+          tar -xzf "dist/out/cxb-${V}.tar.gz"     -C cxb/dist/client
+          tar -xzf "dist/out/catalog-${V}.tar.gz" -C catalog/dist/client
+
+      - name: Build APK (x86_64)
+        run: |
+          pkill -f 'dmart serve' 2>/dev/null || true
+          sleep 1
+          rm -rf dist/out/*.apk
+          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${VERSION:-0.1.0}"
+          VERSION="$VERSION" ./dist/build-apk.sh --arch x86_64
+
+      - name: Upload APK to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          APK=$(ls dist/out/dmart-*-x86_64.apk 2>/dev/null | head -1)
+          if [ -n "$APK" ]; then
+            gh release upload "$GITHUB_REF_NAME" "$APK" --clobber
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: alpine-apk-x86_64
+          path: dist/out/dmart-*-x86_64.apk
+
+  build-apk-aarch64:
+    name: Build Alpine APK (aarch64)
+    # ubuntu-24.04-arm is a GitHub-hosted Apple-Silicon-equivalent
+    # ARM64 Ubuntu runner (free on public repos). Same script as the
+    # x86_64 job, different host arch — the Alpine container picks
+    # the arm64 manifest variant automatically. No QEMU emulation.
+    runs-on: ubuntu-24.04-arm
+    needs: build-ui-tarballs
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download UI tarballs
+        uses: actions/download-artifact@v7
+        with:
+          name: ui-tarballs
+          path: dist/out
+
+      - name: Extract UI dists
+        run: |
+          V="${GITHUB_REF_NAME#v}"; V="${V:-0.1.0}"
+          mkdir -p cxb/dist/client catalog/dist/client
+          tar -xzf "dist/out/cxb-${V}.tar.gz"     -C cxb/dist/client
+          tar -xzf "dist/out/catalog-${V}.tar.gz" -C catalog/dist/client
+
+      - name: Build APK (aarch64)
+        # ubuntu-24.04-arm ships docker (not podman). CONTAINER_ENGINE
+        # toggles the script's `$ENGINE run` call without other changes.
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${VERSION:-0.1.0}"
+          CONTAINER_ENGINE=docker VERSION="$VERSION" \
+            ./dist/build-apk.sh --arch aarch64
+
+      - name: Upload APK to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          APK=$(ls dist/out/dmart-*-aarch64.apk 2>/dev/null | head -1)
+          if [ -n "$APK" ]; then
+            gh release upload "$GITHUB_REF_NAME" "$APK" --clobber
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: alpine-apk-aarch64
+          path: dist/out/dmart-*-aarch64.apk
+
   build-container:
     name: Build & Push Container Image
     runs-on: self-hosted
