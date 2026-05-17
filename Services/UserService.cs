@@ -525,35 +525,38 @@ public sealed class UserService(
             await users.EvictExcessSessionsAsync(user.Shortname, maxSessions - 1, ct);
         }
 
-        // Sync the in-memory copy with ResetAttemptsAsync — without this, a
-        // later UpsertAsync (triggered by device_id or last_login changes)
-        // would restore the stale pre-login attempt_count via
-        // `attempt_count = EXCLUDED.attempt_count` in the ON CONFLICT clause.
+        // Sync the in-memory copy with ResetAttemptsAsync so callers see the
+        // post-login counter even though we don't replay the full row to PG.
         var updatedUser = user with { AttemptCount = 0 };
-        var needsUpdate = false;
+        string? newDeviceId = null;
         if (!string.IsNullOrEmpty(req.DeviceId) && req.DeviceId != user.DeviceId)
         {
+            newDeviceId = req.DeviceId;
             updatedUser = updatedUser with { DeviceId = req.DeviceId };
-            needsUpdate = true;
         }
 
         // Python tracks last_login = {timestamp, headers} on every successful login.
+        Dictionary<string, object>? loginInfo = null;
         if (requestHeaders is not null)
         {
-            var loginInfo = new Dictionary<string, object>
+            loginInfo = new Dictionary<string, object>
             {
                 // Cast to int so source-gen JSON can serialize it (no Int64 TypeInfo).
                 ["timestamp"] = (int)DateTimeOffset.Now.ToUnixTimeSeconds(),
                 ["headers"] = requestHeaders,
             };
             updatedUser = updatedUser with { LastLogin = loginInfo };
-            needsUpdate = true;
         }
 
-        if (needsUpdate)
+        // Targeted UPDATE rather than UpsertAsync: a plugin's after-hook
+        // (e.g. OAuth → update_user attaching a Payload via
+        // UpsertWithPriorAsync) may have written between the auth check
+        // and this point; replaying the pre-login in-memory row would
+        // erase those changes.
+        if (newDeviceId is not null || loginInfo is not null)
         {
-            updatedUser = updatedUser with { UpdatedAt = TimeUtils.Now() };
-            await users.UpsertAsync(updatedUser, ct);
+            await users.TouchLoginAsync(user.Shortname, newDeviceId, loginInfo, ct);
+            updatedUser = updatedUser with { UpdatedAt = TimeUtils.Now() }; 
         }
 
         var access = jwt.IssueAccess(updatedUser.Shortname, updatedUser.Roles, updatedUser.Type);

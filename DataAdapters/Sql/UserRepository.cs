@@ -323,6 +323,35 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    // Post-login bookkeeping: writes only `device_id` and/or `last_login`
+    // (plus `updated_at`) so a concurrent plugin write that landed between
+    // the auth check and here — e.g. an OAuth after-hook calling
+    // update_user → UpsertWithPriorAsync to attach a Payload — isn't
+    // clobbered by an UpsertAsync replaying the pre-login in-memory row.
+    // Null arguments leave the corresponding column untouched.
+    public async Task TouchLoginAsync(
+        string shortname, string? deviceId, Dictionary<string, object>? lastLogin,
+        CancellationToken ct = default)
+    {
+        if (deviceId is null && lastLogin is null) return;
+        await using var conn = await db.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand("""
+            UPDATE users SET
+                device_id  = COALESCE($2, device_id),
+                last_login = COALESCE($3::jsonb, last_login),
+                updated_at = NOW()
+            WHERE shortname = $1
+            """, conn);
+        cmd.Parameters.Add(new() { Value = shortname });
+        cmd.Parameters.Add(new() { Value = (object?)deviceId ?? DBNull.Value });
+        cmd.Parameters.Add(new()
+        {
+            Value = (object?)JsonbHelpers.ToJsonb(lastLogin) ?? DBNull.Value,
+            NpgsqlDbType = NpgsqlDbType.Jsonb,
+        });
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     public async Task<int> GetAttemptCountAsync(string shortname, CancellationToken ct = default)
     {
         await using var conn = await db.OpenAsync(ct);
