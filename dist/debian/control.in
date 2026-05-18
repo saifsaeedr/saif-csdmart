@@ -4,9 +4,6 @@ Section: net
 Priority: optional
 Architecture: amd64
 Maintainer: dmart <admin@dmart.cc>
-# PostgreSQL is intentionally NOT declared — dmart talks to a remote PG
-# over TCP just as often as a local one. Operators install the PG flavor
-# they want (postgresql, postgresql-server-only, or a remote cluster).
 Depends: jq
 Homepage: https://github.com/edraj/csdmart
 Description: dmart - Unified Data Platform (REST API server + CLI)

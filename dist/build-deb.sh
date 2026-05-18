@@ -146,6 +146,14 @@ $ENGINE run --rm \
         install -D -m 0644 dist/dmart.fish        "$STAGE/usr/share/fish/vendor_completions.d/dmart.fish"
 
         # Render control from template + install maintainer scripts.
+        # Note on the control file: PostgreSQL is intentionally NOT declared
+        # as a Depends or Recommends. dmart talks to a remote PG over TCP
+        # just as often as a local one, and pulling postgresql onto every
+        # dmart node forces a daemon nobody asked for. Operators install
+        # the PG flavor they want (locally or remotely). Same policy as
+        # dist/dmart.spec and dist/apk/APKBUILD.in — see those files for
+        # the same comment in a format that allows inline comments
+        # (Debian control files do not).
         sed "s|__VERSION__|$VERSION|" dist/debian/control.in > "$STAGE/DEBIAN/control"
         install -m 0755 dist/debian/postinst "$STAGE/DEBIAN/postinst"
         install -m 0755 dist/debian/prerm    "$STAGE/DEBIAN/prerm"
