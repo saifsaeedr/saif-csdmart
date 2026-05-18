@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using Dmart.Api;
+using MediaTypeNames = System.Net.Mime.MediaTypeNames;
 using Dmart.DataAdapters.Sql;
 using Dmart.Models.Api;
 using Dmart.Models.Core;
@@ -60,16 +61,30 @@ public static class PayloadHandler
                     statusCode: StatusCodes.Status401Unauthorized);
             }
             var mime = MimeFor(att.Payload?.ContentType, ext);
+            // JSON payloads (either by stored content-type or by ".json" URL
+            // suffix, case-insensitive) come back inline so callers can read
+            // the body without a Content-Disposition: attachment forcing a
+            // download in browsers. Everything else keeps the
+            // filename-bearing attachment header used for media downloads.
+            if (IsJsonResponse(mime, ext))
+                return Results.File(att.Media, "application/json; charset=utf-8");
             return Results.File(att.Media, mime, $"{shortname}.{ext}");
         }
 
-        // Entry-flavor: serialize the inline JSON payload from entries.payload.body
+        // Entry-flavor: serialize the inline JSON payload from
+        // entries.payload.body. The body is always JSON, so always inline —
+        // no filename, no attachment header. UTF-8 explicit so non-ASCII
+        // content (Arabic, Kurdish payloads) round-trips intact.
         var locator = new Locator(rt, space, normalizedSubpath, shortname);
         var entry = await entries.GetAsync(locator, actor, ct);
         if (entry?.Payload?.Body is null) return Results.NotFound();
         var bodyJson = JsonSerializer.Serialize(entry.Payload.Body!.Value, DmartJsonContext.Default.JsonElement);
-        return Results.Bytes(Encoding.UTF8.GetBytes(bodyJson), "application/json", $"{shortname}.json");
+        return Results.Content(bodyJson, MediaTypeNames.Application.Json, Encoding.UTF8);
     }
+
+    internal static bool IsJsonResponse(string mime, string ext) =>
+        string.Equals(mime, MediaTypeNames.Application.Json, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(ext, "json", StringComparison.OrdinalIgnoreCase);
 
     public static string MimeFor(ContentType? contentType, string ext) => contentType switch
     {

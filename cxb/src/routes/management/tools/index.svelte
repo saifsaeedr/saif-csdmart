@@ -141,7 +141,23 @@
                 </div>
                 <h3 class="text-xl font-bold mb-2">Trash</h3>
                 <p class="text-gray-600">
-                    View and manage your deleted items.
+                    View and manage your trashed items.
+                </p>
+            </div>
+        </Card>
+
+        <Card
+            class="p-4 hover:shadow-lg transition-shadow cursor-pointer"
+            onclick={() => $goto("/management/tools/entry_deletion")}
+        >
+            <div class="flex flex-col items-center text-center">
+                <div class="p-3 bg-red-100 rounded-full mb-4">
+                    <TrashBinOutline class="w-12 h-12 text-red-600" />
+                </div>
+                <h3 class="text-xl font-bold mb-2">Entry Deletion</h3>
+                <p class="text-gray-600">
+                    Find a user and delete every entry they own across all
+                    spaces.
                 </p>
             </div>
         </Card>
