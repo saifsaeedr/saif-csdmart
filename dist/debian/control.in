@@ -1,0 +1,18 @@
+Package: dmart
+Version: __VERSION__
+Section: net
+Priority: optional
+Architecture: amd64
+Maintainer: dmart <admin@dmart.cc>
+Depends: jq
+Recommends: postgresql
+Homepage: https://github.com/edraj/csdmart
+Description: dmart - Unified Data Platform (REST API server + CLI)
+ dmart is a unified data platform providing a REST API backed by PostgreSQL.
+ This package includes the native AOT server binary, the CLI client tool,
+ built-in plugin configurations, and a systemd service unit.
+ .
+ The binary is self-contained (NativeAOT publish, no .NET runtime
+ dependency). Built against Debian 12's glibc (2.36) - runs on Debian 12+,
+ Ubuntu 22.04+, and any glibc 2.36+ system. Older targets require building
+ from source on the target distro.

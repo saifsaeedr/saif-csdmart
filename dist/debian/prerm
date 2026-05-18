@@ -1,0 +1,18 @@
+#!/bin/sh
+# Run before removal (remove + purge). Stop + disable the service so
+# nothing's holding the binary open when dpkg unlinks it. NOT run on
+# upgrade — that's `prerm upgrade`, which we deliberately do not stop the
+# service on (the postinst's daemon-reload + a separate `systemctl
+# restart dmart` covers the running daemon).
+set -e
+
+case "$1" in
+    remove|purge)
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl stop dmart >/dev/null 2>&1 || true
+            systemctl disable dmart >/dev/null 2>&1 || true
+        fi
+        ;;
+esac
+
+exit 0

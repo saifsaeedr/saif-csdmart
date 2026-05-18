@@ -1,0 +1,25 @@
+#!/bin/sh
+# Run after removal. On `purge`, additionally tear down the system user
+# and group. Deliberately leaves /etc/dmart and /var/lib/dmart in place —
+# destroying operator data on package removal is the wrong default for a
+# CMS. An operator who truly wants a clean slate runs `rm -rf` explicitly.
+set -e
+
+case "$1" in
+    remove|purge|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl daemon-reload >/dev/null 2>&1 || true
+        fi
+        ;;
+esac
+
+if [ "$1" = purge ]; then
+    if getent passwd dmart >/dev/null; then
+        deluser dmart >/dev/null 2>&1 || true
+    fi
+    if getent group dmart >/dev/null; then
+        delgroup dmart >/dev/null 2>&1 || true
+    fi
+fi
+
+exit 0
