@@ -1344,6 +1344,7 @@ builder.Services.AddHttpContextAccessor();
 builder.Services.AddSingleton<SpaceEventLogger>();
 builder.Services.AddSingleton<PluginManager>();
 builder.Services.AddSingleton<LanguageLoader>();
+builder.Services.AddSingleton<ActivationTemplateLoader>();
 builder.Services.AddSingleton<LockService>();
 builder.Services.AddSingleton<ShortLinkService>();
 builder.Services.AddSingleton<CsvService>();
@@ -1663,6 +1664,10 @@ app.MapWebSocket();
 // Load embedded translation files once at startup (LanguageLoader is the
 // single source of truth for invitation/reset SMS bodies).
 app.Services.GetRequiredService<LanguageLoader>().Load();
+// Activation-email body template (Scriban). Embedded default with optional
+// ~/.dmart/ActivationEmailContent.txt override; parsed once here so renders
+// inside the invitation hot path don't pay the parse cost.
+app.Services.GetRequiredService<ActivationTemplateLoader>().Load();
 
 // Load plugins + mount API plugin routes
 {

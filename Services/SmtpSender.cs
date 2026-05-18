@@ -25,6 +25,17 @@ public sealed class SmtpSender(IOptions<DmartSettings> settings, ILogger<SmtpSen
             log.LogWarning("SMTP gateway not configured (MailHost blank) — dropping message to {To}", to);
             return false;
         }
+        // Empty bodies are spam-filter bait. If a template rendering upstream
+        // (ActivationTemplateLoader, etc.) degraded to "" — usually because
+        // the operator override at ~/.dmart/ActivationEmailContent.txt failed
+        // to parse — drop the send so the caller's existing "email not
+        // delivered → fall back" branch engages instead of a blank email
+        // landing in the recipient's spam folder.
+        if (string.IsNullOrWhiteSpace(htmlBody))
+        {
+            log.LogWarning("empty email body — refusing to send blank message to {To} (subject: {Subject})", to, subject);
+            return false;
+        }
 
         try
         {

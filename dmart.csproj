@@ -181,6 +181,17 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Default activation-email body template (Scriban). Operators can
+         override at ~/.dmart/ActivationEmailContent.txt without rebuilding —
+         see Services/ActivationTemplateLoader.cs. Embedded so the AOT
+         single-binary ship still has a working default if no override file
+         exists. -->
+    <EmbeddedResource Include="templates/*.txt" LinkBase="templates" />
+    <Content Remove="templates/*.txt" />
+    <None Remove="templates/*.txt" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="JsonSchema.Net" Version="9.1.4" />
     <PackageReference Include="Konscious.Security.Cryptography.Argon2" Version="1.3.1" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.5" />

@@ -33,6 +33,31 @@ public class SmtpSenderTests
         ok.ShouldBeFalse();
     }
 
+    // ActivationTemplateLoader (and any future template renderer) returns
+    // empty string when its source template fails to parse or is missing.
+    // SmtpSender must refuse to ship a blank-body email so the upstream
+    // caller's "email not delivered → fall back to in-response token"
+    // branch engages, instead of an empty message landing in spam.
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData("\n\t  ")]
+    public async Task EmptyOrWhitespaceBody_ReturnsFalse_WithoutSending(string body)
+    {
+        // Non-empty MailHost so we reach the body-check (not the earlier
+        // MailHost-blank guard). MockSmtpApi off so we exercise the real
+        // path up to the connect attempt — which we must NOT reach.
+        var sender = Build(new DmartSettings
+        {
+            MailHost = "127.0.0.1",
+            MailPort = 2,           // closed; if we got here the test'd still pass
+            MailUseTls = false,
+            MailFromAddress = "sender@example.com",
+        });
+        var ok = await sender.SendEmailAsync("anyone@example.com", "Test", body);
+        ok.ShouldBeFalse();
+    }
+
     [Fact]
     public async Task MailHost_Unreachable_ReturnsFalse_WithoutThrowing()
     {
