@@ -25,6 +25,7 @@ public static class AttachHandler
                                   ILogger<ResourceWithPayloadMarker> log, CancellationToken ct) =>
                 await ResourceWithPayloadHandler.HandleAsync(req, entries, attachments,
                     perms, "anonymous", log, ct))
+          .Produces<Response>()
           .DisableAntiforgery();
 
         g.MapPost("/attach/{space_name}",
@@ -33,6 +34,7 @@ public static class AttachHandler
                                   IOptions<DmartSettings> settings,
                                   ILogger<ResourceWithPayloadMarker> log, CancellationToken ct) =>
                 await HandleAttachAsync(space_name, req, entries, attachments, perms, settings.Value, log, ct))
+          .Produces<Response>()
           .DisableAntiforgery();
     }
 

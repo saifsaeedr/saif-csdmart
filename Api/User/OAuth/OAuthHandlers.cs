@@ -59,7 +59,10 @@ public static class OAuthHandlers
             var info = await provider.ValidateIdTokenAsync(token, ct);
             if (info is null) return ProviderError("invalid google id token");
             return await CompleteLoginAsync(info, resolver, users, settings, http, ct);
-        }).RequireRateLimiting("auth-by-ip");
+        })
+        .Accepts<Dmart.Models.Api.OAuthMobileLoginBody>("application/json")
+        .Produces<Response>()
+        .RequireRateLimiting("auth-by-ip");
 
         // ---- Facebook ----
         g.MapGet("/facebook/callback", async (string? code,
@@ -90,7 +93,10 @@ public static class OAuthHandlers
             var info = await provider.ValidateAccessTokenAsync(token, ct);
             if (info is null) return ProviderError("invalid facebook access token");
             return await CompleteLoginAsync(info, resolver, users, settings, http, ct);
-        }).RequireRateLimiting("auth-by-ip");
+        })
+        .Accepts<Dmart.Models.Api.OAuthMobileLoginBody>("application/json")
+        .Produces<Response>()
+        .RequireRateLimiting("auth-by-ip");
 
         // ---- Apple ----
         // Two callback shapes are possible from Apple:
@@ -141,7 +147,10 @@ public static class OAuthHandlers
             var info = await provider.ValidateIdTokenAsync(token, ct);
             if (info is null) return ProviderError("invalid apple id token");
             return await CompleteLoginAsync(info, resolver, users, settings, http, ct);
-        }).RequireRateLimiting("auth-by-ip");
+        })
+        .Accepts<Dmart.Models.Api.OAuthMobileLoginBody>("application/json")
+        .Produces<Response>()
+        .RequireRateLimiting("auth-by-ip");
     }
 
     // Resolve-or-create user, issue session, set auth_token cookie, return the

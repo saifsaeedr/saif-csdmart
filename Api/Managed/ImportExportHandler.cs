@@ -30,7 +30,9 @@ public static class ImportExportHandler
                     zipStream = req.Body;
                 }
                 return await io.ImportZipAsync(zipStream, http.Actor(), ct);
-            }).DisableAntiforgery();
+            })
+            .Produces<Response>()
+            .DisableAntiforgery();
 
         // Python-parity: POST /export takes a Query JSON body (not query-string
         // args). Mirrors dmart_plain/backend/api/managed/router.py::export_data
@@ -63,6 +65,8 @@ public static class ImportExportHandler
 
                 var stream = await io.ExportAsync(query, http.Actor(), ct);
                 return Results.Stream(stream, "application/zip", $"{query.SpaceName}.zip");
-            });
+            })
+            .Accepts<Query>("application/json")
+            .Produces(200, contentType: "application/zip");
     }
 }

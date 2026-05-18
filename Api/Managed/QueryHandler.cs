@@ -28,5 +28,11 @@ public static class QueryHandler
                 resp = Response.Fail(InternalErrorCode.INVALID_DATA, "invalid request body", ErrorTypes.Request);
             }
             await JqEnvelope.WriteAsync(http.Response, resp, q?.JqFilter, settings.Value.JqTimeout, ct);
-        });
+        })
+        // The handler reads the body via HttpRequest so it can surface
+        // malformed-JSON as dmart's structured failure envelope. Declare
+        // the body type here so Swagger UI shows the Query schema and the
+        // OpenApiExamples sample payload.
+        .Accepts<Query>("application/json")
+        .Produces<Response>();
 }

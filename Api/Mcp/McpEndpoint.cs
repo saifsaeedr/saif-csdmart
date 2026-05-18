@@ -31,7 +31,9 @@ public static class McpEndpoint
             http.Response.ContentType = "application/json";
             await JsonSerializer.SerializeAsync(
                 http.Response.Body, response, McpJsonContext.Default.McpResponse, ct);
-        }).RequireAuthorization();
+        })
+        .Accepts<Dmart.Models.Api.McpRequestBody>("application/json")
+        .RequireAuthorization();
 
         // Streamable HTTP SSE stream. Drains the session outbox and writes
         // each message as an SSE `data:` frame. The bridge plugin

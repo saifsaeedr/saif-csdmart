@@ -105,7 +105,9 @@ public static class ProfileHandler
             return result.IsOk
                 ? Response.Ok(attributes: new() { ["shortname"] = result.Value!.Shortname })
                 : Response.Fail(result.ErrorCode, result.ErrorMessage!, result.ErrorType ?? "request");
-        });
+        })
+        .Accepts<ProfileUpdateBody>("application/json")
+        .Produces<Response>();
 
         g.MapPost("/delete", async (HttpContext http, UserService svc, CancellationToken ct) =>
         {
@@ -170,7 +172,9 @@ public static class ProfileHandler
             var attrs = new Dictionary<string, object> { ["shortname"] = target };
             if (minted.Count > 0) attrs["invitations"] = minted;
             return Response.Ok(attributes: attrs);
-        });
+        })
+        .Accepts<ResetUserBody>("application/json")
+        .Produces<Response>();
 
         // POST /user/validate_password — Python verifies against stored hash,
         // requires authentication. Returns {valid: bool}.
@@ -195,7 +199,9 @@ public static class ProfileHandler
 
             var valid = await svc.ValidatePasswordAsync(actor, password, ct);
             return Response.Ok(attributes: new() { ["valid"] = valid });
-        });
+        })
+        .Accepts<ValidatePasswordBody>("application/json")
+        .Produces<Response>();
 
         // GET /user/check-existing — Python parity: short-circuit on first
         // conflict. Iteration order matches Python dict: shortname → msisdn →

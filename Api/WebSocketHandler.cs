@@ -154,7 +154,9 @@ public static class WebSocketHandler
             var formatted = BuildWsMessageJson(body);
             var sent = await mgr.SendMessageAsync(user_shortname, formatted);
             return Results.Text(BuildSendResult(sent), "application/json");
-        }).WithTags("WebSocket").RequireAuthorization();
+        })
+        .Accepts<Dmart.Models.Api.WsSendMessageBody>("application/json")
+        .WithTags("WebSocket").RequireAuthorization();
 
         // POST /broadcast-to-channels — broadcast to subscribed clients.
         // Used by realtime_updates_notifier plugin after CRUD events.
@@ -174,7 +176,9 @@ public static class WebSocketHandler
                 }
             }
             return Results.Text(BuildSendResult(sent), "application/json");
-        }).WithTags("WebSocket").RequireAuthorization();
+        })
+        .Accepts<Dmart.Models.Api.WsBroadcastBody>("application/json")
+        .WithTags("WebSocket").RequireAuthorization();
 
         // GET /ws-info — list connected clients + channels (admin debugging).
         app.MapGet("/ws-info", (WsConnectionManager mgr) =>

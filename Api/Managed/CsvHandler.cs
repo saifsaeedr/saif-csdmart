@@ -27,7 +27,9 @@ public static class CsvHandler
             if (q is null) return Results.BadRequest(Response.Fail(InternalErrorCode.MISSING_DATA, "empty body", ErrorTypes.Request));
             var stream = await csv.ExportAsync(q, http.Actor(), ct);
             return Results.Stream(stream, "text/csv", "export.csv");
-        });
+        })
+        .Accepts<Query>("application/json")
+        .Produces(200, contentType: "text/csv");
 
         // Saved query → CSV. The {space_name} param is a query named "saved-queries"
         // subpath in dmart convention; Python receives a Record pointing at the
@@ -76,6 +78,11 @@ public static class CsvHandler
                     var queryStream = await csv.ExportAsync(q, http.Actor(), ct);
                     return Results.Stream(queryStream, "text/csv", $"{space_name}.csv");
                 }
-            });
+            })
+            // Body may be either a Query or a saved-query Record. Documenting
+            // the Query form here is the common case; pasting a Record with
+            // `resource_type` instead also works at runtime.
+            .Accepts<Query>("application/json")
+            .Produces(200, contentType: "text/csv");
     }
 }

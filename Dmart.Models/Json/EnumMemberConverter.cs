@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Runtime.Serialization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Dmart.Models.Api;
 using Dmart.Models.Enums;
 
 namespace Dmart.Models.Json;
@@ -17,6 +18,13 @@ public abstract class EnumMemberConverterBase<[DynamicallyAccessedMembers(Dynami
     : JsonConverter<TEnum> where TEnum : struct, Enum
 {
     private static readonly (TEnum Value, string Name)[] Map = BuildMap();
+
+    // Wire-format names in declaration order. Exposed so the dmart server's
+    // OpenAPI generator can inject the proper string-enum schema for this
+    // type — the [JsonConverter] attribute on TEnum hides it from .NET's
+    // built-in schema introspection, which would otherwise emit a $ref
+    // without a matching component.
+    public static IReadOnlyList<string> WireValues { get; } = Map.Select(x => x.Name).ToArray();
 
     private static (TEnum, string)[] BuildMap()
     {
@@ -76,3 +84,28 @@ public sealed class LanguageJsonConverter                : EnumMemberConverterBa
 public sealed class ActionTypeJsonConverter             : EnumMemberConverterBase<ActionType> { }
 public sealed class PluginTypeJsonConverter             : EnumMemberConverterBase<PluginType> { }
 public sealed class EventListenTimeJsonConverter        : EnumMemberConverterBase<EventListenTime> { }
+
+// Index of every enum whose JSON wire format is governed by an
+// EnumMemberConverterBase<T> above. The dmart server walks this to inject
+// the missing string-enum schemas into the generated OpenAPI document.
+// Adding a new concrete converter above MUST also add an entry here, or
+// Swagger UI will report an unresolved $ref for the new enum.
+public static class EnumMemberConverters
+{
+    public static readonly (string SchemaName, IReadOnlyList<string> WireValues)[] All =
+    {
+        (nameof(Status),                   StatusJsonConverter.WireValues),
+        (nameof(ResourceType),             ResourceTypeJsonConverter.WireValues),
+        (nameof(RequestType),              RequestTypeJsonConverter.WireValues),
+        (nameof(QueryType),                QueryTypeJsonConverter.WireValues),
+        (nameof(SortType),                 SortTypeJsonConverter.WireValues),
+        (nameof(TaskType),                 TaskTypeJsonConverter.WireValues),
+        (nameof(PublicSubmitResourceType), PublicSubmitResourceTypeJsonConverter.WireValues),
+        (nameof(ContentType),              ContentTypeJsonConverter.WireValues),
+        (nameof(UserType),                 UserTypeJsonConverter.WireValues),
+        (nameof(Language),                 LanguageJsonConverter.WireValues),
+        (nameof(ActionType),               ActionTypeJsonConverter.WireValues),
+        (nameof(PluginType),               PluginTypeJsonConverter.WireValues),
+        (nameof(EventListenTime),          EventListenTimeJsonConverter.WireValues),
+    };
+}

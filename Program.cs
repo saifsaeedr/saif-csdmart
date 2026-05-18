@@ -1084,6 +1084,72 @@ builder.Services.AddOpenApi(options =>
         };
         return Task.CompletedTask;
     });
+
+    // .NET 10's OpenAPI generator emits `$ref: "#/components/schemas/<EnumName>"`
+    // for every named enum it encounters, but the [JsonConverter] attribute on
+    // our string enums (Status, ResourceType, …) blocks its built-in schema
+    // introspection — leaving the $ref pointing at nothing and Swagger UI
+    // reporting "Resolver error: Could not resolve reference". Inject the
+    // string-enum schemas here from the converters' own WireValues. Overwrite
+    // unconditionally: when an enum is reachable from an endpoint, the
+    // generator pre-creates a null/empty schema under that name which we
+    // need to replace, not preserve.
+    options.AddDocumentTransformer((document, _, _) =>
+    {
+        document.Components ??= new Microsoft.OpenApi.OpenApiComponents();
+        document.Components.Schemas ??= new Dictionary<string, Microsoft.OpenApi.IOpenApiSchema>();
+        foreach (var (name, values) in Dmart.Models.Json.EnumMemberConverters.All)
+        {
+            var schema = new Microsoft.OpenApi.OpenApiSchema
+            {
+                Type = Microsoft.OpenApi.JsonSchemaType.String,
+                Enum = new List<System.Text.Json.Nodes.JsonNode>(values.Count),
+            };
+            foreach (var v in values)
+                schema.Enum.Add(System.Text.Json.Nodes.JsonValue.Create(v)!);
+            document.Components.Schemas[name] = schema;
+        }
+
+        return Task.CompletedTask;
+    });
+
+    // Attach a sample payload to each request body schema we know about so
+    // Swagger UI's "Try it out" form pre-fills with a working request. The
+    // OpenApiExamples registry maps request body types to their samples;
+    // adding a new entry there is enough — no per-endpoint wiring needed.
+    //
+    // Same place we patch JoinQuery.query: it's declared as `JsonElement?`
+    // in C# to allow a free-form inner query body, but the generator emits
+    // a $ref to a JsonElement schema it never defines. Replace that
+    // property's schema with an inline "anything" so Swagger UI doesn't
+    // print "Could not resolve reference: JsonElement".
+    options.AddSchemaTransformer((schema, ctx, _) =>
+    {
+        if (Dmart.Api.OpenApiExamples.TryGet(ctx.JsonTypeInfo.Type, out var example))
+            schema.Example = example;
+        if (ctx.JsonTypeInfo.Type == typeof(Dmart.Models.Api.JoinQuery) && schema.Properties is not null)
+            schema.Properties["query"] = new Microsoft.OpenApi.OpenApiSchema
+            {
+                // Type=Object communicates "expect a JSON object" to Swagger
+                // UI (it'll render `{}` in Try-it-out) rather than the
+                // description-only stub which leaves the UI guessing.
+                Type = Microsoft.OpenApi.JsonSchemaType.Object,
+                Description = "Inner Query body for this join (any JSON object).",
+            };
+        return Task.CompletedTask;
+    });
+
+    // Multipart endpoints can't use `.Accepts<TForm>("multipart/form-data")`
+    // because their form marker classes hold IFormFile (an interface that
+    // System.Text.Json source-gen can't emit metadata for, which the OpenAPI
+    // resolver requires). And `.WithOpenApi(op => ...)` per-endpoint isn't
+    // AOT-safe (IL2026/IL3050 — uses reflection). So inject the
+    // multipart/form-data request body schemas here, keyed by path.
+    options.AddDocumentTransformer((document, _, _) =>
+    {
+        Dmart.Api.OpenApiMultipartSchemas.Apply(document);
+        return Task.CompletedTask;
+    });
 });
 
 // All logging config from config.env.

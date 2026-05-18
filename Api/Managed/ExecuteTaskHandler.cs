@@ -34,7 +34,12 @@ public static class ExecuteTaskHandler
             {
                 return await ExecuteFromBodyAsync(task_type, space_name, req,
                     entries, queries, http.Actor(), ct);
-            });
+            })
+            // Body may be either the back-compat `{shortname, subpath?,
+            // query_overrides?}` shape (documented here) or a full Record
+            // envelope with `resource_type`. Both work at runtime.
+            .Accepts<Dmart.Models.Api.ExecuteTaskBody>("application/json")
+            .Produces<Response>();
 
         // Apply-alteration is wired in AlterationHandler.cs.
     }

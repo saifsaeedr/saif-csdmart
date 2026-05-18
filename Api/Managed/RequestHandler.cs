@@ -266,7 +266,13 @@ public static class RequestHandler
                 };
                 return Response.Fail(InternalErrorCode.SOMETHING_WRONG,
                     "Something went wrong", ErrorTypes.Request, info);
-            });
+            })
+            // Body is parsed manually so deserialization errors surface as
+            // dmart's structured failure envelope (see the long comment
+            // above). Declare the schema here so Swagger UI shows the
+            // Request type and the OpenApiExamples sample payload.
+            .Accepts<Request>("application/json")
+            .Produces<Response>();
 
     // ============================================================================
     // CREATE

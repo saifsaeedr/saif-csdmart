@@ -47,7 +47,9 @@ public static class QueryHandler
                     $"invalid Query JSON: {ex.Message}", ErrorTypes.Request);
             }
             await JqEnvelope.WriteAsync(http.Response, resp, q?.JqFilter, settings.Value.JqTimeout, ct);
-        });
+        })
+        .Accepts<Query>("application/json")
+        .Produces<Response>();
 
         // Python: GET /public/query/{type}/{space_name}/{subpath:path}
         g.MapGet("/query/{type}/{space_name}/{**subpath}", async (
