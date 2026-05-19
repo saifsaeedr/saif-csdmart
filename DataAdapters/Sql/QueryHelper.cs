@@ -614,7 +614,7 @@ public static class QueryHelper
                     between = $"e::float BETWEEN CAST(${p1} AS float) AND CAST(${p2} AS float)";
                 var exists = $"EXISTS (SELECT 1 FROM {iterator} WHERE {between})";
                 return data.Negative
-                    ? $"({typeofGuard} AND NOT {exists})"
+                    ? $"({arrayExpr} IS NULL OR jsonb_typeof({arrayExpr}) = 'null' OR ({typeofGuard} AND NOT {exists}))"
                     : $"({typeofGuard} AND {exists})";
             }
             // Lexicographic range for string/date.
@@ -626,7 +626,7 @@ public static class QueryHelper
             var between2 = $"{elementText} BETWEEN ${sp1} AND ${sp2}";
             var exists2 = $"EXISTS (SELECT 1 FROM {iterator} WHERE {between2})";
             return data.Negative
-                ? $"({typeofGuard} AND NOT {exists2})"
+                ? $"({arrayExpr} IS NULL OR jsonb_typeof({arrayExpr}) = 'null' OR ({typeofGuard} AND NOT {exists2}))"
                 : $"({typeofGuard} AND {exists2})";
         }
 
@@ -677,7 +677,7 @@ public static class QueryHelper
 
             var exists = $"EXISTS (SELECT 1 FROM {iterator} WHERE {predicate})";
             conditions.Add(data.Negative
-                ? $"({typeofGuard} AND NOT {exists})"
+                ? $"({arrayExpr} IS NULL OR jsonb_typeof({arrayExpr}) = 'null' OR ({typeofGuard} AND NOT {exists}))"
                 : $"({typeofGuard} AND {exists})");
         }
         return JoinConditions(conditions, data.Operation, data.Negative);
@@ -719,11 +719,13 @@ public static class QueryHelper
             }
             else if (data.Negative || compOp == "!")
             {
-                // Negation: NOT in array AND != as string
+                // Negation: field absent, NOT in array, or != as string/number.
+                // Absent/null fields are intentionally included
                 args.Add(new() { Value = value });
                 var pVal = args.Count;
                 args.Add(new() { Value = ToJsonArray(value) });
                 var pJsonArr = args.Count;
+                var absentCond = $"(payload::jsonb->{arrowPath} IS NULL OR jsonb_typeof(payload::jsonb->{arrowPath}) = 'null')";
                 var arrayCond = $"(jsonb_typeof(payload::jsonb->{arrowPath}) = 'array' AND NOT (payload::jsonb->{arrowPath} @> CAST(${pJsonArr} AS jsonb)))";
                 var stringCond = $"(jsonb_typeof(payload::jsonb->{arrowPath}) = 'string' AND {textExtract} != ${pVal})";
                 if (isNum)
@@ -731,11 +733,11 @@ public static class QueryHelper
                     args.Add(new() { Value = double.Parse(value, CultureInfo.InvariantCulture) });
                     var pNum = args.Count;
                     var numCond = $"(jsonb_typeof(payload::jsonb->{arrowPath}) = 'number' AND ({textExtract})::float != CAST(${pNum} AS float))";
-                    conditions.Add($"({arrayCond} OR {stringCond} OR {numCond})");
+                    conditions.Add($"({absentCond} OR {arrayCond} OR {stringCond} OR {numCond})");
                 }
                 else
                 {
-                    conditions.Add($"({arrayCond} OR {stringCond})");
+                    conditions.Add($"({absentCond} OR {arrayCond} OR {stringCond})");
                 }
             }
             else
