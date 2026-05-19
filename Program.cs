@@ -193,6 +193,10 @@ switch (subcommand)
               settings       Print effective settings as JSON
               passwd         Set password for a user interactively
               check          Run health checks on a space
+              selfcheck      Smoke-test the running HTTP surface (login + CRUD + query)
+                             Usage: dmart selfcheck [--url <url>] [--admin <name>]
+                                                    [--password <pwd> | --password-stdin]
+                                                    [--space <name>] [--keep] [-v]
               export         Export a space to a zip in the dmart on-disk layout
                              Usage: dmart export <space_name> [--output <path|dir|.>]
                              --output unset      → ./<space>.zip
@@ -307,6 +311,17 @@ switch (subcommand)
         {
             Console.WriteLine($"User {username} not found");
         }
+        return;
+    }
+
+    case "selfcheck":
+    {
+        // Operator-facing HTTP smoke. Talks to a running dmart over its
+        // REST surface; doesn't touch the DB itself, so no CliBootstrap.
+        // Defaults pull LISTENING_PORT / ADMIN_SHORTNAME / ADMIN_PASSWORD
+        // out of the already-loaded config.env (dotenvValues), matching
+        // curl.sh's env-then-config-then-fallback resolution order.
+        Environment.ExitCode = await Dmart.Cli.SelfCheckCommand.Run(serverArgs, dotenvValues);
         return;
     }
 
