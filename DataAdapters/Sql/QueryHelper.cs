@@ -613,6 +613,9 @@ public static class QueryHelper
                 else
                     between = $"e::float BETWEEN CAST(${p1} AS float) AND CAST(${p2} AS float)";
                 var exists = $"EXISTS (SELECT 1 FROM {iterator} WHERE {between})";
+                // Negation: absent/null fields are intentionally included
+                // (matches user expectation that "field NOT BETWEEN x AND y"
+                // should also return rows where the field doesn't exist).
                 return data.Negative
                     ? $"({arrayExpr} IS NULL OR jsonb_typeof({arrayExpr}) = 'null' OR ({typeofGuard} AND NOT {exists}))"
                     : $"({typeofGuard} AND {exists})";
@@ -625,6 +628,8 @@ public static class QueryHelper
             var sp2 = args.Count;
             var between2 = $"{elementText} BETWEEN ${sp1} AND ${sp2}";
             var exists2 = $"EXISTS (SELECT 1 FROM {iterator} WHERE {between2})";
+            // Negation: absent/null fields are intentionally included
+            // (see numeric-range branch above).
             return data.Negative
                 ? $"({arrayExpr} IS NULL OR jsonb_typeof({arrayExpr}) = 'null' OR ({typeofGuard} AND NOT {exists2}))"
                 : $"({typeofGuard} AND {exists2})";

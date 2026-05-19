@@ -61,6 +61,48 @@ public class QueryHelperTests
         where.ShouldContain("payload::jsonb");
     }
 
+    // ==================== Negation includes absent/null fields ====================
+    //
+    // Pre-fix, `-@field:value` excluded entries where the field was absent —
+    // SQL's three-valued logic returned NULL on `payload::jsonb->'k' != 'v'`
+    // when the field was missing, and `WHERE NULL` filters the row out.
+    // Users' mental model ("give me everything that isn't v") expects absent
+    // and JSON-null rows to count too. The fix adds an OR clause matching
+    // `(arrayExpr IS NULL OR jsonb_typeof(arrayExpr) = 'null')` (or the
+    // equivalent on the scalar branch) so all three negation paths include
+    // absent/null entries.
+
+    [Fact]
+    public void Search_Negation_Scalar_Payload_Includes_Absent_Or_JsonNull()
+    {
+        var where = BuildSearch("-@payload.body.k:v");
+        // The new `absentCond` clause checks both flavors of absent: the
+        // JSON path returns SQL NULL (missing key) or jsonb null (`"k": null`).
+        where.ShouldContain("IS NULL");
+        where.ShouldContain("= 'null'");
+    }
+
+    [Fact]
+    public void Search_Negation_PayloadArray_NumericRange_Includes_Absent()
+    {
+        // Numeric range on an array-iterated payload path. The new clause
+        // sits at the top of the BETWEEN-negation disjunction.
+        var where = BuildSearch("-@payload.body.items[].price:[100 200]");
+        where.ShouldContain("IS NULL");
+        where.ShouldContain("= 'null'");
+        where.ShouldContain("BETWEEN");
+    }
+
+    [Fact]
+    public void Search_Negation_PayloadArray_LexRange_Includes_Absent()
+    {
+        // Lexicographic range on an array-iterated string/date path.
+        var where = BuildSearch("-@payload.body.items[].name:[apple zebra]");
+        where.ShouldContain("IS NULL");
+        where.ShouldContain("= 'null'");
+        where.ShouldContain("BETWEEN");
+    }
+
     // ==================== Comparison operators ====================
 
     [Fact]
