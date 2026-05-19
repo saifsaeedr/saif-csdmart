@@ -1475,6 +1475,21 @@ static async Task WriteDbFailureAsync(HttpContext ctx, int httpStatus, int code,
     await ctx.Response.WriteAsJsonAsync(body, DmartJsonContext.Default.Response);
 }
 
+// Same envelope shape as WriteDbFailureAsync but type=request — used when the
+// underlying PG error is actually caused by malformed user input (e.g. an
+// undefined column in a query.search expression) so clients branching on
+// error.type don't classify a user mistake as a server-side DB fault.
+static async Task WriteRequestFailureAsync(HttpContext ctx, int httpStatus, int code, string message)
+{
+    if (ctx.Response.HasStarted) return;
+    var cid = ctx.Response.Headers["X-Correlation-ID"].ToString();
+    ctx.Response.StatusCode = httpStatus;
+    ctx.Response.ContentType = "application/json";
+    var body = Dmart.Models.Api.Response.Fail(code, message, ErrorTypes.Request,
+        new List<Dictionary<string, object>> { new() { ["cid"] = cid } });
+    await ctx.Response.WriteAsJsonAsync(body, DmartJsonContext.Default.Response);
+}
+
 app.Use(async (ctx, next) =>
 {
     try { await next(); }
@@ -1495,6 +1510,22 @@ app.Use(async (ctx, next) =>
             await WriteDbFailureAsync(ctx, StatusCodes.Status409Conflict,
                 Dmart.Models.Api.InternalErrorCode.SHORTNAME_ALREADY_EXIST,
                 "resource already exists");
+        }
+        else if (ex.SqlState == "42703")
+        {
+            // undefined_column. Reached when a query.search expression
+            // references a field that isn't a real column — e.g. `@asd:123`
+            // when `asd` does not exist on entries. SearchExpressionParser
+            // only validates syntax (SafeColumnIdent), so unknown names
+            // pass through and PG rejects the generated SQL. Surface a
+            // request-level error pointing users at the @payload.body.<field>
+            // form instead of leaving them with the opaque 430.
+            var col = Dmart.Utils.PgErrorParsing.ExtractUndefinedColumn(ex.MessageText);
+            var message = col is null
+                ? "Unknown search field. To search a custom payload field, use '@payload.body.<field>:<value>'."
+                : $"Unknown search field '{col}'. To search a custom payload field, use '@payload.body.{col}:<value>' instead of '@{col}:<value>'.";
+            await WriteRequestFailureAsync(ctx, StatusCodes.Status400BadRequest,
+                Dmart.Models.Api.InternalErrorCode.INVALID_DATA, message);
         }
         else
         {
