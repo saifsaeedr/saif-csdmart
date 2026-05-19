@@ -24,6 +24,11 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
     public async Task<User?> GetByShortnameAsync(string shortname, CancellationToken ct = default)
     {
         await using var conn = await db.OpenAsync(ct);
+        return await GetByShortnameAsync(shortname, conn, ct);
+    }
+
+    public async Task<User?> GetByShortnameAsync(string shortname, NpgsqlConnection conn, CancellationToken ct = default)
+    {
         await using var cmd = new NpgsqlCommand($"{SelectAllColumns} WHERE shortname = $1", conn);
         cmd.Parameters.Add(new() { Value = shortname });
         await using var reader = await cmd.ExecuteReaderAsync(ct);
@@ -66,13 +71,18 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
 
     public async Task UpsertAsync(User u, CancellationToken ct = default)
     {
+        await using var conn = await db.OpenAsync(ct);
+        await UpsertAsync(u, conn, ct);
+    }
+
+    public async Task UpsertAsync(User u, NpgsqlConnection conn, CancellationToken ct = default)
+    {
         // Populate query_policies deterministically on every write so the
         // row-level ACL filter (QueryHelper.AppendAclFilter) can match
         // patterns against it. See EntryRepository.UpsertAsync for the
         // full rationale — same pattern, same invariant.
         u = u with { QueryPolicies = Utils.QueryPolicies.Generate(u) };
 
-        await using var conn = await db.OpenAsync(ct);
         await using var cmd = new NpgsqlCommand("""
             INSERT INTO users (uuid, shortname, space_name, subpath, is_active, slug,
                                displayname, description, tags, created_at, updated_at,

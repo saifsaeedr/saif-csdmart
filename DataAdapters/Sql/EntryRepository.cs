@@ -26,17 +26,29 @@ public sealed class EntryRepository(Db db)
 
     public async Task<Entry?> GetAsync(string spaceName, string subpath, string shortname, ResourceType type, CancellationToken ct = default)
     {
-        // Try with the specified resource_type first (most callers know the type).
         await using var conn = await db.OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand(
-            $"{SelectAllColumns} WHERE space_name = $1 AND subpath = $2 AND shortname = $3 AND resource_type = $4",
-            conn);
-        cmd.Parameters.Add(new() { Value = spaceName });
-        cmd.Parameters.Add(new() { Value = subpath });
-        cmd.Parameters.Add(new() { Value = shortname });
-        cmd.Parameters.Add(new() { Value = JsonbHelpers.EnumMember(type) });
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        if (await reader.ReadAsync(ct)) return Hydrate(reader);
+        return await GetAsync(spaceName, subpath, shortname, type, conn, ct);
+    }
+
+    public async Task<Entry?> GetAsync(string spaceName, string subpath, string shortname, ResourceType type, NpgsqlConnection conn, CancellationToken ct = default)
+    {
+        // Try with the specified resource_type first (most callers know the type).
+        // Scoped braces around the typed lookup so the reader+command release
+        // the connection BEFORE the fallback issues a second command on it —
+        // Npgsql forbids "command already in progress" on a shared session.
+        Entry? typed = null;
+        {
+            await using var cmd = new NpgsqlCommand(
+                $"{SelectAllColumns} WHERE space_name = $1 AND subpath = $2 AND shortname = $3 AND resource_type = $4",
+                conn);
+            cmd.Parameters.Add(new() { Value = spaceName });
+            cmd.Parameters.Add(new() { Value = subpath });
+            cmd.Parameters.Add(new() { Value = shortname });
+            cmd.Parameters.Add(new() { Value = JsonbHelpers.EnumMember(type) });
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            if (await reader.ReadAsync(ct)) typed = Hydrate(reader);
+        }
+        if (typed is not null) return typed;
 
         // Fallback: the URL may specify a generic resource_type (e.g. "content")
         // but the actual row has a different type (e.g. "schema"). Since the
@@ -45,7 +57,7 @@ public sealed class EntryRepository(Db db)
         // doesn't strictly filter by resource_type on single-entry loads —
         // the class_type parameter selects the Python model class, not the
         // SQL WHERE filter. Mirror that by retrying without the type filter.
-        return await GetAsync(spaceName, subpath, shortname, ct);
+        return await GetAsync(spaceName, subpath, shortname, conn, ct);
     }
 
     // Lookup without resource_type filter — used as fallback when the caller's
@@ -53,6 +65,11 @@ public sealed class EntryRepository(Db db)
     public async Task<Entry?> GetAsync(string spaceName, string subpath, string shortname, CancellationToken ct = default)
     {
         await using var conn = await db.OpenAsync(ct);
+        return await GetAsync(spaceName, subpath, shortname, conn, ct);
+    }
+
+    public async Task<Entry?> GetAsync(string spaceName, string subpath, string shortname, NpgsqlConnection conn, CancellationToken ct = default)
+    {
         await using var cmd = new NpgsqlCommand(
             $"{SelectAllColumns} WHERE space_name = $1 AND subpath = $2 AND shortname = $3",
             conn);
@@ -83,6 +100,12 @@ public sealed class EntryRepository(Db db)
 
     public async Task UpsertAsync(Entry e, CancellationToken ct = default)
     {
+        await using var conn = await db.OpenAsync(ct);
+        await UpsertAsync(e, conn, ct);
+    }
+
+    public async Task UpsertAsync(Entry e, NpgsqlConnection conn, CancellationToken ct = default)
+    {
         // Row-level ACL depends on entries.query_policies carrying the
         // owner/is_active/subpath fingerprints Python's generate_query_policies
         // would have written on the row. Without this, AppendAclFilter finds
@@ -95,7 +118,6 @@ public sealed class EntryRepository(Db db)
         // policies reflect reality.
         e = e with { QueryPolicies = Utils.QueryPolicies.Generate(e) };
 
-        await using var conn = await db.OpenAsync(ct);
         await using var cmd = new NpgsqlCommand("""
             INSERT INTO entries (uuid, shortname, space_name, subpath, is_active, slug,
                                  displayname, description, tags, created_at, updated_at,

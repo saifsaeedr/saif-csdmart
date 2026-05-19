@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Dmart.DataAdapters.Sql;
+using Dmart.Models.Api;
 using Dmart.Models.Enums;
 using Dmart.Services;
 using Microsoft.Extensions.DependencyInjection;
@@ -121,6 +122,132 @@ public class SeedImportTests : IClassFixture<DmartFactory>
         afterForce.ShouldNotBeNull();
         afterForce.Description?.En.ShouldBe(updatedDesc,
             "preserveExisting:false must overwrite the existing description");
+    }
+
+    // Exercises the --fast bulk path (fastUnsafeNoFkCheck:true). Without
+    // this test the COPY-based code path is never executed by the suite,
+    // and the riskiest piece of the optimization (binary column-order +
+    // jsonb encoding + temp-table merge) ships untested. Asserts both
+    // the row counts and a sampled jsonb field round-trip correctly.
+    //
+    // [FactIfFastImport] auto-skips when the DB role can't SET
+    // session_replication_role (the documented hard-fail of --fast) so
+    // CI under a non-superuser role doesn't fail the suite — the hard
+    // failure is then the user's runtime concern, not the test suite's.
+    [FactIfFastImport]
+    public async Task Fast_Bulk_Import_RoundTrips_Entry_With_Jsonb_Fields()
+    {
+        var sp = _factory.Services;
+        _factory.CreateClient();
+        var io = sp.GetRequiredService<ImportExportService>();
+        var entryRepo = sp.GetRequiredService<EntryRepository>();
+
+        var spaceName = $"fast_bulk_{Guid.NewGuid():N}";
+        const string entryName = "thing";
+        const string description = "fast-bulk-test-description";
+
+        var resp = await io.ImportZipAsync(
+            BuildSingleEntryZip(spaceName, entryName, description),
+            actor: null, preserveExisting: false, fastUnsafeNoFkCheck: true);
+
+        resp.Status.ShouldBe(Status.Success);
+        // Per-record failures would also surface as a non-empty list — fail
+        // loud if the COPY path threw on any row.
+        if (resp.Attributes?.GetValueOrDefault("failed") is List<Dictionary<string, object>> fails)
+            fails.Count.ShouldBe(0, $"unexpected per-row failures: {string.Join(", ", fails.Select(f => f.GetValueOrDefault("error")))}");
+
+        // The space + the single content entry both round-trip through the
+        // import. Verify the entry came back and the jsonb description was
+        // preserved verbatim (proves the jsonb COPY path).
+        var entry = await entryRepo.GetAsync(spaceName, "/", entryName, ResourceType.Content);
+        entry.ShouldNotBeNull("fast-bulk import did not land the content row");
+        entry.Description?.En.ShouldBe(description, "jsonb description did not round-trip");
+    }
+
+    // Round 3 — exercises per-space parallelism with fastParallelism > 1.
+    // Builds a zip carrying THREE distinct spaces each with its own
+    // content entry; verifies each space's entry lands and the jsonb
+    // descriptions round-trip. The riskiest piece is correct grouping —
+    // entries leaking from one worker's space group into another's would
+    // either (a) miss the target space entirely, or (b) cause a worker
+    // to try to insert another space's entry under its own session
+    // (which would fail the entry's space_name = ... lookup at re-read time).
+    // Skipped when the DB role lacks session_replication_role privilege
+    // — see Fast_Bulk_Import_RoundTrips_Entry_With_Jsonb_Fields above.
+    [FactIfFastImport]
+    public async Task Fast_Parallel_Imports_Multiple_Spaces()
+    {
+        var sp = _factory.Services;
+        _factory.CreateClient();
+        var io = sp.GetRequiredService<ImportExportService>();
+        var entryRepo = sp.GetRequiredService<EntryRepository>();
+
+        // Three independent spaces, each with one Content entry. The space
+        // names are GUID-suffixed so this test is run-safe against any prior
+        // test pollution.
+        var stamp = Guid.NewGuid().ToString("N");
+        var spaceA = $"fast_par_a_{stamp}";
+        var spaceB = $"fast_par_b_{stamp}";
+        var spaceC = $"fast_par_c_{stamp}";
+
+        var ms = new MemoryStream();
+        using (var ar = new ZipArchive(ms, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            foreach (var (space, sn, desc) in new[] {
+                (spaceA, "entry_a", "alpha-desc"),
+                (spaceB, "entry_b", "beta-desc"),
+                (spaceC, "entry_c", "gamma-desc"),
+            })
+            {
+                var spaceMeta = new JsonObject
+                {
+                    ["uuid"] = Guid.NewGuid().ToString(),
+                    ["shortname"] = space,
+                    ["is_active"] = true,
+                    ["owner_shortname"] = "dmart",
+                    ["languages"] = new JsonArray("english"),
+                };
+                WriteEntry(ar, $"{space}/.dm/meta.space.json", spaceMeta.ToJsonString());
+
+                var contentMeta = new JsonObject
+                {
+                    ["uuid"] = Guid.NewGuid().ToString(),
+                    ["shortname"] = sn,
+                    ["is_active"] = true,
+                    ["owner_shortname"] = "dmart",
+                    ["description"] = new JsonObject { ["en"] = desc },
+                    ["payload"] = new JsonObject
+                    {
+                        ["content_type"] = "json",
+                        ["body"] = new JsonObject(),
+                    },
+                };
+                WriteEntry(ar, $"{space}/.dm/{sn}/meta.content.json", contentMeta.ToJsonString());
+            }
+        }
+        ms.Position = 0;
+
+        var resp = await io.ImportZipAsync(
+            ms, actor: null, preserveExisting: false,
+            fastUnsafeNoFkCheck: true, fastParallelism: 3);
+
+        resp.Status.ShouldBe(Status.Success);
+        if (resp.Attributes?.GetValueOrDefault("failed") is List<Dictionary<string, object>> fails)
+            fails.Count.ShouldBe(0, $"unexpected per-row failures: {string.Join(", ", fails.Select(f => f.GetValueOrDefault("error")))}");
+
+        // Verify every space's entry landed AND its description round-tripped.
+        // If grouping leaked, one of these would come back null.
+        var a = await entryRepo.GetAsync(spaceA, "/", "entry_a", ResourceType.Content);
+        a.ShouldNotBeNull("space A entry missing");
+        a.Description?.En.ShouldBe("alpha-desc");
+
+        var b = await entryRepo.GetAsync(spaceB, "/", "entry_b", ResourceType.Content);
+        b.ShouldNotBeNull("space B entry missing");
+        b.Description?.En.ShouldBe("beta-desc");
+
+        var c = await entryRepo.GetAsync(spaceC, "/", "entry_c", ResourceType.Content);
+        c.ShouldNotBeNull("space C entry missing");
+        c.Description?.En.ShouldBe("gamma-desc");
     }
 
     // Builds a self-contained zip with one space + one Content entry directly

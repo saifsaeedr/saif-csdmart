@@ -431,9 +431,38 @@ switch (subcommand)
         // -r the import is idempotent — pre-existing rows are skipped and
         // the operator sees them counted as `skipped` in the summary.
         var replace = serverArgs.Any(a => a is "-r" or "--replace");
+        // --fast bypasses FK constraints AND user-defined triggers for the
+        // entire import by setting session_replication_role='replica' on a
+        // single shared session. Trades safety for speed; only safe when
+        // the zip is internally consistent (typical for operator-trusted
+        // CLI imports). Hard-fails if the DB role lacks the privilege.
+        var fast = serverArgs.Any(a => a is "--fast");
+        // --fast-parallelism=N splits Pass 3-5 (entries/attachments/history)
+        // across N parallel per-space workers, each on its own connection
+        // with its own transaction. Drops the single-tx-for-the-whole-import
+        // property: on crash some spaces fully landed, others not — operator
+        // re-runs with -r/--replace. Only honored when --fast is set.
+        var parallelism = 1;
+        var parallelArg = serverArgs.FirstOrDefault(a => a.StartsWith("--fast-parallelism=", StringComparison.Ordinal));
+        if (parallelArg is not null)
+        {
+            if (!int.TryParse(parallelArg["--fast-parallelism=".Length..], out parallelism) || parallelism < 1 || parallelism > 16)
+            {
+                Console.Error.WriteLine("--fast-parallelism must be an integer in [1, 16]");
+                Environment.ExitCode = 1;
+                return;
+            }
+            if (!fast)
+            {
+                Console.Error.WriteLine("--fast-parallelism requires --fast (it has no effect on the slow path)");
+                Environment.ExitCode = 1;
+                return;
+            }
+        }
+        Console.WriteLine($"Importing from {zipPath} (replace={replace}, fast={fast}, parallelism={parallelism})");
         if (string.IsNullOrEmpty(zipPath))
         {
-            Console.Error.WriteLine("Usage: dmart import [-r|--replace] <zip-file>");
+            Console.Error.WriteLine("Usage: dmart import [-r|--replace] [--fast] [--fast-parallelism=N] <zip-file>");
             Environment.ExitCode = 1;
             return;
         }
@@ -460,7 +489,7 @@ switch (subcommand)
         // the value doesn't matter functionally — but keeping both CLI sites
         // on `null` makes the intent ("CLI runs unfiltered, server-side")
         // visually consistent.
-        var resp = await importService.ImportZipAsync(zipStream, actor: null, preserveExisting: !replace);
+        var resp = await importService.ImportZipAsync(zipStream, actor: null, preserveExisting: !replace, fastUnsafeNoFkCheck: fast, fastParallelism: parallelism);
 
         if (resp.Status != Status.Success)
         {

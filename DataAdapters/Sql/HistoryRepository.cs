@@ -12,6 +12,14 @@ public sealed class HistoryRepository(Db db)
                                    CancellationToken ct = default)
     {
         await using var conn = await db.OpenAsync(ct);
+        await AppendAsync(spaceName, subpath, shortname, actor, requestHeaders, diff, conn, ct);
+    }
+
+    public async Task AppendAsync(string spaceName, string subpath, string shortname, string? actor,
+                                   Dictionary<string, object>? requestHeaders, Dictionary<string, object>? diff,
+                                   NpgsqlConnection conn,
+                                   CancellationToken ct = default)
+    {
         await using var cmd = new NpgsqlCommand("""
             INSERT INTO histories (uuid, request_headers, diff, timestamp,
                                    owner_shortname, last_checksum_history,

@@ -29,6 +29,11 @@ public sealed class SpaceRepository(Db db)
     public async Task<Space?> GetAsync(string shortname, CancellationToken ct = default)
     {
         await using var conn = await db.OpenAsync(ct);
+        return await GetAsync(shortname, conn, ct);
+    }
+
+    public async Task<Space?> GetAsync(string shortname, NpgsqlConnection conn, CancellationToken ct = default)
+    {
         await using var cmd = new NpgsqlCommand($"{SelectAllColumns} WHERE shortname = $1", conn);
         cmd.Parameters.Add(new() { Value = shortname });
         await using var r = await cmd.ExecuteReaderAsync(ct);
@@ -47,10 +52,15 @@ public sealed class SpaceRepository(Db db)
 
     public async Task UpsertAsync(Space space, CancellationToken ct = default)
     {
+        await using var conn = await db.OpenAsync(ct);
+        await UpsertAsync(space, conn, ct);
+    }
+
+    public async Task UpsertAsync(Space space, NpgsqlConnection conn, CancellationToken ct = default)
+    {
         // Populate query_policies on every write (see EntryRepository.UpsertAsync).
         space = space with { QueryPolicies = Utils.QueryPolicies.Generate(space) };
 
-        await using var conn = await db.OpenAsync(ct);
         await using var cmd = new NpgsqlCommand("""
             INSERT INTO spaces (uuid, shortname, space_name, subpath, is_active, slug,
                                 displayname, description, tags, created_at, updated_at,
