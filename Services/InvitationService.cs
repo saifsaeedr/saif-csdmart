@@ -104,16 +104,20 @@ public sealed class InvitationService(
             }
             else
             {
-                // Activation email — both the subject and the HTML body are now
+                // Activation email — the subject and both body parts are now
                 // dynamic. Subject text is sourced from LanguageLoader so
                 // operators can localize it via ~/.dmart/languages/<lang>.json
-                // (English fallback when the user's locale has no entry). Body
-                // is sourced from ActivationTemplateLoader: the embedded
-                // templates/ActivationEmailContent.txt by default, replaced
-                // wholesale when ~/.dmart/ActivationEmailContent.txt exists.
-                // Both flow through Scriban with the same {name, msisdn,
-                // shortname, link} scope so operators can reference any of
-                // those vars in either field.
+                // (English fallback when the user's locale has no entry).
+                // Body parts are sourced from ActivationTemplateLoader:
+                // embedded templates/ActivationEmailContent.{html,txt} by
+                // default, each replaced independently when
+                // ~/.dmart/ActivationEmailContent.{html,txt} exists. All
+                // three flow through the same `{{var}}` substitution with the
+                // same {name, msisdn, shortname, link} scope so operators
+                // can reference any of those vars in any field. SmtpSender
+                // composes a multipart/alternative message when both bodies
+                // are non-empty and falls back to whichever side is present
+                // otherwise — see Services/SmtpSender.cs.
                 // LanguageLoader already falls back to English when the user's
                 // locale lacks the key. The hardcoded constant below covers
                 // the pathological "even English doesn't have it" case
@@ -123,8 +127,9 @@ public sealed class InvitationService(
                 var subjectSource = languages.Get(user.Language, "activation_subject")
                                     ?? EnglishActivationSubjectFallback;
                 var subject = activationTemplates.RenderSubject(subjectSource, user, deliverableLink);
-                var body = activationTemplates.RenderBody(user, deliverableLink);
-                var ok = await smtp.SendEmailAsync(identifier, subject, body, ct);
+                var htmlBody = activationTemplates.RenderHtmlBody(user, deliverableLink);
+                var textBody = activationTemplates.RenderTextBody(user, deliverableLink);
+                var ok = await smtp.SendEmailAsync(identifier, subject, htmlBody, textBody, ct);
                 if (!ok)
                     log.LogWarning("invitation email for {Shortname} to {Email} not delivered — returning token in response body",
                         user.Shortname, identifier);

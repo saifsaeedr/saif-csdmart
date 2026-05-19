@@ -181,14 +181,19 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Default activation-email body template (Scriban). Operators can
-         override at ~/.dmart/ActivationEmailContent.txt without rebuilding —
-         see Services/ActivationTemplateLoader.cs. Embedded so the AOT
-         single-binary ship still has a working default if no override file
-         exists. -->
+    <!-- Default activation-email body templates. The email is sent as
+         multipart/alternative carrying both an HTML and a plain-text part;
+         each format has its own template. Operators can override either one
+         (independently) at ~/.dmart/ActivationEmailContent.{html,txt} without
+         rebuilding — see Services/ActivationTemplateLoader.cs. Both are
+         embedded so the AOT single-binary ship has working defaults if no
+         override file exists. -->
     <EmbeddedResource Include="templates/*.txt" LinkBase="templates" />
     <Content Remove="templates/*.txt" />
     <None Remove="templates/*.txt" />
+    <EmbeddedResource Include="templates/*.html" LinkBase="templates" />
+    <Content Remove="templates/*.html" />
+    <None Remove="templates/*.html" />
   </ItemGroup>
 
   <ItemGroup>

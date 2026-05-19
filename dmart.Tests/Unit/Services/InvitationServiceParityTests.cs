@@ -204,11 +204,11 @@ public class InvitationServiceParityTests
     }
 
     [Fact]
-    public void ActivationEmailBody_ContainsAllPythonTemplateFields()
+    public void ActivationEmailHtmlBody_ContainsAllPythonTemplateFields()
     {
         var user = NewUser(shortname: "alice", email: "alice@example.com",
             msisdn: "+96512345678", displayname: new Translation(En: "Alice Smith"));
-        var html = ActivationTemplates.RenderBody(user, "https://app/managed/s/abc123");
+        var html = ActivationTemplates.RenderHtmlBody(user, "https://app/managed/s/abc123");
 
         html.ShouldContain("Hi Alice Smith");
         html.ShouldContain("MSISDN: +96512345678");
@@ -218,25 +218,52 @@ public class InvitationServiceParityTests
     }
 
     [Fact]
-    public void ActivationEmailBody_FallsBack_To_Shortname_When_DisplayNameMissing()
+    public void ActivationEmailTextBody_ContainsAllExpectedFields_NoTags_NoEntities()
+    {
+        // The embedded text template carries the same scope variables but
+        // emits no markup or entities — what the recipient actually sees in
+        // a text-only mail client (or the text part of the multipart).
+        var user = NewUser(shortname: "alice", email: "alice@example.com",
+            msisdn: "+96512345678", displayname: new Translation(En: "Alice Smith"));
+        var text = ActivationTemplates.RenderTextBody(user, "https://app/managed/s/abc123");
+
+        text.ShouldContain("Hi Alice Smith");
+        text.ShouldContain("MSISDN: +96512345678");
+        text.ShouldContain("Username: alice");
+        text.ShouldContain("https://app/managed/s/abc123");
+        text.ShouldContain("Welcome, we're happy to see you on board!");
+        text.ShouldNotContain("<");
+        text.ShouldNotContain("&amp;");
+        text.ShouldNotContain("&lt;");
+    }
+
+    [Fact]
+    public void ActivationEmailHtmlBody_FallsBack_To_Shortname_When_DisplayNameMissing()
     {
         var user = NewUser(shortname: "bob", email: "bob@example.com");
-        var html = ActivationTemplates.RenderBody(user, "https://app/managed/s/x");
+        var html = ActivationTemplates.RenderHtmlBody(user, "https://app/managed/s/x");
         html.ShouldContain("Hi bob");
     }
 
     [Fact]
-    public void ActivationEmailBody_HtmlEncodes_HostileShortname_AndLink()
+    public void ActivationEmailTextBody_FallsBack_To_Shortname_When_DisplayNameMissing()
+    {
+        var user = NewUser(shortname: "bob", email: "bob@example.com");
+        var text = ActivationTemplates.RenderTextBody(user, "https://app/managed/s/x");
+        text.ShouldContain("Hi bob");
+    }
+
+    [Fact]
+    public void ActivationEmailHtmlBody_HtmlEncodes_HostileShortname_AndLink()
     {
         // A malicious shortname or a tampered link must not break out of the
-        // <a href> attribute or inject a tag into the body. We assert on the
-        // structural escapes (< > ") because once those three characters are
-        // encoded, "onerror=" / "alert(1)" as plain substrings are inert.
-        // The template uses `{{ var | html.escape }}` for every user-supplied
-        // value — same set of characters as the previous WebUtility.HtmlEncode.
+        // <a href> attribute or inject a tag into the HTML body. We assert
+        // on the structural escapes (< > ") because once those three
+        // characters are encoded, "onerror=" / "alert(1)" as plain
+        // substrings are inert.
         var user = NewUser(shortname: "<script>alert('xss')</script>",
             displayname: new Translation(En: "<img src=x onerror=alert(1)>"));
-        var html = ActivationTemplates.RenderBody(user,
+        var html = ActivationTemplates.RenderHtmlBody(user,
             "https://app/?x=\"><script>alert(1)</script>");
 
         // No raw injectable tags from user input survive into the body.
@@ -251,12 +278,39 @@ public class InvitationServiceParityTests
     }
 
     [Fact]
-    public void ActivationEmailBody_HandlesNullMsisdn_WithoutCrashing()
+    public void ActivationEmailTextBody_DoesNotHtmlEncode_HostileShortname()
+    {
+        // The text template is plain text; mail clients render it as
+        // text/plain, so escaping is unnecessary (and harmful — recipients
+        // would see literal "&lt;" instead of "<"). Hostile substrings
+        // appear verbatim; this is safe because no rendering happens.
+        var user = NewUser(shortname: "<script>alert('xss')</script>",
+            displayname: new Translation(En: "<img src=x onerror=alert(1)>"));
+        var text = ActivationTemplates.RenderTextBody(user, "https://app/x");
+
+        // Literal characters, not HTML-encoded.
+        text.ShouldContain("<script>alert('xss')</script>");
+        text.ShouldContain("<img src=x onerror=alert(1)>");
+        text.ShouldNotContain("&lt;");
+        text.ShouldNotContain("&amp;");
+    }
+
+    [Fact]
+    public void ActivationEmailHtmlBody_HandlesNullMsisdn_WithoutCrashing()
     {
         var user = NewUser(shortname: "carol", email: "carol@example.com", msisdn: null);
-        var html = ActivationTemplates.RenderBody(user, "https://app/managed/s/x");
+        var html = ActivationTemplates.RenderHtmlBody(user, "https://app/managed/s/x");
         html.ShouldContain("MSISDN: ");        // empty value still rendered
         html.ShouldContain("Username: carol");
+    }
+
+    [Fact]
+    public void ActivationEmailTextBody_HandlesNullMsisdn_WithoutCrashing()
+    {
+        var user = NewUser(shortname: "carol", email: "carol@example.com", msisdn: null);
+        var text = ActivationTemplates.RenderTextBody(user, "https://app/managed/s/x");
+        text.ShouldContain("MSISDN: ");
+        text.ShouldContain("Username: carol");
     }
 
     private static User NewUser(string shortname, string? email = null, string? msisdn = null,
