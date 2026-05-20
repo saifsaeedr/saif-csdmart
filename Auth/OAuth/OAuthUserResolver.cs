@@ -7,23 +7,21 @@ using Microsoft.Extensions.Options;
 
 namespace Dmart.Auth.OAuth;
 
-// "Find or create" a dmart User from an OAuth provider's user info.
+// Resolve a dmart User from an OAuth provider's user info. OAuth login does
+// NOT create accounts — the user must already exist in dmart.
 //
 // Lookup chain:
 //   1. By synthetic shortname `{provider}_{providerId}` — if the user has
 //      logged in with this provider before, this is the fastest path and
 //      also handles the case where they don't have an email.
-//   2. Create new. Shortname is `{provider}_{providerId}`; is_email_verified
-//      is set to true since the provider already verified it.
+//   2. By email — if a dmart account carries the same email, the provider id
+//      is attached to that account and it is logged in.
+//   3. No match: return null. The HTTP layer turns this into a 401.
 //
-// Account takeover note: we deliberately do NOT fall back to "if an existing
-// local account has the same email, attach the provider id to it." That path
-// used to exist but was a pre-auth account takeover primitive — anyone able
-// to register an OAuth provider account with a target's email address (which
-// is the default, no reverse-verification) could take over the target's
-// local dmart account on first OAuth login. Users who already have a local
-// account get a second, separate account for OAuth logins; linking the two
-// has to be a deliberate server-side ceremony, not a silent merge.
+// Account takeover caveat: step 2 trusts the provider to have verified the
+// email it hands us. Only enable providers that enforce email verification —
+// a provider that lets a user assert an arbitrary unverified email would let
+// an attacker take over the matching dmart account on first OAuth login.
 public sealed class OAuthUserResolver(
     UserRepository users,
     PluginManager plugins,
@@ -117,11 +115,5 @@ public sealed class OAuthUserResolver(
             .Where(c => char.IsLetterOrDigit(c) || c == '_').ToArray());
         if (sanitized.Length == 0) sanitized = "x";
         return $"{provider}_{sanitized}";
-    }
-
-    private static string? BuildDisplayName(string? first, string? last)
-    {
-        var name = $"{first?.Trim()} {last?.Trim()}".Trim();
-        return string.IsNullOrWhiteSpace(name) ? null : name;
     }
 }

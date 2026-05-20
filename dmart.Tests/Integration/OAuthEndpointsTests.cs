@@ -17,8 +17,8 @@ namespace Dmart.Tests.Integration;
 // /mobile-login. We don't hit real provider APIs — instead we verify:
 //   1. Unconfigured provider → clean 401 "not configured" JSON error.
 //   2. Missing token → clean 401 "missing `token`" JSON error.
-//   3. The OAuthUserResolver (unit-level) creates + finds users as Python
-//      expects.
+//   3. The OAuthUserResolver (unit-level) resolves users — by provider
+//      shortname or by email — and never auto-creates accounts.
 //
 // Full token-validation tests require mocking outbound HTTP which is heavy
 // for AOT; those paths are exercised by hand during integration with real
@@ -67,76 +67,117 @@ public sealed class OAuthEndpointsTests : IClassFixture<DmartFactory>
     // OAuthUserResolver — unit-level, but requires DB → put it here with the
     // other DB-backed integration tests so it uses the shared factory.
     [FactIfPg]
-    public async Task Resolver_CreatesNewUser_WithProviderShortname()
+    public async Task Resolver_ShortnameHit_ReturnsExistingUser()
     {
         var resolver = _factory.Services.GetRequiredService<OAuthUserResolver>();
         var users = _factory.Services.GetRequiredService<UserRepository>();
 
+        // OAuth login no longer creates accounts — seed the provider-keyed
+        // account first, then verify the resolver finds it by shortname.
         var providerId = Guid.NewGuid().ToString("N")[..12];
+        var shortname = $"google_{providerId}";
+        var email = $"{providerId}@test.local";
+        await users.UpsertAsync(new User
+        {
+            Uuid = Guid.NewGuid().ToString(),
+            Shortname = shortname,
+            SpaceName = "management",
+            Subpath = "/users",
+            OwnerShortname = shortname,
+            IsActive = true,
+            Email = email,
+            IsEmailVerified = true,
+            GoogleId = providerId,
+            Type = UserType.Web,
+            Language = Language.En,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+            Roles = [], Groups = [],
+        });
+
         var info = new OAuthUserInfo(
             Provider: "google", ProviderId: providerId,
-            Email: $"{providerId}@test.local",
+            Email: email,
             FirstName: "Test", LastName: "Ninja", PictureUrl: "https://x/pic.jpg");
 
-        var expectedShortname = $"google_{providerId}";
         try
         {
-            var created = await resolver.ResolveAsync(info);
-            created.Shortname.ShouldBe(expectedShortname);
-            created.IsActive.ShouldBeTrue();
-            created.IsEmailVerified.ShouldBeTrue();
-            created.GoogleId.ShouldBe(providerId);
-            created.Displayname!.En.ShouldBe("Test Ninja");
-            created.SocialAvatarUrl.ShouldBe("https://x/pic.jpg");
+            var resolved = await resolver.ResolveAsync(info);
+            resolved.ShouldNotBeNull();
+            resolved!.Shortname.ShouldBe(shortname);
+            resolved.IsActive.ShouldBeTrue();
+            resolved.GoogleId.ShouldBe(providerId);
+            // MaybeRefreshAsync pulls the provider's picture onto the row.
+            resolved.SocialAvatarUrl.ShouldBe("https://x/pic.jpg");
 
             // Second call returns the same row (shortname hit).
             var again = await resolver.ResolveAsync(info);
-            again.Uuid.ShouldBe(created.Uuid);
+            again.ShouldNotBeNull();
+            again!.Uuid.ShouldBe(resolved.Uuid);
         }
         finally
         {
-            try { await users.DeleteAsync(expectedShortname); } catch { }
+            try { await users.DeleteAsync(shortname); } catch { }
         }
     }
 
     // Apple Sign-in counterpart to the google resolver test. Pins that the
-    // Provider="apple" branch populates the dedicated AppleId column rather
-    // than falling back to Notes (the pre-v0.9.13 behaviour the model
-    // comment used to describe).
+    // Provider="apple" branch populates the dedicated AppleId column when an
+    // OAuth login is linked onto an existing account by email.
     [FactIfPg]
-    public async Task Resolver_CreatesNewUser_WithAppleProvider_PopulatesAppleId()
+    public async Task Resolver_EmailMatch_AppleProvider_PopulatesAppleId()
     {
         var resolver = _factory.Services.GetRequiredService<OAuthUserResolver>();
         var users = _factory.Services.GetRequiredService<UserRepository>();
 
-        var providerId = Guid.NewGuid().ToString("N")[..12];
-        var info = new OAuthUserInfo(
-            Provider: "apple", ProviderId: providerId,
-            Email: $"{providerId}@test.local",
-            FirstName: "Apple", LastName: "User", PictureUrl: null);
+        // Seed a local account with the email but no provider ids.
+        var suffix = Guid.NewGuid().ToString("N")[..10];
+        var shortname = $"oauth_apple_{suffix}";
+        var email = $"{shortname}@test.local";
+        await users.UpsertAsync(new User
+        {
+            Uuid = Guid.NewGuid().ToString(),
+            Shortname = shortname,
+            SpaceName = "management",
+            Subpath = "/users",
+            OwnerShortname = shortname,
+            IsActive = true,
+            Email = email,
+            Type = UserType.Web,
+            Language = Language.En,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+            Roles = [], Groups = [],
+        });
 
-        var expectedShortname = $"apple_{providerId}";
+        var providerId = Guid.NewGuid().ToString("N")[..12];
         try
         {
-            var created = await resolver.ResolveAsync(info);
-            created.Shortname.ShouldBe(expectedShortname);
-            created.AppleId.ShouldBe(providerId, "AppleId column must be populated for provider=apple");
+            var info = new OAuthUserInfo(
+                Provider: "apple", ProviderId: providerId,
+                Email: email,
+                FirstName: "Apple", LastName: "User", PictureUrl: null);
+            var resolved = await resolver.ResolveAsync(info);
+
+            resolved.ShouldNotBeNull();
+            resolved!.Shortname.ShouldBe(shortname, "email match links onto the existing account");
+            resolved.AppleId.ShouldBe(providerId, "AppleId column must be populated for provider=apple");
             // Sibling provider IDs stay null — no cross-provider bleed.
-            created.GoogleId.ShouldBeNull();
-            created.FacebookId.ShouldBeNull();
+            resolved.GoogleId.ShouldBeNull();
+            resolved.FacebookId.ShouldBeNull();
         }
         finally
         {
-            try { await users.DeleteAsync(expectedShortname); } catch { }
+            try { await users.DeleteAsync(shortname); } catch { }
         }
     }
 
-    // Pins the Python-parity asymmetric hook behavior in OAuthUserResolver: every
-    // login (existing or new user) fires the before-hook; the after-hook fires only
-    // on the actual create branch. If a future refactor moves the before-hook below
-    // the existence check (turning it into create-only), this test fails.
+    // OAuth login no longer creates accounts, so there is no after-hook: the
+    // before-hook fires unconditionally at the top of every ResolveAsync, and
+    // the after-hook never fires. If a future refactor moves the before-hook
+    // below the existence check, this test fails.
     [FactIfPg]
-    public async Task Resolver_FiresBeforeHookOnEveryLogin_AfterHookOnlyOnFirstLogin()
+    public async Task Resolver_FiresBeforeHookOnEveryLogin_NeverFiresAfterHook()
     {
         // Two separate plugin instances — one registered to the before-dispatch
         // table, the other to the after-dispatch table. Using two shortnames keeps
@@ -203,15 +244,14 @@ public sealed class OAuthEndpointsTests : IClassFixture<DmartFactory>
 
         try
         {
-            // First login → user doesn't exist yet → both hooks fire.
+            // Two logins for an account that doesn't exist → both return null.
             await resolver.ResolveAsync(info);
-            // Second login → same provider id → existing-by-shortname → only before fires.
             await resolver.ResolveAsync(info);
 
             beforePlugin.CountFor(shortname).ShouldBe(2,
-                "before-hook is fired unconditionally at the top of ResolveAsync (Python parity)");
-            afterPlugin.CountFor(shortname).ShouldBe(1,
-                "after-hook fires only on the actual create branch (Python parity)");
+                "before-hook is fired unconditionally at the top of every ResolveAsync");
+            afterPlugin.CountFor(shortname).ShouldBe(0,
+                "OAuth login no longer creates accounts, so the after-hook never fires");
         }
         finally
         {
@@ -244,15 +284,13 @@ public sealed class OAuthEndpointsTests : IClassFixture<DmartFactory>
     }
 
     [FactIfPg]
-    public async Task Resolver_EmailMatch_CreatesSeparateAccount_NoSilentMerge()
+    public async Task Resolver_EmailMatch_LinksProviderToExistingAccount()
     {
-        // Previously: if a local user already had the email the OAuth provider
-        // supplied, the resolver would attach the provider id to that account.
-        // That was a silent pre-auth account-takeover primitive — anyone able
-        // to register a Google/Facebook account with the victim's email would
-        // take over the victim's local dmart account on first OAuth login.
-        // Now: email is NOT a merge key. The two accounts stay separate;
-        // linking has to be a deliberate, authenticated ceremony.
+        // When the provider's verified email matches an existing dmart
+        // account, the OAuth login resolves to that account and attaches the
+        // provider id — there is no second, provider-keyed account. This
+        // trusts the provider's email verification; see OAuthUserResolver's
+        // class comment for the takeover caveat.
         var resolver = _factory.Services.GetRequiredService<OAuthUserResolver>();
         var users = _factory.Services.GetRequiredService<UserRepository>();
 
@@ -260,9 +298,10 @@ public sealed class OAuthEndpointsTests : IClassFixture<DmartFactory>
         var suffix = Guid.NewGuid().ToString("N")[..10];
         var shortname = $"oauth_pre_{suffix}";
         var email = $"{shortname}@test.local";
+        var seededUuid = Guid.NewGuid().ToString();
         await users.UpsertAsync(new User
         {
-            Uuid = Guid.NewGuid().ToString(),
+            Uuid = seededUuid,
             Shortname = shortname,
             SpaceName = "management",
             Subpath = "/users",
@@ -277,26 +316,21 @@ public sealed class OAuthEndpointsTests : IClassFixture<DmartFactory>
         });
 
         var providerId = Guid.NewGuid().ToString("N")[..12];
-        var oauthShortname = $"google_{providerId}";
         try
         {
             var info = new OAuthUserInfo("google", providerId, email, "A", "B", null);
             var resolved = await resolver.ResolveAsync(info);
 
-            // New account — shortname keyed on the provider id.
-            resolved.Shortname.ShouldBe(oauthShortname);
+            // Resolved to the existing account — not a new provider-keyed one.
+            resolved.ShouldNotBeNull();
+            resolved!.Shortname.ShouldBe(shortname);
+            resolved.Uuid.ShouldBe(seededUuid);
+            // Provider id is attached to that account.
             resolved.GoogleId.ShouldBe(providerId);
-            resolved.IsEmailVerified.ShouldBeTrue();
-
-            // Pre-existing local user is untouched — no google_id attached.
-            var preExisting = await users.GetByShortnameAsync(shortname);
-            preExisting.ShouldNotBeNull();
-            preExisting!.GoogleId.ShouldBeNull();
         }
         finally
         {
             try { await users.DeleteAsync(shortname); } catch { }
-            try { await users.DeleteAsync(oauthShortname); } catch { }
         }
     }
 }
