@@ -893,7 +893,7 @@ else
 fi
 
 # ============================================================================
-# 48. Auto shortname (shortname="auto" → UUID[:8])
+# 48. Auto shortname (shortname="auto" → UUID[:16], hyphens stripped)
 # ============================================================================
 printf '%-45s' "Auto shortname generates UUID prefix:" >&2
 AUTO_RESP=$(curl -s -H "$AUTH_HEADER" -H "$CT" \
@@ -908,7 +908,7 @@ AUTO_RESP=$(curl -s -H "$AUTH_HEADER" -H "$CT" \
     "$API_URL/managed/request")
 AUTO_SN=$(echo "$AUTO_RESP" | jq -r '.records[0].shortname // empty')
 AUTO_UUID=$(echo "$AUTO_RESP" | jq -r '.records[0].uuid // empty')
-if [[ ${#AUTO_SN} -eq 8 ]] && [[ "$AUTO_SN" != "auto" ]] && [[ "$AUTO_UUID" == "$AUTO_SN"* ]]; then
+if [[ ${#AUTO_SN} -eq 16 ]] && [[ "$AUTO_SN" != "auto" ]] && [[ "${AUTO_UUID//-/}" == "$AUTO_SN"* ]]; then
     ok
 else
     nope "shortname=$AUTO_SN uuid=$AUTO_UUID"
