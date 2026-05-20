@@ -12,6 +12,7 @@ internal static class ExpectedColumnPatcher
             ("device_id", "TEXT"),
             ("google_id", "TEXT"),
             ("facebook_id", "TEXT"),
+            ("apple_id", "TEXT"),
             ("social_avatar_url", "TEXT"),
             ("attempt_count", "INTEGER"),
             ("last_login", "JSONB"),

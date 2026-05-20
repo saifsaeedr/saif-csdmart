@@ -99,6 +99,38 @@ public sealed class OAuthEndpointsTests : IClassFixture<DmartFactory>
         }
     }
 
+    // Apple Sign-in counterpart to the google resolver test. Pins that the
+    // Provider="apple" branch populates the dedicated AppleId column rather
+    // than falling back to Notes (the pre-v0.9.13 behaviour the model
+    // comment used to describe).
+    [FactIfPg]
+    public async Task Resolver_CreatesNewUser_WithAppleProvider_PopulatesAppleId()
+    {
+        var resolver = _factory.Services.GetRequiredService<OAuthUserResolver>();
+        var users = _factory.Services.GetRequiredService<UserRepository>();
+
+        var providerId = Guid.NewGuid().ToString("N")[..12];
+        var info = new OAuthUserInfo(
+            Provider: "apple", ProviderId: providerId,
+            Email: $"{providerId}@test.local",
+            FirstName: "Apple", LastName: "User", PictureUrl: null);
+
+        var expectedShortname = $"apple_{providerId}";
+        try
+        {
+            var created = await resolver.ResolveAsync(info);
+            created.Shortname.ShouldBe(expectedShortname);
+            created.AppleId.ShouldBe(providerId, "AppleId column must be populated for provider=apple");
+            // Sibling provider IDs stay null — no cross-provider bleed.
+            created.GoogleId.ShouldBeNull();
+            created.FacebookId.ShouldBeNull();
+        }
+        finally
+        {
+            try { await users.DeleteAsync(expectedShortname); } catch { }
+        }
+    }
+
     // Pins the Python-parity asymmetric hook behavior in OAuthUserResolver: every
     // login (existing or new user) fires the before-hook; the after-hook fires only
     // on the actual create branch. If a future refactor moves the before-hook below

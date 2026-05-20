@@ -12,8 +12,12 @@ namespace Dmart.Tests.Unit.Services;
 // that key — every other entry stays at its embedded value.
 //
 // HOME is overridden for the duration of the test so we don't touch the dev
-// machine's real ~/.dmart/. The class is non-parallel because env-var state
-// is process-global; xunit serializes tests within a class by default.
+// machine's real ~/.dmart/. xunit serializes tests within a class by default,
+// but classes run in parallel, so we share a Collection with every other
+// env-mutating test class (see "dmart-home-overlay" below) to keep HOME
+// changes from racing across LanguageLoader and ActivationTemplateLoader
+// overlay tests at the same time.
+[Collection(HomeOverlayCollection.Name)]
 public sealed class LanguageLoaderOverlayTests : IDisposable
 {
     private readonly string _tmpHome = Path.Combine(
@@ -38,16 +42,21 @@ public sealed class LanguageLoaderOverlayTests : IDisposable
     [Fact]
     public void Overlay_Replaces_Single_Key_And_Preserves_Embedded_Rest()
     {
-        // Override only `otp_message` for English — every other embedded key
-        // (invitation_message, reset_message, ...) must remain intact.
+        // Override `otp_message` and `activation_subject` for English — every
+        // other embedded key (invitation_message, reset_message, ...) must
+        // remain intact. activation_subject is in this assertion because the
+        // invitation email pipeline pulls its subject from this exact key;
+        // ensuring the overlay works for it pins the contract operators rely
+        // on when localizing the subject line without rebuilding.
         File.WriteAllText(
             Path.Combine(_tmpHome, ".dmart", "languages", "english.json"),
-            """{ "otp_message": "Custom code: {code}" }""");
+            """{ "otp_message": "Custom code: {code}", "activation_subject": "Custom welcome" }""");
 
         var loader = new LanguageLoader(NullLogger<LanguageLoader>.Instance);
         loader.Load();
 
         loader.Get(Language.En, "otp_message").ShouldBe("Custom code: {code}");
+        loader.Get(Language.En, "activation_subject").ShouldBe("Custom welcome");
         loader.Get(Language.En, "invitation_message").ShouldNotBeNullOrWhiteSpace();
         loader.Get(Language.En, "invitation_message").ShouldNotBe("Custom code: {code}");
     }

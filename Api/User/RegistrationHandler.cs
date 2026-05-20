@@ -113,6 +113,8 @@ public static class RegistrationHandler
 
             return Results.Json(Response.Ok(new[] { responseRecord }),
                 DmartJsonContext.Default.Response);
-        });
+        })
+        .Accepts<Record>("application/json")
+        .Produces<Response>();
     }
 }

@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Mail;
+using System.Net.Mime;
 using Dmart.Config;
 using Microsoft.Extensions.Options;
 
@@ -7,12 +8,23 @@ namespace Dmart.Services;
 
 // Thin wrapper around System.Net.Mail.SmtpClient (AOT-safe — no reflection).
 // Mirrors Python's aiosmtplib send_email() path in backend/api/user/service.py:
-// delivers an HTML message to the caller's email, returns false on any error
-// so the caller can fall back to on-server logging the same way the SmsSender
+// delivers a message to the caller's email, returns false on any error so
+// the caller can fall back to on-server logging the same way the SmsSender
 // degrades when the SMS gateway isn't configured.
+//
+// Two overloads:
+//   * SendEmailAsync(to, subject, htmlBody, ct) — legacy single-body path
+//     used by OtpProvider and the plugin-callback path. Stays HTML-only.
+//   * SendEmailAsync(to, subject, htmlBody, textBody, ct) — used by the
+//     activation-email flow in InvitationService. Sends multipart/alternative
+//     when both bodies are non-empty; degrades to whichever side is present
+//     otherwise; refuses the send when both are empty.
 public sealed class SmtpSender(IOptions<DmartSettings> settings, ILogger<SmtpSender> log)
 {
-    public async Task<bool> SendEmailAsync(string to, string subject, string htmlBody, CancellationToken ct = default)
+    public Task<bool> SendEmailAsync(string to, string subject, string htmlBody, CancellationToken ct = default)
+        => SendEmailAsync(to, subject, htmlBody, textBody: string.Empty, ct);
+
+    public async Task<bool> SendEmailAsync(string to, string subject, string htmlBody, string textBody, CancellationToken ct = default)
     {
         var s = settings.Value;
         if (s.MockSmtpApi)
@@ -23,6 +35,19 @@ public sealed class SmtpSender(IOptions<DmartSettings> settings, ILogger<SmtpSen
         if (string.IsNullOrWhiteSpace(s.MailHost))
         {
             log.LogWarning("SMTP gateway not configured (MailHost blank) — dropping message to {To}", to);
+            return false;
+        }
+        // Empty bodies are spam-filter bait. If a template rendering upstream
+        // (ActivationTemplateLoader, etc.) degraded to "" — usually because
+        // the operator overrides at ~/.dmart/ActivationEmailContent.{html,txt}
+        // failed to load — drop the send so the caller's existing "email not
+        // delivered → fall back" branch engages instead of a blank email
+        // landing in the recipient's spam folder.
+        var hasHtml = !string.IsNullOrWhiteSpace(htmlBody);
+        var hasText = !string.IsNullOrWhiteSpace(textBody);
+        if (!hasHtml && !hasText)
+        {
+            log.LogWarning("empty email body — refusing to send blank message to {To} (subject: {Subject})", to, subject);
             return false;
         }
 
@@ -42,10 +67,31 @@ public sealed class SmtpSender(IOptions<DmartSettings> settings, ILogger<SmtpSen
             {
                 From = new MailAddress(s.MailFromAddress, fromName),
                 Subject = subject,
-                Body = htmlBody,
-                IsBodyHtml = true,
             };
             msg.To.Add(to);
+
+            if (hasHtml && hasText)
+            {
+                // RFC 2046 §5.1.4: in multipart/alternative the LAST part is
+                // the most faithful representation. MailMessage.Body becomes
+                // the first part (text/plain) and the alternate view is
+                // appended (text/html). HTML-capable clients render HTML;
+                // text-only clients fall back to the plain part cleanly.
+                msg.Body = textBody;
+                msg.IsBodyHtml = false;
+                msg.AlternateViews.Add(
+                    AlternateView.CreateAlternateViewFromString(htmlBody, null, MediaTypeNames.Text.Html));
+            }
+            else if (hasHtml)
+            {
+                msg.Body = htmlBody;
+                msg.IsBodyHtml = true;
+            }
+            else
+            {
+                msg.Body = textBody;
+                msg.IsBodyHtml = false;
+            }
 
             await client.SendMailAsync(msg, ct);
             return true;

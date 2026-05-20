@@ -42,6 +42,7 @@ public static class ResourceWithPayloadHandler
                                   ILogger<ResourceWithPayloadMarker> log, HttpContext http,
                                   CancellationToken ct) =>
                 await HandleAsync(req, entries, attachments, perms, http.ActorOrAnonymous(), log, ct))
+          .Produces<Response>()
           .DisableAntiforgery();
 
         g.MapPost("/resources_from_csv/{resource_type}/{space}/{**rest}",
@@ -74,6 +75,7 @@ public static class ResourceWithPayloadHandler
                     string.IsNullOrEmpty(schema) ? null : schema,
                     stream, http.Actor(), ct, isUpdate);
             })
+          .Produces<Response>()
           .DisableAntiforgery();
     }
 

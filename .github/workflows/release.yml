@@ -266,6 +266,56 @@ jobs:
           name: el9-rpm
           path: dist/out/*.x86_64.rpm
 
+  build-deb-amd64:
+    name: Build Debian .deb (amd64)
+    # Self-hosted runner is x86_64 Fedora; the .deb is built INSIDE
+    # mcr.microsoft.com/dotnet/sdk:10.0 (Debian 12 bookworm base) via
+    # podman, so the runner's distro doesn't matter. Same shape as
+    # build-fedora-rpm / build-el9-rpm — container-built linux package.
+    runs-on: self-hosted
+    needs: build-ui-tarballs
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download UI tarballs
+        uses: actions/download-artifact@v7
+        with:
+          name: ui-tarballs
+          path: dist/out
+
+      - name: Extract UI dists
+        run: |
+          V="${GITHUB_REF_NAME#v}"; V="${V:-0.1.0}"
+          mkdir -p cxb/dist/client catalog/dist/client
+          tar -xzf "dist/out/cxb-${V}.tar.gz"     -C cxb/dist/client
+          tar -xzf "dist/out/catalog-${V}.tar.gz" -C catalog/dist/client
+
+      - name: Build .deb (debian:12-base via dotnet/sdk:10.0)
+        run: |
+          pkill -f 'dmart serve' 2>/dev/null || true
+          sleep 1
+          rm -rf dist/out/*.deb
+          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${VERSION:-0.1.0}"
+          VERSION="$VERSION" ./dist/build-deb.sh
+
+      - name: Upload .deb to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DEB=$(ls dist/out/dmart_*_amd64.deb 2>/dev/null | head -1)
+          if [ -n "$DEB" ]; then
+            gh release upload "$GITHUB_REF_NAME" "$DEB" --clobber
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: debian-deb-amd64
+          path: dist/out/dmart_*_amd64.deb
+
   build-windows:
     name: Build Windows (win-x64 AOT)
     runs-on: windows-latest

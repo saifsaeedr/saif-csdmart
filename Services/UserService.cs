@@ -556,7 +556,7 @@ public sealed class UserService(
         if (newDeviceId is not null || loginInfo is not null)
         {
             await users.TouchLoginAsync(user.Shortname, newDeviceId, loginInfo, ct);
-            updatedUser = updatedUser with { UpdatedAt = TimeUtils.Now() }; 
+            updatedUser = updatedUser with { UpdatedAt = TimeUtils.Now() };
         }
 
         var access = jwt.IssueAccess(updatedUser.Shortname, updatedUser.Roles, updatedUser.Type);

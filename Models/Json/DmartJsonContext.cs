@@ -41,6 +41,22 @@ namespace Dmart.Models.Json;
 [JsonSerializable(typeof(PasswordResetRequest))]
 [JsonSerializable(typeof(RegisterRequest))]
 [JsonSerializable(typeof(RegisterResponse))]
+// Documentation-only request shapes (see Dmart.Models/Api/DocsDtos.cs).
+// The endpoints that accept these parse the body manually — the types
+// exist so the OpenAPI generator can emit a stable schema, and the
+// source-gen resolver (used as the default TypeInfoResolver in
+// Program.cs) needs to know them.
+[JsonSerializable(typeof(ResetUserBody))]
+[JsonSerializable(typeof(ValidatePasswordBody))]
+[JsonSerializable(typeof(ProfileUpdateBody))]
+[JsonSerializable(typeof(SemanticSearchBody))]
+[JsonSerializable(typeof(ReindexEmbeddingsBody))]
+[JsonSerializable(typeof(ExecuteTaskBody))]
+[JsonSerializable(typeof(ProgressTicketBody))]
+[JsonSerializable(typeof(OAuthMobileLoginBody))]
+[JsonSerializable(typeof(WsSendMessageBody))]
+[JsonSerializable(typeof(WsBroadcastBody))]
+[JsonSerializable(typeof(McpRequestBody))]
 [JsonSerializable(typeof(HttpValidationError))]
 [JsonSerializable(typeof(ValidationError))]
 [JsonSerializable(typeof(JsonElement))]

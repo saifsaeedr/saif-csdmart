@@ -30,6 +30,11 @@ public sealed class AccessRepository(Db db, AuthzCacheRefresher refresher, UserR
     public async Task<Role?> GetRoleAsync(string shortname, CancellationToken ct = default)
     {
         await using var conn = await db.OpenAsync(ct);
+        return await GetRoleAsync(shortname, conn, ct);
+    }
+
+    public async Task<Role?> GetRoleAsync(string shortname, NpgsqlConnection conn, CancellationToken ct = default)
+    {
         await using var cmd = new NpgsqlCommand($"{SelectRoleColumns} WHERE shortname = $1", conn);
         cmd.Parameters.Add(new() { Value = shortname });
         await using var r = await cmd.ExecuteReaderAsync(ct);
@@ -51,11 +56,23 @@ public sealed class AccessRepository(Db db, AuthzCacheRefresher refresher, UserR
 
     public async Task UpsertRoleAsync(Role role, CancellationToken ct = default)
     {
+        await using var conn = await db.OpenAsync(ct);
+        await UpsertRoleAsync(role, conn, ct);
+    }
+
+    public Task UpsertRoleAsync(Role role, NpgsqlConnection conn, CancellationToken ct = default)
+        => UpsertRoleAsync(role, conn, deferCacheRefresh: false, ct);
+
+    // `deferCacheRefresh` skips the post-write `refresher.RefreshAsync` call.
+    // Used exclusively by the fast-import path, which fires one invalidate at
+    // the end of the run instead of one per row. Default false preserves the
+    // existing per-write contract for every other caller.
+    public async Task UpsertRoleAsync(Role role, NpgsqlConnection conn, bool deferCacheRefresh, CancellationToken ct = default)
+    {
         // Populate query_policies on every write (see EntryRepository.UpsertAsync
         // for rationale). Without this, the row is only reachable to its owner.
         role = role with { QueryPolicies = Utils.QueryPolicies.Generate(role) };
 
-        await using var conn = await db.OpenAsync(ct);
         await using var cmd = new NpgsqlCommand("""
             INSERT INTO roles (uuid, shortname, space_name, subpath, is_active, slug,
                                displayname, description, tags, created_at, updated_at,
@@ -106,12 +123,18 @@ public sealed class AccessRepository(Db db, AuthzCacheRefresher refresher, UserR
 
         await cmd.ExecuteNonQueryAsync(ct);
         // role.permissions may have changed → clear the in-memory permission cache.
-        await refresher.RefreshAsync(ct);
+        // Fast-import callers defer this to one call at the end of the run.
+        if (!deferCacheRefresh) await refresher.RefreshAsync(ct);
     }
 
     public async Task<Permission?> GetPermissionAsync(string shortname, CancellationToken ct = default)
     {
         await using var conn = await db.OpenAsync(ct);
+        return await GetPermissionAsync(shortname, conn, ct);
+    }
+
+    public async Task<Permission?> GetPermissionAsync(string shortname, NpgsqlConnection conn, CancellationToken ct = default)
+    {
         await using var cmd = new NpgsqlCommand($"{SelectPermissionColumns} WHERE shortname = $1", conn);
         cmd.Parameters.Add(new() { Value = shortname });
         await using var r = await cmd.ExecuteReaderAsync(ct);
@@ -133,10 +156,21 @@ public sealed class AccessRepository(Db db, AuthzCacheRefresher refresher, UserR
 
     public async Task UpsertPermissionAsync(Permission p, CancellationToken ct = default)
     {
+        await using var conn = await db.OpenAsync(ct);
+        await UpsertPermissionAsync(p, conn, ct);
+    }
+
+    public Task UpsertPermissionAsync(Permission p, NpgsqlConnection conn, CancellationToken ct = default)
+        => UpsertPermissionAsync(p, conn, deferCacheRefresh: false, ct);
+
+    // `deferCacheRefresh` skips `InvalidateAllCachesAsync` — the expensive
+    // DELETE FROM userpermissionscache that would otherwise fire per row.
+    // Fast-import drives that DELETE exactly once after all permissions land.
+    public async Task UpsertPermissionAsync(Permission p, NpgsqlConnection conn, bool deferCacheRefresh, CancellationToken ct = default)
+    {
         // Populate query_policies on every write (see EntryRepository.UpsertAsync).
         p = p with { QueryPolicies = Utils.QueryPolicies.Generate(p) };
 
-        await using var conn = await db.OpenAsync(ct);
         await using var cmd = new NpgsqlCommand("""
             INSERT INTO permissions (uuid, shortname, space_name, subpath, is_active, slug,
                                      displayname, description, tags, created_at, updated_at,
@@ -201,7 +235,8 @@ public sealed class AccessRepository(Db db, AuthzCacheRefresher refresher, UserR
 
         await cmd.ExecuteNonQueryAsync(ct);
         // permission shape changed → invalidate cached resolutions.
-        await InvalidateAllCachesAsync(ct);
+        // Fast-import callers defer this to one call at the end of the run.
+        if (!deferCacheRefresh) await InvalidateAllCachesAsync(ct);
     }
 
     // Returns true when a row was deleted, false when no matching role existed.

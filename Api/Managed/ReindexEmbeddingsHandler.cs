@@ -84,5 +84,7 @@ public static class ReindexEmbeddingsHandler
                 ["skipped"] = stats.Skipped,
                 ["failed"] = stats.Failed,
             });
-        });
+        })
+        .Accepts<Dmart.Models.Api.ReindexEmbeddingsBody>("application/json")
+        .Produces<Response>();
 }

@@ -29,9 +29,18 @@ public sealed class InvitationService(
     SmtpSender smtp,
     ShortLinkService shortLinks,
     LanguageLoader languages,
+    ActivationTemplateLoader activationTemplates,
     IOptions<DmartSettings> settings,
     ILogger<InvitationService> log)
 {
+    // Defensive fallback only — used when both the user's locale AND the
+    // embedded English JSON are missing `activation_subject`. The shipped
+    // languages/english.json MUST carry the same string for this key;
+    // a CI-time check would be nice (no harness in place yet), but until
+    // then the constant + the JSON value need to be kept in sync manually.
+    // Python parity: utils/generate_email.py::generate_subject("activation").
+    private const string EnglishActivationSubjectFallback = "Welcome to our Platform!";
+
     public async Task<string?> MintAsync(User user, InvitationChannel channel, CancellationToken ct = default)
         => await MintAsync(user, channel, isReset: false, ct);
 
@@ -95,13 +104,32 @@ public sealed class InvitationService(
             }
             else
             {
-                // Python parity: send the activation HTML containing the invitation
-                // link via SMTP. Mirrors generate_email_from_template("activation")
-                // and generate_subject("activation"); both are English-only on the
-                // Python side (single activation.html.j2 template, no per-language
-                // variant), so we keep parity rather than localizing here.
-                var body = ActivationEmailBody(user, deliverableLink);
-                var ok = await smtp.SendEmailAsync(identifier, ActivationEmailSubject, body, ct);
+                // Activation email — the subject and both body parts are now
+                // dynamic. Subject text is sourced from LanguageLoader so
+                // operators can localize it via ~/.dmart/languages/<lang>.json
+                // (English fallback when the user's locale has no entry).
+                // Body parts are sourced from ActivationTemplateLoader:
+                // embedded templates/ActivationEmailContent.{html,txt} by
+                // default, each replaced independently when
+                // ~/.dmart/ActivationEmailContent.{html,txt} exists. All
+                // three flow through the same `{{var}}` substitution with the
+                // same {name, msisdn, shortname, link} scope so operators
+                // can reference any of those vars in any field. SmtpSender
+                // composes a multipart/alternative message when both bodies
+                // are non-empty and falls back to whichever side is present
+                // otherwise — see Services/SmtpSender.cs.
+                // LanguageLoader already falls back to English when the user's
+                // locale lacks the key. The hardcoded constant below covers
+                // the pathological "even English doesn't have it" case
+                // (config bug, botched override). An empty Subject header
+                // would otherwise reach the MTA and some servers flag
+                // blank-subject mail as spam.
+                var subjectSource = languages.Get(user.Language, "activation_subject")
+                                    ?? EnglishActivationSubjectFallback;
+                var subject = activationTemplates.RenderSubject(subjectSource, user, deliverableLink);
+                var htmlBody = activationTemplates.RenderHtmlBody(user, deliverableLink);
+                var textBody = activationTemplates.RenderTextBody(user, deliverableLink);
+                var ok = await smtp.SendEmailAsync(identifier, subject, htmlBody, textBody, ct);
                 if (!ok)
                     log.LogWarning("invitation email for {Shortname} to {Email} not delivered — returning token in response body",
                         user.Shortname, identifier);
@@ -155,33 +183,4 @@ public sealed class InvitationService(
         return $"{baseUrl.TrimEnd('/')}/auth/invitation?invitation={Uri.EscapeDataString(token)}&lang={lang}&user-type={type}";
     }
 
-    // Python parity: utils/generate_email.generate_subject("activation").
-    internal const string ActivationEmailSubject = "Welcome to our Platform!";
-
-    // Python parity: utils/templates/activation.html.j2 — same English body,
-    // same field set (name / msisdn / shortname / link). Kept English-only to
-    // match Python which has only one activation template (no per-language
-    // variant). All interpolation values are HtmlEncoded to keep this safe
-    // even if a malicious display name slips through validation upstream.
-    internal static string ActivationEmailBody(User user, string link)
-    {
-        var enc = (string? s) => System.Net.WebUtility.HtmlEncode(s ?? string.Empty);
-        // Python pulls displayname.en from the inbound record's attributes; we
-        // use the persisted user.Displayname.En and fall back to shortname so
-        // recipients always see a name.
-        var name = user.Displayname?.En ?? user.Shortname;
-        return "<!DOCTYPE html><html lang=\"en\"><head>"
-            + "<meta charset=\"utf-8\" />"
-            + "<title>Email</title></head>"
-            + "<body style=\"margin:0;padding:0\">"
-            + $"<p>Hi {enc(name)}</p>"
-            + $"<p>MSISDN: {enc(user.Msisdn)}</p>"
-            + $"<p>Username: {enc(user.Shortname)}</p>"
-            + "<p>Welcome, we're happy to see you on board!</p>"
-            + "<p>Only Few steps are left to activate your account, please use the below account activation link.</p>"
-            + "<p>Activation Link:</p>"
-            + $"<a href=\"{enc(link)}\">{enc(link)}</a>"
-            + "<p>Regards,</p>"
-            + "</body></html>";
-    }
 }

@@ -77,6 +77,7 @@ internal static class CliBootstrap
             new SpaceRepository(db),
             new HistoryRepository(db),
             new PermissionService(userRepo, accessRepo, refresher),
+            db,
             Options.Create(s),
             nlog.CreateLogger<ImportExportService>());
     }

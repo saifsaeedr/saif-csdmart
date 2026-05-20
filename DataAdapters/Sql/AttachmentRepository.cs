@@ -86,6 +86,11 @@ public sealed class AttachmentRepository(Db db)
     public async Task<Attachment?> GetAsync(string spaceName, string subpath, string shortname, CancellationToken ct = default)
     {
         await using var conn = await db.OpenAsync(ct);
+        return await GetAsync(spaceName, subpath, shortname, conn, ct);
+    }
+
+    public async Task<Attachment?> GetAsync(string spaceName, string subpath, string shortname, NpgsqlConnection conn, CancellationToken ct = default)
+    {
         await using var cmd = new NpgsqlCommand(
             $"{SelectAllColumns} WHERE space_name = $1 AND subpath = $2 AND shortname = $3", conn);
         cmd.Parameters.Add(new() { Value = spaceName });
@@ -107,6 +112,11 @@ public sealed class AttachmentRepository(Db db)
     public async Task UpsertAsync(Attachment a, CancellationToken ct = default)
     {
         await using var conn = await db.OpenAsync(ct);
+        await UpsertAsync(a, conn, ct);
+    }
+
+    public async Task UpsertAsync(Attachment a, NpgsqlConnection conn, CancellationToken ct = default)
+    {
         await using var cmd = new NpgsqlCommand("""
             INSERT INTO attachments (uuid, shortname, space_name, subpath, is_active, slug,
                                      displayname, description, tags, created_at, updated_at,

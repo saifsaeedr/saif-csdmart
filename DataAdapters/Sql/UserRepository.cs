@@ -16,7 +16,7 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
                password, roles, groups, acl, relationships,
                type::text, language::text, email, msisdn, locked_to_device,
                is_email_verified, is_msisdn_verified, force_password_change,
-               device_id, google_id, facebook_id, social_avatar_url,
+               device_id, google_id, facebook_id, apple_id, social_avatar_url,
                attempt_count, last_login, notes, query_policies
         FROM users
         """;
@@ -24,6 +24,11 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
     public async Task<User?> GetByShortnameAsync(string shortname, CancellationToken ct = default)
     {
         await using var conn = await db.OpenAsync(ct);
+        return await GetByShortnameAsync(shortname, conn, ct);
+    }
+
+    public async Task<User?> GetByShortnameAsync(string shortname, NpgsqlConnection conn, CancellationToken ct = default)
+    {
         await using var cmd = new NpgsqlCommand($"{SelectAllColumns} WHERE shortname = $1", conn);
         cmd.Parameters.Add(new() { Value = shortname });
         await using var reader = await cmd.ExecuteReaderAsync(ct);
@@ -66,13 +71,18 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
 
     public async Task UpsertAsync(User u, CancellationToken ct = default)
     {
+        await using var conn = await db.OpenAsync(ct);
+        await UpsertAsync(u, conn, ct);
+    }
+
+    public async Task UpsertAsync(User u, NpgsqlConnection conn, CancellationToken ct = default)
+    {
         // Populate query_policies deterministically on every write so the
         // row-level ACL filter (QueryHelper.AppendAclFilter) can match
         // patterns against it. See EntryRepository.UpsertAsync for the
         // full rationale — same pattern, same invariant.
         u = u with { QueryPolicies = Utils.QueryPolicies.Generate(u) };
 
-        await using var conn = await db.OpenAsync(ct);
         await using var cmd = new NpgsqlCommand("""
             INSERT INTO users (uuid, shortname, space_name, subpath, is_active, slug,
                                displayname, description, tags, created_at, updated_at,
@@ -81,10 +91,10 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
                                password, roles, groups, acl, relationships,
                                type, language, email, msisdn, locked_to_device,
                                is_email_verified, is_msisdn_verified, force_password_change,
-                               device_id, google_id, facebook_id, social_avatar_url,
+                               device_id, google_id, facebook_id, apple_id, social_avatar_url,
                                attempt_count, last_login, notes, query_policies)
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,
-                    $22::usertype,$23::language,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37)
+                    $22::usertype,$23::language,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38)
             ON CONFLICT (shortname) DO UPDATE SET
                 space_name = EXCLUDED.space_name,
                 subpath = EXCLUDED.subpath,
@@ -114,6 +124,7 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
                 device_id = EXCLUDED.device_id,
                 google_id = EXCLUDED.google_id,
                 facebook_id = EXCLUDED.facebook_id,
+                apple_id = EXCLUDED.apple_id,
                 social_avatar_url = EXCLUDED.social_avatar_url,
                 attempt_count = EXCLUDED.attempt_count,
                 last_login = EXCLUDED.last_login,
@@ -155,6 +166,7 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
         cmd.Parameters.Add(new() { Value = (object?)u.DeviceId ?? DBNull.Value });
         cmd.Parameters.Add(new() { Value = (object?)u.GoogleId ?? DBNull.Value });
         cmd.Parameters.Add(new() { Value = (object?)u.FacebookId ?? DBNull.Value });
+        cmd.Parameters.Add(new() { Value = (object?)u.AppleId ?? DBNull.Value });
         cmd.Parameters.Add(new() { Value = (object?)u.SocialAvatarUrl ?? DBNull.Value });
 #pragma warning disable CA1508 // Analyzer limitation: int? boxed via (object?) cast IS null when source is null; the ?? is load-bearing.
         cmd.Parameters.Add(new() { Value = (object?)u.AttemptCount ?? DBNull.Value });
@@ -204,10 +216,10 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
                                password, roles, groups, acl, relationships,
                                type, language, email, msisdn, locked_to_device,
                                is_email_verified, is_msisdn_verified, force_password_change,
-                               device_id, google_id, facebook_id, social_avatar_url,
+                               device_id, google_id, facebook_id, apple_id, social_avatar_url,
                                attempt_count, last_login, notes, query_policies)
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,
-                    $22::usertype,$23::language,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37)
+                    $22::usertype,$23::language,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38)
             ON CONFLICT (shortname) DO UPDATE SET
                 space_name = EXCLUDED.space_name,
                 subpath = EXCLUDED.subpath,
@@ -237,6 +249,7 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
                 device_id = EXCLUDED.device_id,
                 google_id = EXCLUDED.google_id,
                 facebook_id = EXCLUDED.facebook_id,
+                apple_id = EXCLUDED.apple_id,
                 social_avatar_url = EXCLUDED.social_avatar_url,
                 attempt_count = EXCLUDED.attempt_count,
                 last_login = EXCLUDED.last_login,
@@ -277,6 +290,7 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
         cmd.Parameters.Add(new() { Value = (object?)u.DeviceId ?? DBNull.Value });
         cmd.Parameters.Add(new() { Value = (object?)u.GoogleId ?? DBNull.Value });
         cmd.Parameters.Add(new() { Value = (object?)u.FacebookId ?? DBNull.Value });
+        cmd.Parameters.Add(new() { Value = (object?)u.AppleId ?? DBNull.Value });
         cmd.Parameters.Add(new() { Value = (object?)u.SocialAvatarUrl ?? DBNull.Value });
 #pragma warning disable CA1508 // Analyzer limitation: int? boxed via (object?) cast IS null when source is null; the ?? is load-bearing.
         cmd.Parameters.Add(new() { Value = (object?)u.AttemptCount ?? DBNull.Value });
@@ -328,7 +342,9 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
     // the auth check and here — e.g. an OAuth after-hook calling
     // update_user → UpsertWithPriorAsync to attach a Payload — isn't
     // clobbered by an UpsertAsync replaying the pre-login in-memory row.
-    // Null arguments leave the corresponding column untouched.
+    // Null arguments leave the corresponding column untouched (COALESCE
+    // falls back to the existing value). AddJsonb already encodes the
+    // jsonb wire type, so no `::jsonb` cast is needed in the SQL.
     public async Task TouchLoginAsync(
         string shortname, string? deviceId, Dictionary<string, object>? lastLogin,
         CancellationToken ct = default)
@@ -338,17 +354,13 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
         await using var cmd = new NpgsqlCommand("""
             UPDATE users SET
                 device_id  = COALESCE($2, device_id),
-                last_login = COALESCE($3::jsonb, last_login),
+                last_login = COALESCE($3, last_login),
                 updated_at = NOW()
             WHERE shortname = $1
             """, conn);
         cmd.Parameters.Add(new() { Value = shortname });
         cmd.Parameters.Add(new() { Value = (object?)deviceId ?? DBNull.Value });
-        cmd.Parameters.Add(new()
-        {
-            Value = (object?)JsonbHelpers.ToJsonb(lastLogin) ?? DBNull.Value,
-            NpgsqlDbType = NpgsqlDbType.Jsonb,
-        });
+        AddJsonb(cmd, JsonbHelpers.ToJsonb(lastLogin));
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -617,11 +629,12 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
             DeviceId = NullIfEmpty(r, 29),
             GoogleId = NullIfEmpty(r, 30),
             FacebookId = NullIfEmpty(r, 31),
-            SocialAvatarUrl = NullIfEmpty(r, 32),
-            AttemptCount = r.IsDBNull(33) ? null : r.GetInt32(33),
-            LastLogin = JsonbHelpers.FromDictStringObject(r.IsDBNull(34) ? null : r.GetString(34)),
-            Notes = r.IsDBNull(35) ? null : r.GetString(35),
-            QueryPolicies = r.IsDBNull(36) ? new() : ((string[])r.GetValue(36)).ToList(),
+            AppleId = NullIfEmpty(r, 32),
+            SocialAvatarUrl = NullIfEmpty(r, 33),
+            AttemptCount = r.IsDBNull(34) ? null : r.GetInt32(34),
+            LastLogin = JsonbHelpers.FromDictStringObject(r.IsDBNull(35) ? null : r.GetString(35)),
+            Notes = r.IsDBNull(36) ? null : r.GetString(36),
+            QueryPolicies = r.IsDBNull(37) ? new() : ((string[])r.GetValue(37)).ToList(),
         };
     }
 

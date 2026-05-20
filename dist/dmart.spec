@@ -16,7 +16,10 @@ BuildRequires:  dotnet-sdk-10.0
 BuildRequires:  clang
 BuildRequires:  zlib-devel
 
-Requires:       postgresql-server
+# PostgreSQL is intentionally NOT a dependency — dmart talks to a remote
+# PG over TCP just as often as a local one, and pulling postgresql-server
+# onto every dmart node forces a daemon nobody asked for. Operators install
+# the PG flavor they want (postgresql-server, postgresql, a remote cluster).
 # jq is invoked as a subprocess when /managed/query carries a jq_filter on
 # a join sub-query (mirrors Python dmart's subprocess shell-out). Absent jq,
 # such requests return JQ_ERROR; every other endpoint works without it.

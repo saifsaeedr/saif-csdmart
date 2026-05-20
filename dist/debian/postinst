@@ -1,0 +1,55 @@
+#!/bin/sh
+# Run on install AND on every upgrade. Idempotent — checks for prior state
+# before mutating. Mirrors the dmart.spec %post block (RPM-side) so behavior
+# stays consistent across package formats.
+set -e
+
+case "$1" in
+    configure)
+        # System user/group for the daemon. Created on first install only;
+        # idempotent on upgrades because adduser --system is a no-op when
+        # the account already exists.
+        if ! getent group dmart >/dev/null; then
+            addgroup --system dmart
+        fi
+        if ! getent passwd dmart >/dev/null; then
+            adduser --system --no-create-home \
+                    --home /var/lib/dmart --shell /usr/sbin/nologin \
+                    --ingroup dmart --gecos "dmart data platform" dmart
+        fi
+
+        # /etc/dmart/config.env ships in the .deb as a conffile (see
+        # dist/build-deb.sh — initial copy of config.env.sample). dpkg
+        # installs it on first install with root:root 0640 from the
+        # package tree, then prompts the operator on upgrade if it
+        # diverges. We only need to chown to root:dmart so the daemon
+        # (running as dmart) can read it.
+        if [ -f /etc/dmart/config.env ]; then
+            chown root:dmart /etc/dmart/config.env 2>/dev/null || true
+            chmod 0640 /etc/dmart/config.env 2>/dev/null || true
+        fi
+        # Friendly first-install hint (skipped on upgrades — $2 is the
+        # previously-installed version on upgrade, empty on fresh install).
+        if [ -z "${2:-}" ]; then
+            cat <<EOF
+Installed default config: /etc/dmart/config.env
+Edit it with your database credentials and JWT secret, then:
+  systemctl enable --now dmart
+EOF
+        fi
+
+        # Ensure runtime dirs are owned by the dmart user. Dpkg sets
+        # owner/group from the .deb's tar entries (root:root), so we
+        # chown after the fact — matches the RPM %post pattern.
+        chown dmart:dmart /var/lib/dmart /var/lib/dmart/spaces \
+            /var/lib/dmart/custom_plugins 2>/dev/null || true
+
+        # Reload systemd if it's there (containers / minimal images
+        # might not have it; don't fail the install on its absence).
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl daemon-reload >/dev/null 2>&1 || true
+        fi
+        ;;
+esac
+
+exit 0

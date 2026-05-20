@@ -32,6 +32,93 @@ public sealed class Db(IOptions<DmartSettings> settings)
         return c;
     }
 
+    // Opens a single connection and sets `session_replication_role = 'replica'`
+    // on it — bypasses FK constraints AND user-defined triggers for every
+    // statement issued on that session. Used by `dmart import --fast` to
+    // turn the import zip into a trusted bulk load: every UpsertAsync issued
+    // by the import threads this connection in, so the SET stays in effect
+    // for the whole import. The returned `Scope` restores the default and
+    // disposes the connection on `await using`, so a mid-import throw still
+    // leaves the session reset.
+    //
+    // Hard-fails with a clear InvalidOperationException if the caller's DB
+    // role can't set session_replication_role (requires superuser OR the
+    // pg_session_replication_role predefined role since PG 14). No silent
+    // fallback — the operator explicitly opted into `--fast` and should hear
+    // about it when their role can't honour it.
+    public async Task<(NpgsqlConnection Conn, FastImportScope Scope)> BeginFastImportSessionAsync(CancellationToken ct = default)
+    {
+        var conn = await OpenAsync(ct);
+        NpgsqlTransaction? tx = null;
+        try
+        {
+            await using (var cmd = new NpgsqlCommand("SET session_replication_role = 'replica'", conn))
+                await cmd.ExecuteNonQueryAsync(ct);
+            // One transaction for the whole import — collapses N row-level
+            // implicit COMMITs (and their fsyncs) into one final COMMIT.
+            // Npgsql auto-associates this transaction with any NpgsqlCommand
+            // built on `conn`, so the repos don't need to know about it.
+            tx = await conn.BeginTransactionAsync(ct);
+        }
+        catch (PostgresException ex)
+        {
+            if (tx is not null) await tx.DisposeAsync();
+            await conn.DisposeAsync();
+            throw new InvalidOperationException(
+                "dmart import --fast requires the DB role to be superuser or hold "
+                + $"pg_session_replication_role; SET session_replication_role failed: {ex.MessageText}",
+                ex);
+        }
+        catch
+        {
+            if (tx is not null) await tx.DisposeAsync();
+            await conn.DisposeAsync();
+            throw;
+        }
+        return (conn, new FastImportScope(conn, tx));
+    }
+
+    // Scope returned by BeginFastImportSessionAsync. The import calls MarkSuccess()
+    // exactly once if the whole 5-pass body finished without an unhandled throw;
+    // DisposeAsync commits on success, rolls back otherwise. Per-row failures the
+    // import collects into `results.Failed` are NOT throws and should NOT prevent
+    // the commit — the operator still gets the partial result they would have
+    // gotten without --fast.
+    public sealed class FastImportScope(NpgsqlConnection conn, NpgsqlTransaction tx) : IAsyncDisposable
+    {
+        private bool _success;
+        public void MarkSuccess() => _success = true;
+
+        public async ValueTask DisposeAsync()
+        {
+            try
+            {
+                if (_success) await tx.CommitAsync();
+                else          await tx.RollbackAsync();
+            }
+            catch
+            {
+                // Best-effort: a broken connection at this point means the
+                // transaction is already aborted server-side. Continue to
+                // restore the session role and dispose.
+            }
+            finally
+            {
+                await tx.DisposeAsync();
+            }
+            try
+            {
+                await using var cmd = new NpgsqlCommand("SET session_replication_role = DEFAULT", conn);
+                await cmd.ExecuteNonQueryAsync();
+            }
+            catch
+            {
+                // Same reasoning as the transaction dispose above.
+            }
+            await conn.DisposeAsync();
+        }
+    }
+
     // Runs a transactional operation with bounded retry on PG 40P01 (deadlock
     // detected). Deadlocks are transient — the loser's transaction is fully
     // rolled back, so replay from scratch is correct. Use from repositories

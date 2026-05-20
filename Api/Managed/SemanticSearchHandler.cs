@@ -85,5 +85,7 @@ public static class SemanticSearchHandler
 
                 return await svc.SearchAsync(query, space, subpath, types, limit,
                     http.Actor(), ct);
-            });
+            })
+            .Accepts<Dmart.Models.Api.SemanticSearchBody>("application/json")
+            .Produces<Response>();
 }

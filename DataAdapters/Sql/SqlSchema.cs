@@ -74,6 +74,7 @@ public static class SqlSchema
         device_id               TEXT,
         google_id               TEXT,
         facebook_id             TEXT,
+        apple_id                TEXT,
         social_avatar_url       TEXT,
         attempt_count           INTEGER,
         last_login              JSONB,
@@ -391,6 +392,7 @@ public static class SqlSchema
     ALTER TABLE users       ADD COLUMN IF NOT EXISTS device_id             TEXT;
     ALTER TABLE users       ADD COLUMN IF NOT EXISTS google_id             TEXT;
     ALTER TABLE users       ADD COLUMN IF NOT EXISTS facebook_id           TEXT;
+    ALTER TABLE users       ADD COLUMN IF NOT EXISTS apple_id              TEXT;
     ALTER TABLE users       ADD COLUMN IF NOT EXISTS social_avatar_url     TEXT;
     ALTER TABLE users       ADD COLUMN IF NOT EXISTS attempt_count         INTEGER;
     ALTER TABLE users       ADD COLUMN IF NOT EXISTS last_login            JSONB;
@@ -423,6 +425,33 @@ public static class SqlSchema
                 UNIQUE (invitation_token);
         END IF;
     END $$;
+
+    -- Identifier uniqueness on users — provider-issued IDs only.
+    -- NULLs are distinct under Postgres' default, so multiple rows missing
+    -- a given identifier coexist.
+    --
+    -- Email and msisdn are DELIBERATELY NOT indexed here. Two accounts with
+    -- the same email must be able to coexist — e.g. a local password account
+    -- and a Google OAuth account that happen to share an email. See
+    -- OAuthEndpointsTests.Resolver_EmailMatch_CreatesSeparateAccount_NoSilentMerge,
+    -- which pins the security property that the OAuth resolver creates a
+    -- SEPARATE account rather than silently attaching its provider id to a
+    -- pre-existing email-matching account. Adding a unique-email constraint
+    -- would either break that test or force the resolver into a
+    -- pre-auth-takeover-shaped merge path. Same reasoning applies to msisdn.
+    -- Application-level uniqueness on /user/create still runs through
+    -- UniquenessValidator.
+    --
+    -- Provider IDs (google_id, facebook_id, apple_id) are 1:1 by construction
+    -- (one provider account → one provider-id-keyed dmart account, named
+    -- `<provider>_<id>`), so DB-level uniqueness here is defense-in-depth on
+    -- top of the shortname unique constraint.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id_unique
+        ON users (google_id) WHERE google_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_facebook_id_unique
+        ON users (facebook_id) WHERE facebook_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_apple_id_unique
+        ON users (apple_id) WHERE apple_id IS NOT NULL;
 
     -- <table>.query_policies must be non-empty for every ACL-filterable
     -- table. A row with an empty array is invisible to AppendAclFilter

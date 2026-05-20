@@ -643,7 +643,7 @@ public sealed partial class DmartSqlAdapter
         created_at, updated_at, owner_shortname, owner_group_shortname, acl,
         password, roles, groups, type, language, email, msisdn,
         is_email_verified, is_msisdn_verified, force_password_change,
-        google_id, facebook_id, attempt_count, query_policies
+        google_id, facebook_id, apple_id, attempt_count, query_policies
         """;
 
     // Mirrors tsdmart's getProfile (GET /user/profile) — read the calling
@@ -938,8 +938,9 @@ public sealed partial class DmartSqlAdapter
             ForcePasswordChange = r.GetBoolean(21),
             GoogleId = r.IsDBNull(22) ? null : r.GetString(22),
             FacebookId = r.IsDBNull(23) ? null : r.GetString(23),
-            AttemptCount = r.IsDBNull(24) ? null : r.GetInt32(24),
-            QueryPolicies = r.IsDBNull(25) ? new() : ((string[])r.GetValue(25)).ToList(),
+            AppleId = r.IsDBNull(24) ? null : r.GetString(24),
+            AttemptCount = r.IsDBNull(25) ? null : r.GetInt32(25),
+            QueryPolicies = r.IsDBNull(26) ? new() : ((string[])r.GetValue(26)).ToList(),
         };
     }
 

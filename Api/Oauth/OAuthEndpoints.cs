@@ -56,7 +56,9 @@ public static class OAuthEndpoints
         // Public clients only. The client posts redirect_uris + client_name;
         // we mint a client_id, echo the registration back. No client_secret
         // is issued — public clients prove themselves at token time via PKCE.
-        g.MapPost("/register", HandleRegisterAsync);
+        g.MapPost("/register", HandleRegisterAsync)
+            .Accepts<RegisterRequest>("application/json")
+            .Produces<RegisterResponse>(201);
 
         // ---- Authorization endpoint (RFC 6749 §3.1) ----
         //

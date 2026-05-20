@@ -29,7 +29,12 @@ public static class SubmitHandler
                         parsed.Error, ErrorTypes.Request);
                 return await SubmitAsync(space, parsed.ResourceType, parsed.Schema,
                     parsed.Subpath, parsed.Workflow, req, entries, settings, ct);
-            });
+            })
+            // Body is the schema payload (any JSON object — copied verbatim
+            // into the created entry's payload.body). Documented as Record
+            // for a familiar starting shape; the handler accepts any object.
+            .Accepts<Record>("application/json")
+            .Produces<Response>();
     }
 
     private static async Task<Response> SubmitAsync(

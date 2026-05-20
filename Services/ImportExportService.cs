@@ -9,6 +9,8 @@ using Dmart.Models.Core;
 using Dmart.Models.Enums;
 using Dmart.Models.Json;
 using Microsoft.Extensions.Options;
+using Npgsql;
+using NpgsqlTypes;
 
 namespace Dmart.Services;
 
@@ -52,6 +54,7 @@ public sealed class ImportExportService(
     SpaceRepository spaces,
     HistoryRepository histories,
     PermissionService perms,
+    Db db,
     IOptions<DmartSettings> settingsOpt,
     ILogger<ImportExportService> log)
 {
@@ -393,7 +396,13 @@ public sealed class ImportExportService(
     // ========================================================================
 
     public Task<Response> ImportZipAsync(Stream zip, string? actor, CancellationToken ct = default)
-        => ImportZipAsync(zip, actor, preserveExisting: false, ct);
+        => ImportZipAsync(zip, actor, preserveExisting: false, fastUnsafeNoFkCheck: false, fastParallelism: 1, ct);
+
+    public Task<Response> ImportZipAsync(Stream zip, string? actor, bool preserveExisting, CancellationToken ct = default)
+        => ImportZipAsync(zip, actor, preserveExisting, fastUnsafeNoFkCheck: false, fastParallelism: 1, ct);
+
+    public Task<Response> ImportZipAsync(Stream zip, string? actor, bool preserveExisting, bool fastUnsafeNoFkCheck, CancellationToken ct = default)
+        => ImportZipAsync(zip, actor, preserveExisting, fastUnsafeNoFkCheck, fastParallelism: 1, ct);
 
     /// <summary>
     /// Import a dmart zip into the database.
@@ -407,7 +416,28 @@ public sealed class ImportExportService(
     /// upserted: existing rows get their non-key columns replaced from the
     /// zip's meta.
     /// </param>
-    public async Task<Response> ImportZipAsync(Stream zip, string? actor, bool preserveExisting, CancellationToken ct = default)
+    /// <param name="fastUnsafeNoFkCheck">
+    /// When true, the entire import runs on a single Npgsql session with
+    /// <c>session_replication_role = 'replica'</c>, which bypasses ALL FK
+    /// constraints and user-defined triggers for the duration of the import.
+    /// Used by the standalone CLI <c>dmart import --fast</c> path where the
+    /// zip is operator-trusted. Hard-fails with a clear error if the DB role
+    /// can't grant that privilege — no silent fallback. The HTTP
+    /// <c>/managed/import</c> contract must never set this true.
+    /// </param>
+    /// <param name="fastParallelism">
+    /// When &gt; 1 AND <paramref name="fastUnsafeNoFkCheck"/> is true AND the
+    /// zip carries more than one space, Pass 3 (entries), Pass 4 (attachments)
+    /// and Pass 5 (histories) run on separate per-space worker connections
+    /// in parallel, each with its own transaction. Trade-off: the
+    /// single-transaction-for-the-whole-import property is dropped — a crash
+    /// mid-import leaves some spaces fully landed and others not (operator
+    /// re-runs with -r/--replace to retry). Default 1 = serial, identical to
+    /// Checkpoint ALPHA behaviour. Ignored when <paramref name="fastUnsafeNoFkCheck"/>
+    /// is false — would have no effect since the slow path has no scoped
+    /// session to share. Clamped to <c>[1, 16]</c> defensively.
+    /// </param>
+    public async Task<Response> ImportZipAsync(Stream zip, string? actor, bool preserveExisting, bool fastUnsafeNoFkCheck, int fastParallelism, CancellationToken ct = default)
     {
         // `actor` is accepted for API stability but no longer threaded through —
         // every imported record's owner comes from its meta's owner_shortname,
@@ -439,41 +469,120 @@ public sealed class ImportExportService(
             .Where(z => !string.IsNullOrEmpty(z.FullName) && !z.FullName.EndsWith("/"))
             .ToList();
 
-        // ---- Pass 1: Users (the only FK target — every other table's
-        //              owner_shortname references users.shortname). Anything
-        //              with a non-admin owner in its meta needs the user row
-        //              to exist before its own insert. ----
-        foreach (var ze in zes.Where(IsUserMeta))        await TryImportUserAsync(ze, results, preserveExisting, ct);
+        // Clamp parallelism defensively. <=1 means serial (today's behaviour).
+        // >16 is rejected as nonsense for a CLI import — the Npgsql default
+        // pool is 10+10 and we want headroom for whatever else is connected.
+        var workers = Math.Clamp(fastParallelism, 1, 16);
 
-        // ---- Pass 2: Spaces, Roles, Permissions ----
-        foreach (var ze in zes.Where(z => z.FullName.EndsWith("/.dm/meta.space.json", StringComparison.Ordinal)))
-            await TryImportSpaceAsync(ze, results, preserveExisting, ct);
-        foreach (var ze in zes.Where(IsRoleMeta))        await TryImportRoleAsync(ze, results, preserveExisting, ct);
-        foreach (var ze in zes.Where(IsPermissionMeta))  await TryImportPermissionAsync(ze, results, preserveExisting, ct);
+        // ---- Pass 1+2: Users, Spaces, Roles, Permissions ----
+        // These are small and load-bearing for everything that follows; run
+        // sequentially on a single shared session (one tx) regardless of
+        // whether we parallelize Pass 3-5 below. Committing this scope before
+        // dispatching the per-space workers ensures every worker reads
+        // committed data when checking preserveExisting.
+        NpgsqlConnection? headConn = null;
+        Db.FastImportScope? headScope = null;
+        if (fastUnsafeNoFkCheck)
+            (headConn, headScope) = await db.BeginFastImportSessionAsync(ct);
+        try
+        {
+            foreach (var ze in zes.Where(IsUserMeta))
+                await TryImportUserAsync(ze, results, preserveExisting, headConn, ct);
+            foreach (var ze in zes.Where(z => z.FullName.EndsWith("/.dm/meta.space.json", StringComparison.Ordinal)))
+                await TryImportSpaceAsync(ze, results, preserveExisting, headConn, ct);
+            foreach (var ze in zes.Where(IsRoleMeta))
+                await TryImportRoleAsync(ze, results, preserveExisting, headConn, ct);
+            foreach (var ze in zes.Where(IsPermissionMeta))
+                await TryImportPermissionAsync(ze, results, preserveExisting, headConn, ct);
+            headScope?.MarkSuccess();
+        }
+        finally
+        {
+            if (headScope is not null) await headScope.DisposeAsync();
+        }
 
-        // ---- Pass 3: Entries (including folders). Index bodies first so we
-        //              can re-inline them while reading the meta. ----
-        var bodyLookup = new Dictionary<string, ZipArchiveEntry>(StringComparer.Ordinal);
-        foreach (var ze in zes)
-            if (!ze.FullName.Contains("/.dm/", StringComparison.Ordinal))
-                bodyLookup[ze.FullName] = ze;
+        // ---- Pass 3-5: Entries, Attachments, Histories ----
+        // Decide between parallel-per-space and serial-on-one-session. The
+        // parallel branch requires --fast (workers need their own
+        // session_replication_role='replica' sessions) AND fastParallelism>1
+        // AND more than one space worth of work (no point spinning up
+        // workers for a single space — same elapsed time, more code paths).
+        var tailZes = zes.Where(IsTailZipEntry).ToList();
+        var spaceGroups = tailZes
+            .GroupBy(GetSpaceName, StringComparer.Ordinal)
+            .Where(g => !string.IsNullOrEmpty(g.Key))
+            .ToList();
 
-        foreach (var ze in zes.Where(IsEntryMeta))
-            await TryImportEntryAsync(ze, bodyLookup, results, preserveExisting, ct);
+        if (fastUnsafeNoFkCheck && workers > 1 && spaceGroups.Count > 1)
+        {
+            // ZipArchive is not thread-safe — workers can't concurrently call
+            // ZipArchiveEntry.Open() on entries from the shared archive
+            // ("local file header is corrupt" otherwise). Pre-read every tail
+            // entry's bytes once on the main thread, hand workers MemoryStream
+            // views over the cached buffers via OpenEntry. Memory cost is
+            // O(zip body bytes) — acceptable for a CLI bulk-load tool.
+            var prefetched = new Dictionary<string, byte[]>(tailZes.Count, StringComparer.Ordinal);
+            foreach (var ze in tailZes)
+            {
+                await using var s = ze.Open();
+                using var mem = new MemoryStream();
+                await s.CopyToAsync(mem, ct);
+                prefetched[ze.FullName] = mem.ToArray();
+            }
+            _prefetchedBodies.Value = prefetched;
 
-        // ---- Pass 4: Attachments. Lookup binary/json bodies from the same
-        //              attachments dir. ----
-        var attachmentBodies = new Dictionary<string, ZipArchiveEntry>(StringComparer.Ordinal);
-        foreach (var ze in zes)
-            if (ze.FullName.Contains("/attachments.", StringComparison.Ordinal) && !ze.Name.StartsWith("meta.", StringComparison.Ordinal))
-                attachmentBodies[ze.FullName] = ze;
+            // Parallel per space. Each worker owns its own
+            // BeginFastImportSessionAsync — its own connection, own
+            // session_replication_role flip, own transaction. Workers commit
+            // independently; on a worker's throw, only its space rolls back.
+            // ImportStats mutations use the Interlocked / lock-protected
+            // methods so concurrent updates don't race.
+            try
+            {
+                await Parallel.ForEachAsync(
+                    spaceGroups,
+                    new ParallelOptions { MaxDegreeOfParallelism = workers, CancellationToken = ct },
+                    async (group, ictx) =>
+                        await ImportSpaceTailAsync(group.ToList(), preserveExisting, results, ictx));
+            }
+            finally
+            {
+                _prefetchedBodies.Value = null;
+            }
+        }
+        else
+        {
+            // Serial fallback. For --fast we still open a single dedicated
+            // scope for the tail passes (so bulk COPY has a session to run
+            // on and so the deferred cache invalidate at the end still works
+            // off committed data). For non-fast there's no scope — repos
+            // open their own per-call connections, identical to historical
+            // behaviour.
+            NpgsqlConnection? tailConn = null;
+            Db.FastImportScope? tailScope = null;
+            if (fastUnsafeNoFkCheck)
+                (tailConn, tailScope) = await db.BeginFastImportSessionAsync(ct);
+            try
+            {
+                await RunTailPassesAsync(tailConn, tailZes, preserveExisting, results, ct);
+                tailScope?.MarkSuccess();
+            }
+            finally
+            {
+                if (tailScope is not null) await tailScope.DisposeAsync();
+            }
+        }
 
-        foreach (var ze in zes.Where(IsAttachmentMeta))
-            await TryImportAttachmentAsync(ze, attachmentBodies, results, preserveExisting, ct);
-
-        // ---- Pass 5: Histories ----
-        foreach (var ze in zes.Where(z => z.Name == "history.jsonl"))
-            await TryImportHistoryAsync(ze, results, ct);
+        // Fast mode deferred the per-role/per-permission cache invalidations
+        // so the import didn't hit `DELETE FROM userpermissionscache` once
+        // per row. Fire one final invalidate now if anything authz-relevant
+        // landed. Uses its own fresh connection so it stays out of any
+        // remaining transaction.
+        if (fastUnsafeNoFkCheck
+            && (results.RolesInserted > 0 || results.PermissionsInserted > 0))
+        {
+            await access.InvalidateAllCachesAsync(ct);
+        }
 
         return Response.Ok(attributes: new()
         {
@@ -516,6 +625,98 @@ public sealed class ImportExportService(
            && ze.Name.StartsWith("meta.", StringComparison.Ordinal)
            && ze.Name.EndsWith(".json", StringComparison.Ordinal);
 
+    // True for zip entries that belong to the tail passes (Pass 3 entries,
+    // Pass 4 attachments, Pass 5 histories) — i.e. everything that is NOT a
+    // Pass-1 user meta or a Pass-2 space/role/permission meta. Body files
+    // and attachment body files count as tail because the tail passes
+    // re-inline them.
+    private static bool IsTailZipEntry(ZipArchiveEntry ze)
+        => !IsUserMeta(ze)
+           && !ze.FullName.EndsWith("/.dm/meta.space.json", StringComparison.Ordinal)
+           && !IsRoleMeta(ze)
+           && !IsPermissionMeta(ze);
+
+    // Extracts the space-root segment (the first path segment) from a zip
+    // entry path. The import already hard-fails the layout check above on
+    // any entry that doesn't sit under a `{space}/...` root, so this is
+    // total — but defend against an empty string just in case the upstream
+    // filter changes.
+    private static string GetSpaceName(ZipArchiveEntry ze)
+    {
+        var first = ze.FullName.IndexOf('/');
+        return first <= 0 ? "" : ze.FullName[..first];
+    }
+
+    // Per-space worker for Round 3 parallelism. Owns its own
+    // BeginFastImportSessionAsync scope (own connection, own
+    // session_replication_role flip, own transaction). On a throw, only
+    // this worker's transaction rolls back — sibling workers committing in
+    // parallel are unaffected.
+    private async Task ImportSpaceTailAsync(
+        List<ZipArchiveEntry> spaceEntries,
+        bool preserveExisting,
+        ImportStats results,
+        CancellationToken ct)
+    {
+        var (conn, scope) = await db.BeginFastImportSessionAsync(ct);
+        try
+        {
+            await RunTailPassesAsync(conn, spaceEntries, preserveExisting, results, ct);
+            scope.MarkSuccess();
+        }
+        finally
+        {
+            await scope.DisposeAsync();
+        }
+    }
+
+    // Runs Pass 3 (entries), Pass 4 (attachments), Pass 5 (histories) for a
+    // given zip-entry slice on a given connection. The connection is
+    // optional: when null we're on the slow (non-fast) path and the repos
+    // each open their own connection per call. When non-null we're inside a
+    // fast scope (single-session, replica mode) and bulk COPY kicks in.
+    //
+    // Used by BOTH the serial fallback (one slice = all tail entries on one
+    // session) AND the per-space parallel worker (one slice = one space's
+    // tail entries on its own session).
+    private async Task RunTailPassesAsync(
+        NpgsqlConnection? conn,
+        IReadOnlyList<ZipArchiveEntry> zes,
+        bool preserveExisting,
+        ImportStats results,
+        CancellationToken ct)
+    {
+        // ---- Pass 3: Entries (including folders) ----
+        var bodyLookup = new Dictionary<string, ZipArchiveEntry>(StringComparer.Ordinal);
+        foreach (var ze in zes)
+            if (!ze.FullName.Contains("/.dm/", StringComparison.Ordinal))
+                bodyLookup[ze.FullName] = ze;
+
+        // Bulk COPY mode kicks in when we have a fast-import connection in
+        // hand. Without one (slow path) the per-row Upsert path is used.
+        var bulkEntries = conn is not null ? new List<Entry>() : null;
+        foreach (var ze in zes.Where(IsEntryMeta))
+            await TryImportEntryAsync(ze, bodyLookup, results, preserveExisting, conn, bulkEntries, ct);
+        if (bulkEntries is { Count: > 0 })
+            await BulkInsertEntriesAsync(conn!, bulkEntries, preserveExisting, results, ct);
+
+        // ---- Pass 4: Attachments ----
+        var attachmentBodies = new Dictionary<string, ZipArchiveEntry>(StringComparer.Ordinal);
+        foreach (var ze in zes)
+            if (ze.FullName.Contains("/attachments.", StringComparison.Ordinal) && !ze.Name.StartsWith("meta.", StringComparison.Ordinal))
+                attachmentBodies[ze.FullName] = ze;
+
+        var bulkAttachments = conn is not null ? new List<Attachment>() : null;
+        foreach (var ze in zes.Where(IsAttachmentMeta))
+            await TryImportAttachmentAsync(ze, attachmentBodies, results, preserveExisting, conn, bulkAttachments, ct);
+        if (bulkAttachments is { Count: > 0 })
+            await BulkInsertAttachmentsAsync(conn!, bulkAttachments, preserveExisting, results, ct);
+
+        // ---- Pass 5: Histories ----
+        foreach (var ze in zes.Where(z => z.Name == "history.jsonl"))
+            await TryImportHistoryAsync(ze, results, conn, ct);
+    }
+
     // ---- importers ----
 
     // Set owner_shortname to "dmart" when the imported meta omits it (or
@@ -529,7 +730,7 @@ public sealed class ImportExportService(
             node["owner_shortname"] = "dmart";
     }
 
-    private async Task TryImportSpaceAsync(ZipArchiveEntry ze, ImportStats st, bool preserveExisting, CancellationToken ct)
+    private async Task TryImportSpaceAsync(ZipArchiveEntry ze, ImportStats st, bool preserveExisting, NpgsqlConnection? conn, CancellationToken ct)
     {
         try
         {
@@ -540,23 +741,24 @@ public sealed class ImportExportService(
             node["subpath"] = "/";
             EnsureOwner(node);
             var space = node.Deserialize(DmartJsonContext.Default.Space);
-            if (space is null) { st.Failed.Add(new() { ["path"] = ze.FullName, ["error"] = "empty space meta" }); return; }
-            if (preserveExisting && await spaces.GetAsync(space.Shortname, ct) is not null)
+            if (space is null) { st.AddFailure(new() { ["path"] = ze.FullName, ["error"] = "empty space meta" }); return; }
+            if (preserveExisting && await (conn is null ? spaces.GetAsync(space.Shortname, ct) : spaces.GetAsync(space.Shortname, conn, ct)) is not null)
             {
-                st.Skipped++;
+                st.IncSkipped();
                 return;
             }
-            await spaces.UpsertAsync(space, ct);
-            st.SpacesInserted++;
+            if (conn is null) await spaces.UpsertAsync(space, ct);
+            else              await spaces.UpsertAsync(space, conn, ct);
+            st.IncSpaces();
         }
         catch (Exception ex)
         {
             log.LogWarning(ex, "import space failed at {Path}", ze.FullName);
-            st.Failed.Add(new() { ["path"] = ze.FullName, ["kind"] = "space", ["error"] = ex.Message });
+            st.AddFailure(new() { ["path"] = ze.FullName, ["kind"] = "space", ["error"] = ex.Message });
         }
     }
 
-    private async Task TryImportUserAsync(ZipArchiveEntry ze, ImportStats st, bool preserveExisting, CancellationToken ct)
+    private async Task TryImportUserAsync(ZipArchiveEntry ze, ImportStats st, bool preserveExisting, NpgsqlConnection? conn, CancellationToken ct)
     {
         try
         {
@@ -567,23 +769,24 @@ public sealed class ImportExportService(
             EnsureOwner(node);
             await InlinePayloadBodyAsync(ze, node, $"{spaceName}/users", ct);
             var user = node.Deserialize(DmartJsonContext.Default.User);
-            if (user is null) { st.Failed.Add(new() { ["path"] = ze.FullName, ["error"] = "empty user meta" }); return; }
-            if (preserveExisting && await users.GetByShortnameAsync(user.Shortname, ct) is not null)
+            if (user is null) { st.AddFailure(new() { ["path"] = ze.FullName, ["error"] = "empty user meta" }); return; }
+            if (preserveExisting && await (conn is null ? users.GetByShortnameAsync(user.Shortname, ct) : users.GetByShortnameAsync(user.Shortname, conn, ct)) is not null)
             {
-                st.Skipped++;
+                st.IncSkipped();
                 return;
             }
-            await users.UpsertAsync(user, ct);
-            st.UsersInserted++;
+            if (conn is null) await users.UpsertAsync(user, ct);
+            else              await users.UpsertAsync(user, conn, ct);
+            st.IncUsers();
         }
         catch (Exception ex)
         {
             log.LogWarning(ex, "import user failed at {Path}", ze.FullName);
-            st.Failed.Add(new() { ["path"] = ze.FullName, ["kind"] = "user", ["error"] = ex.Message });
+            st.AddFailure(new() { ["path"] = ze.FullName, ["kind"] = "user", ["error"] = ex.Message });
         }
     }
 
-    private async Task TryImportRoleAsync(ZipArchiveEntry ze, ImportStats st, bool preserveExisting, CancellationToken ct)
+    private async Task TryImportRoleAsync(ZipArchiveEntry ze, ImportStats st, bool preserveExisting, NpgsqlConnection? conn, CancellationToken ct)
     {
         try
         {
@@ -593,23 +796,24 @@ public sealed class ImportExportService(
             node["subpath"] = "/roles";
             EnsureOwner(node);
             var role = node.Deserialize(DmartJsonContext.Default.Role);
-            if (role is null) { st.Failed.Add(new() { ["path"] = ze.FullName, ["error"] = "empty role meta" }); return; }
-            if (preserveExisting && await access.GetRoleAsync(role.Shortname, ct) is not null)
+            if (role is null) { st.AddFailure(new() { ["path"] = ze.FullName, ["error"] = "empty role meta" }); return; }
+            if (preserveExisting && await (conn is null ? access.GetRoleAsync(role.Shortname, ct) : access.GetRoleAsync(role.Shortname, conn, ct)) is not null)
             {
-                st.Skipped++;
+                st.IncSkipped();
                 return;
             }
-            await access.UpsertRoleAsync(role, ct);
-            st.RolesInserted++;
+            if (conn is null) await access.UpsertRoleAsync(role, ct);
+            else              await access.UpsertRoleAsync(role, conn, deferCacheRefresh: true, ct);
+            st.IncRoles();
         }
         catch (Exception ex)
         {
             log.LogWarning(ex, "import role failed at {Path}", ze.FullName);
-            st.Failed.Add(new() { ["path"] = ze.FullName, ["kind"] = "role", ["error"] = ex.Message });
+            st.AddFailure(new() { ["path"] = ze.FullName, ["kind"] = "role", ["error"] = ex.Message });
         }
     }
 
-    private async Task TryImportPermissionAsync(ZipArchiveEntry ze, ImportStats st, bool preserveExisting, CancellationToken ct)
+    private async Task TryImportPermissionAsync(ZipArchiveEntry ze, ImportStats st, bool preserveExisting, NpgsqlConnection? conn, CancellationToken ct)
     {
         try
         {
@@ -619,19 +823,20 @@ public sealed class ImportExportService(
             node["subpath"] = "/permissions";
             EnsureOwner(node);
             var perm = node.Deserialize(DmartJsonContext.Default.Permission);
-            if (perm is null) { st.Failed.Add(new() { ["path"] = ze.FullName, ["error"] = "empty permission meta" }); return; }
-            if (preserveExisting && await access.GetPermissionAsync(perm.Shortname, ct) is not null)
+            if (perm is null) { st.AddFailure(new() { ["path"] = ze.FullName, ["error"] = "empty permission meta" }); return; }
+            if (preserveExisting && await (conn is null ? access.GetPermissionAsync(perm.Shortname, ct) : access.GetPermissionAsync(perm.Shortname, conn, ct)) is not null)
             {
-                st.Skipped++;
+                st.IncSkipped();
                 return;
             }
-            await access.UpsertPermissionAsync(perm, ct);
-            st.PermissionsInserted++;
+            if (conn is null) await access.UpsertPermissionAsync(perm, ct);
+            else              await access.UpsertPermissionAsync(perm, conn, deferCacheRefresh: true, ct);
+            st.IncPermissions();
         }
         catch (Exception ex)
         {
             log.LogWarning(ex, "import permission failed at {Path}", ze.FullName);
-            st.Failed.Add(new() { ["path"] = ze.FullName, ["kind"] = "permission", ["error"] = ex.Message });
+            st.AddFailure(new() { ["path"] = ze.FullName, ["kind"] = "permission", ["error"] = ex.Message });
         }
     }
 
@@ -689,7 +894,8 @@ public sealed class ImportExportService(
 
     private async Task TryImportEntryAsync(
         ZipArchiveEntry ze, Dictionary<string, ZipArchiveEntry> bodyLookup,
-        ImportStats st, bool preserveExisting, CancellationToken ct)
+        ImportStats st, bool preserveExisting, NpgsqlConnection? conn,
+        List<Entry>? bulkCollect, CancellationToken ct)
     {
         try
         {
@@ -730,29 +936,42 @@ public sealed class ImportExportService(
             EnsureOwner(node);
 
             var entry = node.Deserialize(DmartJsonContext.Default.Entry);
-            if (entry is null) { st.Failed.Add(new() { ["path"] = ze.FullName, ["error"] = "empty entry meta" }); return; }
+            if (entry is null) { st.AddFailure(new() { ["path"] = ze.FullName, ["error"] = "empty entry meta" }); return; }
 
             // Import goes through the repo (not EntryService.CreateAsync) so
             // plugin hooks don't fire per-row and perm checks don't block a
             // bulk restore. This mirrors Python's bulk_insert_in_batches path.
-            if (preserveExisting && await entries.GetAsync(entry.SpaceName, entry.Subpath, entry.Shortname, entry.ResourceType, ct) is not null)
+            // Fast-mode bulk path: collect into the caller's list; the bulk
+            // helper handles preserveExisting via ON CONFLICT DO NOTHING and
+            // updates st.EntriesInserted / st.Skipped from row counts after
+            // the merge.
+            if (bulkCollect is not null)
             {
-                st.Skipped++;
+                bulkCollect.Add(entry);
                 return;
             }
-            await entries.UpsertAsync(entry, ct);
-            st.EntriesInserted++;
+            if (preserveExisting && await (conn is null
+                    ? entries.GetAsync(entry.SpaceName, entry.Subpath, entry.Shortname, entry.ResourceType, ct)
+                    : entries.GetAsync(entry.SpaceName, entry.Subpath, entry.Shortname, entry.ResourceType, conn, ct)) is not null)
+            {
+                st.IncSkipped();
+                return;
+            }
+            if (conn is null) await entries.UpsertAsync(entry, ct);
+            else              await entries.UpsertAsync(entry, conn, ct);
+            st.IncEntries();
         }
         catch (Exception ex)
         {
             log.LogWarning(ex, "import entry failed at {Path}", ze.FullName);
-            st.Failed.Add(new() { ["path"] = ze.FullName, ["kind"] = "entry", ["error"] = ex.Message });
+            st.AddFailure(new() { ["path"] = ze.FullName, ["kind"] = "entry", ["error"] = ex.Message });
         }
     }
 
     private async Task TryImportAttachmentAsync(
         ZipArchiveEntry ze, Dictionary<string, ZipArchiveEntry> bodies,
-        ImportStats st, bool preserveExisting, CancellationToken ct)
+        ImportStats st, bool preserveExisting, NpgsqlConnection? conn,
+        List<Attachment>? bulkCollect, CancellationToken ct)
     {
         try
         {
@@ -799,14 +1018,14 @@ public sealed class ImportExportService(
                     {
                         if (contentType.Equals("json", StringComparison.OrdinalIgnoreCase))
                         {
-                            await using var bs = bodyZe.Open();
+                            await using var bs = OpenEntry(bodyZe);
                             using var sr = new StreamReader(bs);
                             var jsonText = await sr.ReadToEndAsync(ct);
                             p["body"] = JsonNode.Parse(jsonText);
                         }
                         else
                         {
-                            await using var bs = bodyZe.Open();
+                            await using var bs = OpenEntry(bodyZe);
                             using var mem = new MemoryStream();
                             await bs.CopyToAsync(mem, ct);
                             node["media"] = Convert.ToBase64String(mem.ToArray());
@@ -817,23 +1036,32 @@ public sealed class ImportExportService(
 
             EnsureOwner(node);
             var att = node.Deserialize(DmartJsonContext.Default.Attachment);
-            if (att is null) { st.Failed.Add(new() { ["path"] = ze.FullName, ["error"] = "empty attachment meta" }); return; }
-            if (preserveExisting && await attachments.GetAsync(att.SpaceName, att.Subpath, att.Shortname, ct) is not null)
+            if (att is null) { st.AddFailure(new() { ["path"] = ze.FullName, ["error"] = "empty attachment meta" }); return; }
+            // Fast-mode bulk path — see TryImportEntryAsync for the same pattern.
+            if (bulkCollect is not null)
             {
-                st.Skipped++;
+                bulkCollect.Add(att);
                 return;
             }
-            await attachments.UpsertAsync(att, ct);
-            st.AttachmentsInserted++;
+            if (preserveExisting && await (conn is null
+                    ? attachments.GetAsync(att.SpaceName, att.Subpath, att.Shortname, ct)
+                    : attachments.GetAsync(att.SpaceName, att.Subpath, att.Shortname, conn, ct)) is not null)
+            {
+                st.IncSkipped();
+                return;
+            }
+            if (conn is null) await attachments.UpsertAsync(att, ct);
+            else              await attachments.UpsertAsync(att, conn, ct);
+            st.IncAttachments();
         }
         catch (Exception ex)
         {
             log.LogWarning(ex, "import attachment failed at {Path}", ze.FullName);
-            st.Failed.Add(new() { ["path"] = ze.FullName, ["kind"] = "attachment", ["error"] = ex.Message });
+            st.AddFailure(new() { ["path"] = ze.FullName, ["kind"] = "attachment", ["error"] = ex.Message });
         }
     }
 
-    private async Task TryImportHistoryAsync(ZipArchiveEntry ze, ImportStats st, CancellationToken ct)
+    private async Task TryImportHistoryAsync(ZipArchiveEntry ze, ImportStats st, NpgsqlConnection? conn, CancellationToken ct)
     {
         try
         {
@@ -858,7 +1086,7 @@ public sealed class ImportExportService(
             }
             var sn = afterDm.Split('/')[0];
 
-            await using var stream = ze.Open();
+            await using var stream = OpenEntry(ze);
             using var sr = new StreamReader(stream);
             string? line;
             while ((line = await sr.ReadLineAsync(ct)) is not null)
@@ -877,23 +1105,241 @@ public sealed class ImportExportService(
                     Dictionary<string, object>? reqHeaders = null;
                     if (hNode["request_headers"] is JsonObject rh)
                         reqHeaders = rh.Deserialize(DmartJsonContext.Default.DictionaryStringObject);
-                    await histories.AppendAsync(spaceName, subpath, sn, owner,
-                        reqHeaders, diff, ct);
-                    st.HistoriesInserted++;
+                    if (conn is null)
+                        await histories.AppendAsync(spaceName, subpath, sn, owner, reqHeaders, diff, ct);
+                    else
+                        await histories.AppendAsync(spaceName, subpath, sn, owner, reqHeaders, diff, conn, ct);
+                    st.IncHistories();
                 }
                 catch (Exception ex)
                 {
                     log.LogWarning(ex, "history line skipped in {Path}", ze.FullName);
-                    st.Failed.Add(new() { ["path"] = ze.FullName, ["kind"] = "history_line", ["error"] = ex.Message });
+                    st.AddFailure(new() { ["path"] = ze.FullName, ["kind"] = "history_line", ["error"] = ex.Message });
                 }
             }
         }
         catch (Exception ex)
         {
             log.LogWarning(ex, "import history failed at {Path}", ze.FullName);
-            st.Failed.Add(new() { ["path"] = ze.FullName, ["kind"] = "history", ["error"] = ex.Message });
+            st.AddFailure(new() { ["path"] = ze.FullName, ["kind"] = "history", ["error"] = ex.Message });
         }
     }
+
+    // ========================================================================
+    // Bulk inserters — used only by the `--fast` import path. Replace the
+    // per-row `INSERT ... ON CONFLICT` loop with a single binary COPY into a
+    // temp table followed by one `INSERT ... SELECT ... ON CONFLICT` merge.
+    // For the two high-cardinality tables (entries, attachments) this
+    // collapses N protocol round-trips into roughly two, which is where the
+    // order-of-magnitude speedup in `--fast` actually lives.
+    //
+    // SQL parity contract: the column list AND the per-row WriteAsync calls
+    // below MUST stay in lockstep with each other and with the per-row
+    // UpsertAsync in EntryRepository / AttachmentRepository — adding or
+    // reordering a column requires three coordinated edits. The merge clause
+    // (the SET list on ON CONFLICT DO UPDATE) likewise mirrors the per-row
+    // upsert's. The repos carry a comment pointing here as a reminder.
+    // ========================================================================
+
+    private const string EntryCopyColumns =
+        "uuid, shortname, space_name, subpath, is_active, slug, " +
+        "displayname, description, tags, created_at, updated_at, " +
+        "owner_shortname, owner_group_shortname, acl, payload, relationships, " +
+        "last_checksum_history, resource_type, state, is_open, reporter, " +
+        "workflow_shortname, collaborators, resolution_reason, query_policies";
+
+    private const string EntryConflictSet = """
+        is_active = EXCLUDED.is_active,
+        slug = EXCLUDED.slug,
+        displayname = EXCLUDED.displayname,
+        description = EXCLUDED.description,
+        tags = EXCLUDED.tags,
+        updated_at = EXCLUDED.updated_at,
+        owner_shortname = EXCLUDED.owner_shortname,
+        owner_group_shortname = EXCLUDED.owner_group_shortname,
+        acl = EXCLUDED.acl,
+        payload = EXCLUDED.payload,
+        relationships = EXCLUDED.relationships,
+        last_checksum_history = EXCLUDED.last_checksum_history,
+        resource_type = EXCLUDED.resource_type,
+        state = EXCLUDED.state,
+        is_open = EXCLUDED.is_open,
+        reporter = EXCLUDED.reporter,
+        workflow_shortname = EXCLUDED.workflow_shortname,
+        collaborators = EXCLUDED.collaborators,
+        resolution_reason = EXCLUDED.resolution_reason,
+        query_policies = EXCLUDED.query_policies
+        """;
+
+    private static async Task BulkInsertEntriesAsync(
+        NpgsqlConnection conn, List<Entry> rows, bool preserveExisting,
+        ImportStats st, CancellationToken ct)
+    {
+        // Compute query_policies up front — the per-row UpsertAsync does this
+        // inside its own scope; the bulk path must replicate it because the
+        // COPY writes the column verbatim from `e.QueryPolicies`.
+        var now = TimeUtils.Now();
+        for (var i = 0; i < rows.Count; i++)
+            rows[i] = rows[i] with { QueryPolicies = Utils.QueryPolicies.Generate(rows[i]) };
+
+        await using (var create = new NpgsqlCommand(
+            "CREATE TEMP TABLE _imp_entries (LIKE entries INCLUDING DEFAULTS) ON COMMIT DROP", conn))
+            await create.ExecuteNonQueryAsync(ct);
+
+        await using (var writer = await conn.BeginBinaryImportAsync(
+            $"COPY _imp_entries ({EntryCopyColumns}) FROM STDIN (FORMAT BINARY)", ct))
+        {
+            foreach (var e in rows)
+            {
+                await writer.StartRowAsync(ct);
+                await writer.WriteAsync(Guid.Parse(e.Uuid), NpgsqlDbType.Uuid, ct);
+                await writer.WriteAsync(e.Shortname, NpgsqlDbType.Text, ct);
+                await writer.WriteAsync(e.SpaceName, NpgsqlDbType.Text, ct);
+                await writer.WriteAsync(e.Subpath, NpgsqlDbType.Text, ct);
+                await writer.WriteAsync(e.IsActive, NpgsqlDbType.Boolean, ct);
+                await WriteNullableTextAsync(writer, e.Slug, ct);
+                await WriteNullableJsonbAsync(writer, JsonbHelpers.ToJsonb(e.Displayname), ct);
+                await WriteNullableJsonbAsync(writer, JsonbHelpers.ToJsonb(e.Description), ct);
+                await writer.WriteAsync(JsonbHelpers.ToJsonbList(e.Tags), NpgsqlDbType.Jsonb, ct);
+                await writer.WriteAsync(e.CreatedAt == default ? now : e.CreatedAt, NpgsqlDbType.TimestampTz, ct);
+                await writer.WriteAsync(e.UpdatedAt == default ? now : e.UpdatedAt, NpgsqlDbType.TimestampTz, ct);
+                await writer.WriteAsync(e.OwnerShortname, NpgsqlDbType.Text, ct);
+                await WriteNullableTextAsync(writer, e.OwnerGroupShortname, ct);
+                await WriteNullableJsonbAsync(writer, JsonbHelpers.ToJsonb(e.Acl), ct);
+                await WriteNullableJsonbAsync(writer, JsonbHelpers.ToJsonb(e.Payload), ct);
+                await WriteNullableJsonbAsync(writer, JsonbHelpers.ToJsonb(e.Relationships), ct);
+                await WriteNullableTextAsync(writer, e.LastChecksumHistory, ct);
+                // resource_type is the PG `resourcetype` enum. Write the literal
+                // string and tag it as `Unknown` so Npgsql ships it as raw text
+                // and PG's text→enum cast resolves it on the server side.
+                await writer.WriteAsync(JsonbHelpers.EnumMember(e.ResourceType), NpgsqlDbType.Unknown, ct);
+                await WriteNullableTextAsync(writer, e.State, ct);
+                if (e.IsOpen is null) await writer.WriteNullAsync(ct);
+                else                  await writer.WriteAsync(e.IsOpen.Value, NpgsqlDbType.Boolean, ct);
+                await WriteNullableJsonbAsync(writer, JsonbHelpers.ToJsonb(e.Reporter), ct);
+                await WriteNullableTextAsync(writer, e.WorkflowShortname, ct);
+                await WriteNullableJsonbAsync(writer, JsonbHelpers.ToJsonb(e.Collaborators), ct);
+                await WriteNullableTextAsync(writer, e.ResolutionReason, ct);
+                await writer.WriteAsync((e.QueryPolicies ?? new()).ToArray(),
+                    NpgsqlDbType.Array | NpgsqlDbType.Text, ct);
+            }
+            await writer.CompleteAsync(ct);
+        }
+
+        var mergeSql = preserveExisting
+            ? $"INSERT INTO entries ({EntryCopyColumns}) SELECT {EntryCopyColumns} FROM _imp_entries "
+                + "ON CONFLICT (shortname, space_name, subpath) DO NOTHING"
+            : $"INSERT INTO entries ({EntryCopyColumns}) SELECT {EntryCopyColumns} FROM _imp_entries "
+                + $"ON CONFLICT (shortname, space_name, subpath) DO UPDATE SET {EntryConflictSet}";
+
+        await using (var merge = new NpgsqlCommand(mergeSql, conn))
+        {
+            var affected = await merge.ExecuteNonQueryAsync(ct);
+            // affected = inserted + (updated when not preserveExisting).
+            // preserveExisting=true: DO NOTHING means skipped rows aren't in `affected`.
+            st.AddEntries(affected);
+            if (preserveExisting) st.AddSkipped(rows.Count - affected);
+        }
+
+        // The temp table is `ON COMMIT DROP` and we're inside the fast-import
+        // transaction — but the same import will reuse this connection for
+        // the next bulk pass (attachments) in the same transaction, so the
+        // table is still around. Drop explicitly to release the OID and to
+        // keep the helpers self-contained (caller-order independent).
+        await using (var drop = new NpgsqlCommand("DROP TABLE _imp_entries", conn))
+            await drop.ExecuteNonQueryAsync(ct);
+    }
+
+    private const string AttachmentCopyColumns =
+        "uuid, shortname, space_name, subpath, is_active, slug, " +
+        "displayname, description, tags, created_at, updated_at, " +
+        "owner_shortname, owner_group_shortname, acl, payload, relationships, " +
+        "last_checksum_history, resource_type, media, body, state";
+
+    private const string AttachmentConflictSet = """
+        is_active = EXCLUDED.is_active,
+        slug = EXCLUDED.slug,
+        displayname = EXCLUDED.displayname,
+        description = EXCLUDED.description,
+        tags = EXCLUDED.tags,
+        updated_at = EXCLUDED.updated_at,
+        owner_shortname = EXCLUDED.owner_shortname,
+        owner_group_shortname = EXCLUDED.owner_group_shortname,
+        acl = EXCLUDED.acl,
+        payload = EXCLUDED.payload,
+        relationships = EXCLUDED.relationships,
+        last_checksum_history = EXCLUDED.last_checksum_history,
+        resource_type = EXCLUDED.resource_type,
+        media = EXCLUDED.media,
+        body = EXCLUDED.body,
+        state = EXCLUDED.state
+        """;
+
+    private static async Task BulkInsertAttachmentsAsync(
+        NpgsqlConnection conn, List<Attachment> rows, bool preserveExisting,
+        ImportStats st, CancellationToken ct)
+    {
+        var now = TimeUtils.Now();
+
+        await using (var create = new NpgsqlCommand(
+            "CREATE TEMP TABLE _imp_attachments (LIKE attachments INCLUDING DEFAULTS) ON COMMIT DROP", conn))
+            await create.ExecuteNonQueryAsync(ct);
+
+        await using (var writer = await conn.BeginBinaryImportAsync(
+            $"COPY _imp_attachments ({AttachmentCopyColumns}) FROM STDIN (FORMAT BINARY)", ct))
+        {
+            foreach (var a in rows)
+            {
+                await writer.StartRowAsync(ct);
+                await writer.WriteAsync(Guid.Parse(a.Uuid), NpgsqlDbType.Uuid, ct);
+                await writer.WriteAsync(a.Shortname, NpgsqlDbType.Text, ct);
+                await writer.WriteAsync(a.SpaceName, NpgsqlDbType.Text, ct);
+                await writer.WriteAsync(a.Subpath, NpgsqlDbType.Text, ct);
+                await writer.WriteAsync(a.IsActive, NpgsqlDbType.Boolean, ct);
+                await WriteNullableTextAsync(writer, a.Slug, ct);
+                await WriteNullableJsonbAsync(writer, JsonbHelpers.ToJsonb(a.Displayname), ct);
+                await WriteNullableJsonbAsync(writer, JsonbHelpers.ToJsonb(a.Description), ct);
+                await writer.WriteAsync(JsonbHelpers.ToJsonbList(a.Tags), NpgsqlDbType.Jsonb, ct);
+                await writer.WriteAsync(a.CreatedAt == default ? now : a.CreatedAt, NpgsqlDbType.TimestampTz, ct);
+                await writer.WriteAsync(a.UpdatedAt == default ? now : a.UpdatedAt, NpgsqlDbType.TimestampTz, ct);
+                await writer.WriteAsync(a.OwnerShortname, NpgsqlDbType.Text, ct);
+                await WriteNullableTextAsync(writer, a.OwnerGroupShortname, ct);
+                await WriteNullableJsonbAsync(writer, JsonbHelpers.ToJsonb(a.Acl), ct);
+                await WriteNullableJsonbAsync(writer, JsonbHelpers.ToJsonb(a.Payload), ct);
+                await WriteNullableJsonbAsync(writer, JsonbHelpers.ToJsonb(a.Relationships), ct);
+                await WriteNullableTextAsync(writer, a.LastChecksumHistory, ct);
+                await writer.WriteAsync(JsonbHelpers.EnumMember(a.ResourceType), NpgsqlDbType.Unknown, ct);
+                if (a.Media is null) await writer.WriteNullAsync(ct);
+                else                 await writer.WriteAsync(a.Media, NpgsqlDbType.Bytea, ct);
+                await WriteNullableTextAsync(writer, a.Body, ct);
+                await WriteNullableTextAsync(writer, a.State, ct);
+            }
+            await writer.CompleteAsync(ct);
+        }
+
+        var mergeSql = preserveExisting
+            ? $"INSERT INTO attachments ({AttachmentCopyColumns}) SELECT {AttachmentCopyColumns} FROM _imp_attachments "
+                + "ON CONFLICT (shortname, space_name, subpath) DO NOTHING"
+            : $"INSERT INTO attachments ({AttachmentCopyColumns}) SELECT {AttachmentCopyColumns} FROM _imp_attachments "
+                + $"ON CONFLICT (shortname, space_name, subpath) DO UPDATE SET {AttachmentConflictSet}";
+
+        await using (var merge = new NpgsqlCommand(mergeSql, conn))
+        {
+            var affected = await merge.ExecuteNonQueryAsync(ct);
+            st.AddAttachments(affected);
+            if (preserveExisting) st.AddSkipped(rows.Count - affected);
+        }
+
+        await using (var drop = new NpgsqlCommand("DROP TABLE _imp_attachments", conn))
+            await drop.ExecuteNonQueryAsync(ct);
+    }
+
+    // Small adapters so the per-column WriteAsync loop above stays compact.
+    private static Task WriteNullableTextAsync(NpgsqlBinaryImporter w, string? v, CancellationToken ct)
+        => v is null ? w.WriteNullAsync(ct) : w.WriteAsync(v, NpgsqlDbType.Text, ct);
+
+    private static Task WriteNullableJsonbAsync(NpgsqlBinaryImporter w, string? json, CancellationToken ct)
+        => json is null ? w.WriteNullAsync(ct) : w.WriteAsync(json, NpgsqlDbType.Jsonb, ct);
 
     // ========================================================================
     // Helpers — JSON transforms + zip IO + path splitting
@@ -901,6 +1347,10 @@ public sealed class ImportExportService(
 
     private sealed class ImportStats
     {
+        // Public for read access at the response-building site (after all
+        // workers have joined via Parallel.ForEachAsync, so memory ordering
+        // is fine). Mutation MUST go through the methods below to keep
+        // round-3's per-space-parallel workers race-free.
         public int EntriesInserted;
         public int AttachmentsInserted;
         public int SpacesInserted;
@@ -913,6 +1363,29 @@ public sealed class ImportExportService(
         // "no-op" runs apart from "everything failed" runs.
         public int Skipped;
         public readonly List<Dictionary<string, object>> Failed = new();
+
+        // Thread-safe counter bumpers — Interlocked is the cheapest way to
+        // make `++` race-free across the parallel space workers. The cost
+        // (a CMPXCHG-equivalent) is in the nanoseconds, negligible against
+        // the actual import work.
+        public void IncEntries()      => Interlocked.Increment(ref EntriesInserted);
+        public void IncAttachments()  => Interlocked.Increment(ref AttachmentsInserted);
+        public void IncSpaces()       => Interlocked.Increment(ref SpacesInserted);
+        public void IncUsers()        => Interlocked.Increment(ref UsersInserted);
+        public void IncRoles()        => Interlocked.Increment(ref RolesInserted);
+        public void IncPermissions()  => Interlocked.Increment(ref PermissionsInserted);
+        public void IncHistories()    => Interlocked.Increment(ref HistoriesInserted);
+        public void IncSkipped()      => Interlocked.Increment(ref Skipped);
+        public void AddEntries(int n)     => Interlocked.Add(ref EntriesInserted, n);
+        public void AddAttachments(int n) => Interlocked.Add(ref AttachmentsInserted, n);
+        public void AddSkipped(int n)     => Interlocked.Add(ref Skipped, n);
+        // List<T>.Add isn't safe under concurrent writers; lock around it.
+        // Reads at the response site happen after the parallel join → no
+        // lock needed for the final enumeration.
+        public void AddFailure(Dictionary<string, object> failure)
+        {
+            lock (Failed) Failed.Add(failure);
+        }
     }
 
     private static JsonObject ToJsonObject<T>(T value, System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> info)
@@ -1002,7 +1475,7 @@ public sealed class ImportExportService(
         // Python stores the filename relative to the entry's subpath directory.
         var bodyPath = $"{baseDir}/{filename}".Replace("//", "/");
         if (!bodies.TryGetValue(bodyPath, out var ze)) return;
-        using var s = ze.Open();
+        using var s = OpenEntry(ze);
         using var sr = new StreamReader(s);
         var raw = sr.ReadToEnd();
         if (string.Equals(contentType, "json", StringComparison.OrdinalIgnoreCase))
@@ -1028,7 +1501,7 @@ public sealed class ImportExportService(
         var archive = metaZe.Archive!;
         var bodyZe = archive.GetEntry(bodyPath);
         if (bodyZe is null) return;
-        await using var s = bodyZe.Open();
+        await using var s = OpenEntry(bodyZe);
         using var sr = new StreamReader(s);
         var raw = await sr.ReadToEndAsync(ct);
         if (string.Equals(contentType, "json", StringComparison.OrdinalIgnoreCase))
@@ -1056,9 +1529,32 @@ public sealed class ImportExportService(
         return metaFileName[prefix.Length..^suffix.Length];
     }
 
+    // Round 3 — when running per-space parallel workers, ZipArchive is NOT
+    // thread-safe: concurrent calls to ZipArchiveEntry.Open() on entries
+    // from the same archive race on the underlying stream position and
+    // corrupt the read ("A local file header is corrupt."). To keep the
+    // archive single-threaded while still letting DB work fan out, the main
+    // thread pre-reads all tail-pass entry bytes into this AsyncLocal dict
+    // before dispatching workers. Helpers below check it through
+    // OpenEntry; serial paths leave it null and read from the archive directly.
+    private static readonly AsyncLocal<IReadOnlyDictionary<string, byte[]>?> _prefetchedBodies = new();
+
+    // Returns a Stream over the entry's bytes. In serial mode this is just
+    // ZipArchiveEntry.Open(). In parallel mode the bytes were pre-read in
+    // the main thread and we hand out a fresh non-writable MemoryStream
+    // per call — each MemoryStream has its own position so concurrent
+    // readers don't race on the underlying buffer.
+    private static Stream OpenEntry(ZipArchiveEntry ze)
+    {
+        var prefetched = _prefetchedBodies.Value;
+        if (prefetched is not null && prefetched.TryGetValue(ze.FullName, out var bytes))
+            return new MemoryStream(bytes, writable: false);
+        return ze.Open();
+    }
+
     private static async Task<JsonObject> ReadJsonObjectAsync(ZipArchiveEntry ze, CancellationToken ct)
     {
-        await using var s = ze.Open();
+        await using var s = OpenEntry(ze);
         var node = await JsonNode.ParseAsync(s, cancellationToken: ct);
         return node as JsonObject
             ?? throw new InvalidDataException($"{ze.FullName}: expected a JSON object at the root");

@@ -24,7 +24,9 @@ public static class ProgressTicketHandler
                 return await wf.ProgressAsync(
                     new Locator(ResourceType.Ticket, space, subpath, shortname),
                     action, http.Actor(), attrs, ct);
-            });
+            })
+            .Accepts<Dmart.Models.Api.ProgressTicketBody>("application/json")
+            .Produces<Response>();
 
     private static async Task<Dictionary<string, object>?> ReadBodyAttrsAsync(HttpRequest req, CancellationToken ct)
     {

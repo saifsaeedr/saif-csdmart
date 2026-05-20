@@ -193,6 +193,10 @@ switch (subcommand)
               settings       Print effective settings as JSON
               passwd         Set password for a user interactively
               check          Run health checks on a space
+              selfcheck      Smoke-test the running HTTP surface (login + CRUD + query)
+                             Usage: dmart selfcheck [--url <url>] [--admin <name>]
+                                                    [--password <pwd> | --password-stdin]
+                                                    [--space <name>] [--keep] [-v]
               export         Export a space to a zip in the dmart on-disk layout
                              Usage: dmart export <space_name> [--output <path|dir|.>]
                              --output unset      → ./<space>.zip
@@ -310,6 +314,17 @@ switch (subcommand)
         return;
     }
 
+    case "selfcheck":
+    {
+        // Operator-facing HTTP smoke. Talks to a running dmart over its
+        // REST surface; doesn't touch the DB itself, so no CliBootstrap.
+        // Defaults pull LISTENING_PORT / ADMIN_SHORTNAME / ADMIN_PASSWORD
+        // out of the already-loaded config.env (dotenvValues), matching
+        // curl.sh's env-then-config-then-fallback resolution order.
+        Environment.ExitCode = await Dmart.Cli.SelfCheckCommand.Run(serverArgs, dotenvValues);
+        return;
+    }
+
     case "check":
     case "health-check":
     {
@@ -416,9 +431,38 @@ switch (subcommand)
         // -r the import is idempotent — pre-existing rows are skipped and
         // the operator sees them counted as `skipped` in the summary.
         var replace = serverArgs.Any(a => a is "-r" or "--replace");
+        // --fast bypasses FK constraints AND user-defined triggers for the
+        // entire import by setting session_replication_role='replica' on a
+        // single shared session. Trades safety for speed; only safe when
+        // the zip is internally consistent (typical for operator-trusted
+        // CLI imports). Hard-fails if the DB role lacks the privilege.
+        var fast = serverArgs.Any(a => a is "--fast");
+        // --fast-parallelism=N splits Pass 3-5 (entries/attachments/history)
+        // across N parallel per-space workers, each on its own connection
+        // with its own transaction. Drops the single-tx-for-the-whole-import
+        // property: on crash some spaces fully landed, others not — operator
+        // re-runs with -r/--replace. Only honored when --fast is set.
+        var parallelism = 1;
+        var parallelArg = serverArgs.FirstOrDefault(a => a.StartsWith("--fast-parallelism=", StringComparison.Ordinal));
+        if (parallelArg is not null)
+        {
+            if (!int.TryParse(parallelArg["--fast-parallelism=".Length..], out parallelism) || parallelism < 1 || parallelism > 16)
+            {
+                Console.Error.WriteLine("--fast-parallelism must be an integer in [1, 16]");
+                Environment.ExitCode = 1;
+                return;
+            }
+            if (!fast)
+            {
+                Console.Error.WriteLine("--fast-parallelism requires --fast (it has no effect on the slow path)");
+                Environment.ExitCode = 1;
+                return;
+            }
+        }
+        Console.WriteLine($"Importing from {zipPath} (replace={replace}, fast={fast}, parallelism={parallelism})");
         if (string.IsNullOrEmpty(zipPath))
         {
-            Console.Error.WriteLine("Usage: dmart import [-r|--replace] <zip-file>");
+            Console.Error.WriteLine("Usage: dmart import [-r|--replace] [--fast] [--fast-parallelism=N] <zip-file>");
             Environment.ExitCode = 1;
             return;
         }
@@ -445,7 +489,7 @@ switch (subcommand)
         // the value doesn't matter functionally — but keeping both CLI sites
         // on `null` makes the intent ("CLI runs unfiltered, server-side")
         // visually consistent.
-        var resp = await importService.ImportZipAsync(zipStream, actor: null, preserveExisting: !replace);
+        var resp = await importService.ImportZipAsync(zipStream, actor: null, preserveExisting: !replace, fastUnsafeNoFkCheck: fast, fastParallelism: parallelism);
 
         if (resp.Status != Status.Success)
         {
@@ -1084,6 +1128,72 @@ builder.Services.AddOpenApi(options =>
         };
         return Task.CompletedTask;
     });
+
+    // .NET 10's OpenAPI generator emits `$ref: "#/components/schemas/<EnumName>"`
+    // for every named enum it encounters, but the [JsonConverter] attribute on
+    // our string enums (Status, ResourceType, …) blocks its built-in schema
+    // introspection — leaving the $ref pointing at nothing and Swagger UI
+    // reporting "Resolver error: Could not resolve reference". Inject the
+    // string-enum schemas here from the converters' own WireValues. Overwrite
+    // unconditionally: when an enum is reachable from an endpoint, the
+    // generator pre-creates a null/empty schema under that name which we
+    // need to replace, not preserve.
+    options.AddDocumentTransformer((document, _, _) =>
+    {
+        document.Components ??= new Microsoft.OpenApi.OpenApiComponents();
+        document.Components.Schemas ??= new Dictionary<string, Microsoft.OpenApi.IOpenApiSchema>();
+        foreach (var (name, values) in Dmart.Models.Json.EnumMemberConverters.All)
+        {
+            var schema = new Microsoft.OpenApi.OpenApiSchema
+            {
+                Type = Microsoft.OpenApi.JsonSchemaType.String,
+                Enum = new List<System.Text.Json.Nodes.JsonNode>(values.Count),
+            };
+            foreach (var v in values)
+                schema.Enum.Add(System.Text.Json.Nodes.JsonValue.Create(v)!);
+            document.Components.Schemas[name] = schema;
+        }
+
+        return Task.CompletedTask;
+    });
+
+    // Attach a sample payload to each request body schema we know about so
+    // Swagger UI's "Try it out" form pre-fills with a working request. The
+    // OpenApiExamples registry maps request body types to their samples;
+    // adding a new entry there is enough — no per-endpoint wiring needed.
+    //
+    // Same place we patch JoinQuery.query: it's declared as `JsonElement?`
+    // in C# to allow a free-form inner query body, but the generator emits
+    // a $ref to a JsonElement schema it never defines. Replace that
+    // property's schema with an inline "anything" so Swagger UI doesn't
+    // print "Could not resolve reference: JsonElement".
+    options.AddSchemaTransformer((schema, ctx, _) =>
+    {
+        if (Dmart.Api.OpenApiExamples.TryGet(ctx.JsonTypeInfo.Type, out var example))
+            schema.Example = example;
+        if (ctx.JsonTypeInfo.Type == typeof(Dmart.Models.Api.JoinQuery) && schema.Properties is not null)
+            schema.Properties["query"] = new Microsoft.OpenApi.OpenApiSchema
+            {
+                // Type=Object communicates "expect a JSON object" to Swagger
+                // UI (it'll render `{}` in Try-it-out) rather than the
+                // description-only stub which leaves the UI guessing.
+                Type = Microsoft.OpenApi.JsonSchemaType.Object,
+                Description = "Inner Query body for this join (any JSON object).",
+            };
+        return Task.CompletedTask;
+    });
+
+    // Multipart endpoints can't use `.Accepts<TForm>("multipart/form-data")`
+    // because their form marker classes hold IFormFile (an interface that
+    // System.Text.Json source-gen can't emit metadata for, which the OpenAPI
+    // resolver requires). And `.WithOpenApi(op => ...)` per-endpoint isn't
+    // AOT-safe (IL2026/IL3050 — uses reflection). So inject the
+    // multipart/form-data request body schemas here, keyed by path.
+    options.AddDocumentTransformer((document, _, _) =>
+    {
+        Dmart.Api.OpenApiMultipartSchemas.Apply(document);
+        return Task.CompletedTask;
+    });
 });
 
 // All logging config from config.env.
@@ -1278,6 +1388,7 @@ builder.Services.AddHttpContextAccessor();
 builder.Services.AddSingleton<SpaceEventLogger>();
 builder.Services.AddSingleton<PluginManager>();
 builder.Services.AddSingleton<LanguageLoader>();
+builder.Services.AddSingleton<ActivationTemplateLoader>();
 builder.Services.AddSingleton<LockService>();
 builder.Services.AddSingleton<ShortLinkService>();
 builder.Services.AddSingleton<CsvService>();
@@ -1376,10 +1487,113 @@ Dmart.DataAdapters.Sql.QueryHelper.SetLogger(app.Services.GetRequiredService<ILo
 // Secure flags derive from the proxy→backend leg (usually plain HTTP).
 app.UseForwardedHeaders();
 
-// Exception handler
+// Exception handler.
+// PG metadata (sqlstate, table, constraint, column, hint, MessageText)
+// is kept in the server log for ops triage but never leaked to the wire —
+// those fields expose schema internals and constraint names. The client
+// response stays a minimal {code, message, type, info:[{cid}]} envelope
+// matching the redacted style of the catch-all handler below.
+static async Task WriteDbFailureAsync(HttpContext ctx, int httpStatus, int code, string message)
+{
+    if (ctx.Response.HasStarted) return;
+    var cid = ctx.Response.Headers["X-Correlation-ID"].ToString();
+    ctx.Response.StatusCode = httpStatus;
+    ctx.Response.ContentType = "application/json";
+    var body = Dmart.Models.Api.Response.Fail(code, message, ErrorTypes.Db,
+        new List<Dictionary<string, object>> { new() { ["cid"] = cid } });
+    await ctx.Response.WriteAsJsonAsync(body, DmartJsonContext.Default.Response);
+}
+
+// Same envelope shape as WriteDbFailureAsync but type=request — used when the
+// underlying PG error is actually caused by malformed user input (e.g. an
+// undefined column in a query.search expression) so clients branching on
+// error.type don't classify a user mistake as a server-side DB fault.
+static async Task WriteRequestFailureAsync(HttpContext ctx, int httpStatus, int code, string message)
+{
+    if (ctx.Response.HasStarted) return;
+    var cid = ctx.Response.Headers["X-Correlation-ID"].ToString();
+    ctx.Response.StatusCode = httpStatus;
+    ctx.Response.ContentType = "application/json";
+    var body = Dmart.Models.Api.Response.Fail(code, message, ErrorTypes.Request,
+        new List<Dictionary<string, object>> { new() { ["cid"] = cid } });
+    await ctx.Response.WriteAsJsonAsync(body, DmartJsonContext.Default.Response);
+}
+
 app.Use(async (ctx, next) =>
 {
     try { await next(); }
+    catch (Npgsql.PostgresException ex)
+    {
+        var cid = ctx.Response.Headers["X-Correlation-ID"].ToString();
+        var logger = ctx.RequestServices.GetService<ILoggerFactory>()?.CreateLogger("ExceptionHandler");
+        logger?.LogError(ex,
+            "Postgres error cid={Cid} sqlstate={SqlState} table={Table} constraint={Constraint}",
+            cid, ex.SqlState, ex.TableName, ex.ConstraintName);
+        if (ex.SqlState == "23505")
+        {
+            // UNIQUE-violation. Use SHORTNAME_ALREADY_EXIST so the internal
+            // code matches the service-layer catches in Services/EntryService.cs
+            // and Dmart.SqlAdapter — clients branch on the same integer
+            // regardless of which layer caught the exception. HTTP 409 is
+            // the conventional status for a conflict.
+            //
+            // PG's Detail names the offending (column, value) pair — surface
+            // ONLY the column to callers so they know which field collided
+            // instead of guessing. The value is deliberately redacted: most
+            // unique columns on `users` are identifiers (email, msisdn,
+            // google_id, facebook_id, apple_id, shortname) and echoing the
+            // value back on a duplicate-key failure on /user/create would
+            // let an attacker enumerate registered identifiers by probing.
+            // The value is still in the server log under cid for ops triage.
+            //
+            // Detail can be suppressed (terse `log_error_verbosity`, some
+            // managed-PG vendors strip it), so we fall back to deriving the
+            // column from the constraint name when Detail is unavailable.
+            var (detailKey, _) = Dmart.Utils.PgErrorParsing.ExtractUniqueViolation(ex.Detail);
+            var column = detailKey
+                         ?? Dmart.Utils.PgErrorParsing.ExtractUniqueViolationKey(ex.ConstraintName, ex.TableName);
+            var message = column is not null
+                ? $"resource with this {column} already exists"
+                : "resource already exists";
+            await WriteDbFailureAsync(ctx, StatusCodes.Status409Conflict,
+                Dmart.Models.Api.InternalErrorCode.SHORTNAME_ALREADY_EXIST,
+                message);
+        }
+        else if (ex.SqlState == "42703")
+        {
+            // undefined_column. Reached when a query.search expression
+            // references a field that isn't a real column — e.g. `@asd:123`
+            // when `asd` does not exist on entries. SearchExpressionParser
+            // only validates syntax (SafeColumnIdent), so unknown names
+            // pass through and PG rejects the generated SQL. Surface a
+            // request-level error pointing users at the @payload.body.<field>
+            // form instead of leaving them with the opaque 430.
+            var col = Dmart.Utils.PgErrorParsing.ExtractUndefinedColumn(ex.MessageText);
+            var message = col is null
+                ? "Unknown search field. To search a custom payload field, use '@payload.body.<field>:<value>'."
+                : $"Unknown search field '{col}'. To search a custom payload field, use '@payload.body.{col}:<value>' instead of '@{col}:<value>'.";
+            await WriteRequestFailureAsync(ctx, StatusCodes.Status400BadRequest,
+                Dmart.Models.Api.InternalErrorCode.INVALID_DATA, message);
+        }
+        else
+        {
+            await WriteDbFailureAsync(ctx, StatusCodes.Status500InternalServerError,
+                Dmart.Models.Api.InternalErrorCode.SOMETHING_WRONG,
+                $"Database error. Reference: {cid}");
+        }
+    }
+    catch (Npgsql.NpgsqlException ex)
+    {
+        // Transport/connection-level Npgsql failure (pool exhaustion, socket
+        // reset, auth handshake). Surfaced with type="db" so existing client
+        // branching still works, but no Npgsql message is included.
+        var cid = ctx.Response.Headers["X-Correlation-ID"].ToString();
+        var logger = ctx.RequestServices.GetService<ILoggerFactory>()?.CreateLogger("ExceptionHandler");
+        logger?.LogError(ex, "Npgsql error cid={Cid}", cid);
+        await WriteDbFailureAsync(ctx, StatusCodes.Status500InternalServerError,
+            Dmart.Models.Api.InternalErrorCode.SOMETHING_WRONG,
+            $"Database error. Reference: {cid}");
+    }
     catch (Exception ex)
     {
         var cid = ctx.Response.Headers["X-Correlation-ID"].ToString();
@@ -1597,6 +1811,10 @@ app.MapWebSocket();
 // Load embedded translation files once at startup (LanguageLoader is the
 // single source of truth for invitation/reset SMS bodies).
 app.Services.GetRequiredService<LanguageLoader>().Load();
+// Activation-email body template (Scriban). Embedded default with optional
+// ~/.dmart/ActivationEmailContent.txt override; parsed once here so renders
+// inside the invitation hot path don't pay the parse cost.
+app.Services.GetRequiredService<ActivationTemplateLoader>().Load();
 
 // Load plugins + mount API plugin routes
 {

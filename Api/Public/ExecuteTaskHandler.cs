@@ -13,5 +13,7 @@ public static class ExecuteTaskHandler
             HttpRequest req, EntryService entries, QueryService queryService,
             CancellationToken ct) =>
             await Dmart.Api.Managed.ExecuteTaskHandler.ExecuteFromBodyAsync(
-                task_type, space_name, req, entries, queryService, "anonymous", ct));
+                task_type, space_name, req, entries, queryService, "anonymous", ct))
+            .Accepts<ExecuteTaskBody>("application/json")
+            .Produces<Response>();
 }
