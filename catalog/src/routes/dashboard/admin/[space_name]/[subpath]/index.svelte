@@ -1261,7 +1261,7 @@
           {
             resource_type: ResourceType.folder,
             shortname: folderMetadata.shortname,
-            subpath: getParentPath(subpath),
+            subpath: getParentPath(`/${$actualSubpath}`),
             attributes: {
               is_active: editingMeta.is_active,
               ...(Object.keys(cleanedDisplayname).length
