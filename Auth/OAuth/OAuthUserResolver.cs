@@ -37,7 +37,7 @@ public sealed class OAuthUserResolver(
     // load-bearing for plugin filters configured against the Python convention.
     private const string UsersSubpath = "users";
 
-    public async Task<User> ResolveAsync(OAuthUserInfo info, CancellationToken ct = default)
+    public async Task<User?> ResolveAsync(OAuthUserInfo info, CancellationToken ct = default)
     {
         var shortname = BuildShortname(info.Provider, info.ProviderId);
 
@@ -68,56 +68,22 @@ public sealed class OAuthUserResolver(
         if (existing is not null)
             return await MaybeRefreshAsync(existing, info, ct);
 
-        // 2. Create fresh.
-        var now = TimeUtils.Now();
-        var displayName = BuildDisplayName(info.FirstName, info.LastName);
-        var created = new User
+        var byEmail = !string.IsNullOrEmpty(info.Email)
+            ? await users.GetByEmailAsync(info.Email, ct)
+            : null;
+        if (byEmail is not null)
         {
-            Uuid = Guid.NewGuid().ToString(),
-            Shortname = shortname,
-            SpaceName = "management",
-            // Match UserService.CreateAsync — leading-slash is the canonical
-            // persisted form (see AdminBootstrap.cs:74). Without it, OAuth
-            // first-login users wouldn't show up in /management/users
-            // queries that filter on Subpath="/users".
-            Subpath = "/users",
-            OwnerShortname = "dmart",
-            IsActive = true,
-            Email = info.Email,
-            IsEmailVerified = !string.IsNullOrEmpty(info.Email),
-            Type = UserType.Web,
-            Language = Language.En,
-            Displayname = displayName is null ? null : new Translation(En: displayName),
-            SocialAvatarUrl = info.PictureUrl,
-            GoogleId      = info.Provider == "google"   ? info.ProviderId : null,
-            FacebookId    = info.Provider == "facebook" ? info.ProviderId : null,
-            // Apple user id sits on the User's Notes today — the model has no
-            // dedicated AppleId column (Python doesn't have one either; it
-            // uses the shortname as the canonical store). That's sufficient
-            // because shortname lookup is the fast path.
-            CreatedAt = now,
-            UpdatedAt = now,
-            Roles = [],
-            Groups = [],
-        };
-        await users.UpsertAsync(created, ct);
-
-        // Python parity (api/user/router.py:1381-1390): after-hook fires only
-        // on the actual create branch, after db.create. PluginManager logs and
-        // swallows plugin failures internally, so no try/catch needed here —
-        // same convention as RegistrationHandler.cs:77-86.
-        await plugins.AfterActionAsync(new Event
-        {
-            SpaceName = settings.Value.ManagementSpace,
-            Subpath = UsersSubpath,
-            Shortname = shortname,
-            ActionType = ActionType.Create,
-            ResourceType = ResourceType.User,
-            UserShortname = shortname,
-        }, ct);
-
-        log.LogInformation("oauth: created user {Shortname} from {Provider}", shortname, info.Provider);
-        return created;
+            var updated = byEmail with
+            {
+                GoogleId = info.Provider == "google" ? info.ProviderId : byEmail.GoogleId,
+                FacebookId = info.Provider == "facebook" ? info.ProviderId : byEmail.FacebookId,
+                AppleId = info.Provider == "apple" ? info.ProviderId : byEmail.AppleId,
+            };
+            return await MaybeRefreshAsync(updated, info, ct);
+        }
+        // No dmart account matches this provider id or email. OAuth login no
+        // longer auto-creates accounts — the caller turns null into a 401.
+        return null;
     }
 
     // Keep display/picture/email fresh on repeat logins — the provider is

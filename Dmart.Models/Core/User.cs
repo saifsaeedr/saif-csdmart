@@ -43,6 +43,7 @@ public sealed record User
     public string? DeviceId { get; init; }
     public string? GoogleId { get; init; }
     public string? FacebookId { get; init; }
+    public string? AppleId { get; init; }
     public string? SocialAvatarUrl { get; init; }
     public int? AttemptCount { get; init; }
     public Dictionary<string, object>? LastLogin { get; init; }
