@@ -82,10 +82,10 @@ public sealed class OAuthEndpointsTests : IClassFixture<DmartFactory>
         try
         {
             created = await resolver.ResolveAsync(info);
-            // Shortname follows the auto convention: 8 lowercase hex chars
+            // Shortname follows the auto convention: 16 lowercase hex chars
             // sourced from a fresh UUID — no provider prefix.
-            created.Shortname.Length.ShouldBe(8);
-            created.Shortname.ShouldMatch("^[0-9a-f]{8}$");
+            created.Shortname.Length.ShouldBe(16);
+            created.Shortname.ShouldMatch("^[0-9a-f]{16}$");
             created.IsActive.ShouldBeTrue();
             created.IsEmailVerified.ShouldBeTrue();
             created.GoogleId.ShouldBe(providerId);
@@ -126,7 +126,7 @@ public sealed class OAuthEndpointsTests : IClassFixture<DmartFactory>
         {
             created = await resolver.ResolveAsync(info);
             // Auto shortname — see Resolver_CreatesNewUser_WithAutoShortname.
-            created.Shortname.Length.ShouldBe(8);
+            created.Shortname.Length.ShouldBe(16);
             created.AppleId.ShouldBe(providerId, "AppleId column must be populated for provider=apple");
             // Sibling provider IDs stay null — no cross-provider bleed.
             created.GoogleId.ShouldBeNull();

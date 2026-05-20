@@ -13,7 +13,7 @@ namespace Dmart.Auth.OAuth;
 //   1. By the provider's dedicated unique column (google_id / facebook_id /
 //      apple_id). Established at first login and indexed UNIQUE — see
 //      SqlSchema.cs.
-//   2. Create new. Shortname is the auto pattern (first 8 hex chars of a
+//   2. Create new. Shortname is the auto pattern (first 16 hex chars of a
 //      fresh UUID) — mirrors the `Shortname = "auto"` convention used by
 //      managed CRUD (RequestHandler.ResolveAutoShortname) and self-
 //      registration (RegistrationHandler) so OAuth-created users get the
@@ -58,11 +58,11 @@ public sealed class OAuthUserResolver(
 
         // Decide the shortname for both the pre-event and (if we end up
         // creating) the persisted row. Existing users keep the shortname they
-        // already have; new users get the auto pattern — first 8 hex chars of
+        // already have; new users get the auto pattern — first 16 hex chars of
         // a fresh UUID, matching RequestHandler.ResolveAutoShortname so the
         // OAuth path and managed CRUD produce identically-shaped opaque IDs.
         var newUuid = Guid.NewGuid();
-        var shortname = existing?.Shortname ?? newUuid.ToString("N")[..8];
+        var shortname = existing?.Shortname ?? newUuid.ToString("N")[..16];
 
         // Python parity (api/user/router.py:1337-1346): fire the before-hook
         // unconditionally at the top of find_or_create_social_user, before the

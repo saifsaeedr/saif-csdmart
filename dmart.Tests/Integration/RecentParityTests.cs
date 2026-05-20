@@ -197,9 +197,9 @@ public class RecentParityTests : IClassFixture<DmartFactory>
             body!.Status.ShouldBe(Status.Success);
             var rec = body.Records![0];
             rec.Shortname.ShouldNotBe("auto");
-            rec.Shortname.Length.ShouldBe(8);
+            rec.Shortname.Length.ShouldBe(16);
             rec.Uuid.ShouldNotBeNull();
-            rec.Uuid!.Replace("-", "")[..8].ShouldBe(rec.Shortname);
+            rec.Uuid!.Replace("-", "")[..16].ShouldBe(rec.Shortname);
         }
         finally { await CleanupTestSpaceAsync(client); }
     }
