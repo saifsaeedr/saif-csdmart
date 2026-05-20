@@ -162,6 +162,15 @@ public static class OAuthHandlers
     {
         var user = await resolver.ResolveAsync(info, ct);
 
+        if (user is null)
+        {
+            // No dmart account matches this provider id or email. OAuth login no
+            // longer auto-creates accounts — the caller turns null into a 401.
+            return Results.Json(
+                Response.Fail(InternalErrorCode.INVALID_DATA, "Email not found", ErrorTypes.Auth),
+                DmartJsonContext.Default.Response, statusCode: 401);
+        }
+
         // Build a synthetic UserLoginRequest so we can flow into the shared
         // ProcessLoginAsync — which handles session row creation, JWT issue,
         // last_login tracking, and max_sessions enforcement.

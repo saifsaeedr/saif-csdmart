@@ -7,23 +7,21 @@ using Microsoft.Extensions.Options;
 
 namespace Dmart.Auth.OAuth;
 
-// "Find or create" a dmart User from an OAuth provider's user info.
+// Resolve a dmart User from an OAuth provider's user info. OAuth login does
+// NOT create accounts — the user must already exist in dmart.
 //
 // Lookup chain:
 //   1. By synthetic shortname `{provider}_{providerId}` — if the user has
 //      logged in with this provider before, this is the fastest path and
 //      also handles the case where they don't have an email.
-//   2. Create new. Shortname is `{provider}_{providerId}`; is_email_verified
-//      is set to true since the provider already verified it.
+//   2. By email — if a dmart account carries the same email, the provider id
+//      is attached to that account and it is logged in.
+//   3. No match: return null. The HTTP layer turns this into a 401.
 //
-// Account takeover note: we deliberately do NOT fall back to "if an existing
-// local account has the same email, attach the provider id to it." That path
-// used to exist but was a pre-auth account takeover primitive — anyone able
-// to register an OAuth provider account with a target's email address (which
-// is the default, no reverse-verification) could take over the target's
-// local dmart account on first OAuth login. Users who already have a local
-// account get a second, separate account for OAuth logins; linking the two
-// has to be a deliberate server-side ceremony, not a silent merge.
+// Account takeover caveat: step 2 trusts the provider to have verified the
+// email it hands us. Only enable providers that enforce email verification —
+// a provider that lets a user assert an arbitrary unverified email would let
+// an attacker take over the matching dmart account on first OAuth login.
 public sealed class OAuthUserResolver(
     UserRepository users,
     PluginManager plugins,
@@ -37,7 +35,7 @@ public sealed class OAuthUserResolver(
     // load-bearing for plugin filters configured against the Python convention.
     private const string UsersSubpath = "users";
 
-    public async Task<User> ResolveAsync(OAuthUserInfo info, CancellationToken ct = default)
+    public async Task<User?> ResolveAsync(OAuthUserInfo info, CancellationToken ct = default)
     {
         var shortname = BuildShortname(info.Provider, info.ProviderId);
 
@@ -68,53 +66,22 @@ public sealed class OAuthUserResolver(
         if (existing is not null)
             return await MaybeRefreshAsync(existing, info, ct);
 
-        // 2. Create fresh.
-        var now = TimeUtils.Now();
-        var displayName = BuildDisplayName(info.FirstName, info.LastName);
-        var created = new User
+        var byEmail = !string.IsNullOrEmpty(info.Email)
+            ? await users.GetByEmailAsync(info.Email, ct)
+            : null;
+        if (byEmail is not null)
         {
-            Uuid = Guid.NewGuid().ToString(),
-            Shortname = shortname,
-            SpaceName = "management",
-            // Match UserService.CreateAsync — leading-slash is the canonical
-            // persisted form (see AdminBootstrap.cs:74). Without it, OAuth
-            // first-login users wouldn't show up in /management/users
-            // queries that filter on Subpath="/users".
-            Subpath = "/users",
-            OwnerShortname = "dmart",
-            IsActive = true,
-            Email = info.Email,
-            IsEmailVerified = !string.IsNullOrEmpty(info.Email),
-            Type = UserType.Web,
-            Language = Language.En,
-            Displayname = displayName is null ? null : new Translation(En: displayName),
-            SocialAvatarUrl = info.PictureUrl,
-            GoogleId      = info.Provider == "google"   ? info.ProviderId : null,
-            FacebookId    = info.Provider == "facebook" ? info.ProviderId : null,
-            AppleId       = info.Provider == "apple"    ? info.ProviderId : null,
-            CreatedAt = now,
-            UpdatedAt = now,
-            Roles = [],
-            Groups = [],
-        };
-        await users.UpsertAsync(created, ct);
-
-        // Python parity (api/user/router.py:1381-1390): after-hook fires only
-        // on the actual create branch, after db.create. PluginManager logs and
-        // swallows plugin failures internally, so no try/catch needed here —
-        // same convention as RegistrationHandler.cs:77-86.
-        await plugins.AfterActionAsync(new Event
-        {
-            SpaceName = settings.Value.ManagementSpace,
-            Subpath = UsersSubpath,
-            Shortname = shortname,
-            ActionType = ActionType.Create,
-            ResourceType = ResourceType.User,
-            UserShortname = shortname,
-        }, ct);
-
-        log.LogInformation("oauth: created user {Shortname} from {Provider}", shortname, info.Provider);
-        return created;
+            var updated = byEmail with
+            {
+                GoogleId = info.Provider == "google" ? info.ProviderId : byEmail.GoogleId,
+                FacebookId = info.Provider == "facebook" ? info.ProviderId : byEmail.FacebookId,
+                AppleId = info.Provider == "apple" ? info.ProviderId : byEmail.AppleId,
+            };
+            return await MaybeRefreshAsync(updated, info, ct);
+        }
+        // No dmart account matches this provider id or email. OAuth login no
+        // longer auto-creates accounts — the caller turns null into a 401.
+        return null;
     }
 
     // Keep display/picture/email fresh on repeat logins — the provider is
@@ -148,11 +115,5 @@ public sealed class OAuthUserResolver(
             .Where(c => char.IsLetterOrDigit(c) || c == '_').ToArray());
         if (sanitized.Length == 0) sanitized = "x";
         return $"{provider}_{sanitized}";
-    }
-
-    private static string? BuildDisplayName(string? first, string? last)
-    {
-        var name = $"{first?.Trim()} {last?.Trim()}".Trim();
-        return string.IsNullOrWhiteSpace(name) ? null : name;
     }
 }
