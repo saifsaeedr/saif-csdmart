@@ -91,10 +91,7 @@ public sealed class OAuthUserResolver(
             SocialAvatarUrl = info.PictureUrl,
             GoogleId      = info.Provider == "google"   ? info.ProviderId : null,
             FacebookId    = info.Provider == "facebook" ? info.ProviderId : null,
-            // Apple user id sits on the User's Notes today — the model has no
-            // dedicated AppleId column (Python doesn't have one either; it
-            // uses the shortname as the canonical store). That's sufficient
-            // because shortname lookup is the fast path.
+            AppleId       = info.Provider == "apple"    ? info.ProviderId : null,
             CreatedAt = now,
             UpdatedAt = now,
             Roles = [],

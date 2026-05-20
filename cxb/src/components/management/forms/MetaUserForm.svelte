@@ -52,6 +52,7 @@
         firebase_token: formData.firebase_token || null,
         google_id: formData.google_id || null,
         facebook_id: formData.facebook_id || null,
+        apple_id: formData.apple_id || null,
         social_avatar_url: formData.social_avatar_url || null
     }
 
@@ -457,6 +458,10 @@
                         <div>
                             <Label for="facebook_id" class="mb-2">Facebook ID</Label>
                             <Input id="facebook_id" bind:value={formData.facebook_id} />
+                        </div>
+                        <div>
+                            <Label for="apple_id" class="mb-2">Apple ID</Label>
+                            <Input id="apple_id" bind:value={formData.apple_id} />
                         </div>
                     </div>
 

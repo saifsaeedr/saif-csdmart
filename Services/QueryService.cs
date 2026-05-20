@@ -1411,6 +1411,7 @@ internal static class UserMapper
             ["device_id"] = u.DeviceId,
             ["google_id"] = u.GoogleId,
             ["facebook_id"] = u.FacebookId,
+            ["apple_id"] = u.AppleId,
             ["social_avatar_url"] = u.SocialAvatarUrl,
             ["notes"] = u.Notes,
             ["space_name"] = u.SpaceName,
