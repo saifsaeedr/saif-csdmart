@@ -41,11 +41,12 @@ public static class RegistrationHandler
                     Response.Fail(InternalErrorCode.INVALID_DATA, "missing body", ErrorTypes.Request),
                     DmartJsonContext.Default.Response, statusCode: 400);
 
-            // Force shortname to "auto" so self-registration always picks a
-            // UUID-derived shortname; otherwise callers could squat on
-            // arbitrary user IDs. ResolveAutoShortname then expands "auto"
-            // the same way it does for managed CRUD + multipart.
-            record = record with { Shortname = "auto" };
+            // Python parity: shortname=="auto" expands to a UUID-derived
+            // value via Meta.from_record; a caller-supplied shortname is
+            // kept intact so the duplicate-check in UserService can surface
+            // a shortname conflict (SHORTNAME_ALREADY_EXIST, type=create).
+            if (string.IsNullOrWhiteSpace(record.Shortname))
+                record = record with { Shortname = "auto" };
             record = RequestHandler.ResolveAutoShortname(record);
 
             // Python strips authorization/cookie from request_headers before
