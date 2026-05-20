@@ -150,8 +150,8 @@ export function generateUuidV4(): string {
 
 /**
  * Mirrors Python DMart's `Meta.from_record` auto-uuid behavior:
- * when `shortname == "auto"`, the shortname is replaced with the first 8
- * chars of a freshly generated UUID and the UUID is stored in attributes.
+ * when `shortname == "auto"`, the shortname is replaced with the first 16
+ * hex chars of a freshly generated UUID and the UUID is stored in attributes.
  */
 export function resolveAutoShortname(
   shortname: string,
@@ -161,7 +161,7 @@ export function resolveAutoShortname(
     return { shortname, uuid: null };
   }
   const uuid = generateUuidV4();
-  const resolved = uuid.slice(0, 8);
+  const resolved = uuid.replace(/-/g, "").slice(0, 16);
   if (attributes) {
     attributes.uuid = uuid;
   }
