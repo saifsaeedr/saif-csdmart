@@ -10,11 +10,17 @@ namespace Dmart.Auth.OAuth;
 // "Find or create" a dmart User from an OAuth provider's user info.
 //
 // Lookup chain:
-//   1. By synthetic shortname `{provider}_{providerId}` — if the user has
-//      logged in with this provider before, this is the fastest path and
-//      also handles the case where they don't have an email.
-//   2. Create new. Shortname is `{provider}_{providerId}`; is_email_verified
-//      is set to true since the provider already verified it.
+//   1. By the provider's dedicated unique column (google_id / facebook_id /
+//      apple_id). Established at first login and indexed UNIQUE — see
+//      SqlSchema.cs.
+//   2. Create new. Shortname is the auto pattern (first 8 hex chars of a
+//      fresh UUID) — mirrors the `Shortname = "auto"` convention used by
+//      managed CRUD (RequestHandler.ResolveAutoShortname) and self-
+//      registration (RegistrationHandler) so OAuth-created users get the
+//      same opaque IDs as everything else, instead of leaking the provider
+//      name into the persisted shortname. The provider id lives in its
+//      dedicated column, so subsequent logins still resolve via step 1.
+//      is_email_verified is set to true since the provider already verified it.
 //
 // Account takeover note: we deliberately do NOT fall back to "if an existing
 // local account has the same email, attach the provider id to it." That path
@@ -39,7 +45,24 @@ public sealed class OAuthUserResolver(
 
     public async Task<User> ResolveAsync(OAuthUserInfo info, CancellationToken ct = default)
     {
-        var shortname = BuildShortname(info.Provider, info.ProviderId);
+        // 1. Look up by the provider's dedicated unique column. Returns the
+        //    existing user on any repeat login regardless of how their
+        //    shortname was minted.
+        var existing = info.Provider switch
+        {
+            "google"   => await users.GetByGoogleIdAsync(info.ProviderId, ct),
+            "facebook" => await users.GetByFacebookIdAsync(info.ProviderId, ct),
+            "apple"    => await users.GetByAppleIdAsync(info.ProviderId, ct),
+            _          => null,
+        };
+
+        // Decide the shortname for both the pre-event and (if we end up
+        // creating) the persisted row. Existing users keep the shortname they
+        // already have; new users get the auto pattern — first 8 hex chars of
+        // a fresh UUID, matching RequestHandler.ResolveAutoShortname so the
+        // OAuth path and managed CRUD produce identically-shaped opaque IDs.
+        var newUuid = Guid.NewGuid();
+        var shortname = existing?.Shortname ?? newUuid.ToString("N")[..8];
 
         // Python parity (api/user/router.py:1337-1346): fire the before-hook
         // unconditionally at the top of find_or_create_social_user, before the
@@ -63,8 +86,6 @@ public sealed class OAuthUserResolver(
             log.LogWarning(ex, "oauth: before-create plugin hook threw for {Shortname}; continuing", shortname);
         }
 
-        // 1. Exact shortname match.
-        var existing = await users.GetByShortnameAsync(shortname, ct);
         if (existing is not null)
             return await MaybeRefreshAsync(existing, info, ct);
 
@@ -73,7 +94,7 @@ public sealed class OAuthUserResolver(
         var displayName = BuildDisplayName(info.FirstName, info.LastName);
         var created = new User
         {
-            Uuid = Guid.NewGuid().ToString(),
+            Uuid = newUuid.ToString(),
             Shortname = shortname,
             SpaceName = "management",
             // Match UserService.CreateAsync — leading-slash is the canonical
@@ -138,16 +159,6 @@ public sealed class OAuthUserResolver(
         updated = updated with { UpdatedAt = TimeUtils.Now() };
         await users.UpsertAsync(updated, ct);
         return updated;
-    }
-
-    private static string BuildShortname(string provider, string providerId)
-    {
-        // dmart shortnames are alphanumeric + underscore. Sanitize the
-        // provider id in case it carries characters that fail the regex.
-        var sanitized = new string(providerId
-            .Where(c => char.IsLetterOrDigit(c) || c == '_').ToArray());
-        if (sanitized.Length == 0) sanitized = "x";
-        return $"{provider}_{sanitized}";
     }
 
     private static string? BuildDisplayName(string? first, string? last)

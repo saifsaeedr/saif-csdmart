@@ -67,7 +67,7 @@ public sealed class OAuthEndpointsTests : IClassFixture<DmartFactory>
     // OAuthUserResolver — unit-level, but requires DB → put it here with the
     // other DB-backed integration tests so it uses the shared factory.
     [FactIfPg]
-    public async Task Resolver_CreatesNewUser_WithProviderShortname()
+    public async Task Resolver_CreatesNewUser_WithAutoShortname_AndPersistsProviderId()
     {
         var resolver = _factory.Services.GetRequiredService<OAuthUserResolver>();
         var users = _factory.Services.GetRequiredService<UserRepository>();
@@ -78,24 +78,30 @@ public sealed class OAuthEndpointsTests : IClassFixture<DmartFactory>
             Email: $"{providerId}@test.local",
             FirstName: "Test", LastName: "Ninja", PictureUrl: "https://x/pic.jpg");
 
-        var expectedShortname = $"google_{providerId}";
+        User? created = null;
         try
         {
-            var created = await resolver.ResolveAsync(info);
-            created.Shortname.ShouldBe(expectedShortname);
+            created = await resolver.ResolveAsync(info);
+            // Shortname follows the auto convention: 8 lowercase hex chars
+            // sourced from a fresh UUID — no provider prefix.
+            created.Shortname.Length.ShouldBe(8);
+            created.Shortname.ShouldMatch("^[0-9a-f]{8}$");
             created.IsActive.ShouldBeTrue();
             created.IsEmailVerified.ShouldBeTrue();
             created.GoogleId.ShouldBe(providerId);
             created.Displayname!.En.ShouldBe("Test Ninja");
             created.SocialAvatarUrl.ShouldBe("https://x/pic.jpg");
 
-            // Second call returns the same row (shortname hit).
+            // Second call returns the same row — lookup is now by google_id,
+            // not by the (now random) shortname.
             var again = await resolver.ResolveAsync(info);
             again.Uuid.ShouldBe(created.Uuid);
+            again.Shortname.ShouldBe(created.Shortname);
         }
         finally
         {
-            try { await users.DeleteAsync(expectedShortname); } catch { }
+            if (created is not null)
+                try { await users.DeleteAsync(created.Shortname); } catch { }
         }
     }
 
@@ -115,11 +121,12 @@ public sealed class OAuthEndpointsTests : IClassFixture<DmartFactory>
             Email: $"{providerId}@test.local",
             FirstName: "Apple", LastName: "User", PictureUrl: null);
 
-        var expectedShortname = $"apple_{providerId}";
+        User? created = null;
         try
         {
-            var created = await resolver.ResolveAsync(info);
-            created.Shortname.ShouldBe(expectedShortname);
+            created = await resolver.ResolveAsync(info);
+            // Auto shortname — see Resolver_CreatesNewUser_WithAutoShortname.
+            created.Shortname.Length.ShouldBe(8);
             created.AppleId.ShouldBe(providerId, "AppleId column must be populated for provider=apple");
             // Sibling provider IDs stay null — no cross-provider bleed.
             created.GoogleId.ShouldBeNull();
@@ -127,7 +134,8 @@ public sealed class OAuthEndpointsTests : IClassFixture<DmartFactory>
         }
         finally
         {
-            try { await users.DeleteAsync(expectedShortname); } catch { }
+            if (created is not null)
+                try { await users.DeleteAsync(created.Shortname); } catch { }
         }
     }
 
@@ -197,25 +205,26 @@ public sealed class OAuthEndpointsTests : IClassFixture<DmartFactory>
         });
 
         var providerId = Guid.NewGuid().ToString("N")[..12];
-        var shortname = $"google_{providerId}";
         var info = new OAuthUserInfo("google", providerId, $"{providerId}@test.local",
             "Hook", "Tester", null);
 
+        User? created = null;
         try
         {
             // First login → user doesn't exist yet → both hooks fire.
-            await resolver.ResolveAsync(info);
-            // Second login → same provider id → existing-by-shortname → only before fires.
+            created = await resolver.ResolveAsync(info);
+            // Second login → same provider id → existing-by-google_id → only before fires.
             await resolver.ResolveAsync(info);
 
-            beforePlugin.CountFor(shortname).ShouldBe(2,
+            beforePlugin.CountFor(created.Shortname).ShouldBe(2,
                 "before-hook is fired unconditionally at the top of ResolveAsync (Python parity)");
-            afterPlugin.CountFor(shortname).ShouldBe(1,
+            afterPlugin.CountFor(created.Shortname).ShouldBe(1,
                 "after-hook fires only on the actual create branch (Python parity)");
         }
         finally
         {
-            try { await users.DeleteAsync(shortname); } catch { }
+            if (created is not null)
+                try { await users.DeleteAsync(created.Shortname); } catch { }
         }
     }
 
@@ -244,15 +253,15 @@ public sealed class OAuthEndpointsTests : IClassFixture<DmartFactory>
     }
 
     [FactIfPg]
-    public async Task Resolver_EmailMatch_CreatesSeparateAccount_NoSilentMerge()
+    public async Task Resolver_EmailCollidesWithLocalUser_RejectsCreate_NoSilentMerge()
     {
-        // Previously: if a local user already had the email the OAuth provider
-        // supplied, the resolver would attach the provider id to that account.
-        // That was a silent pre-auth account-takeover primitive — anyone able
-        // to register a Google/Facebook account with the victim's email would
-        // take over the victim's local dmart account on first OAuth login.
-        // Now: email is NOT a merge key. The two accounts stay separate;
-        // linking has to be a deliberate, authenticated ceremony.
+        // Defense-in-depth: a previous version of the resolver would attach
+        // the OAuth provider id to ANY local user with a matching email, a
+        // silent pre-auth account-takeover primitive. The resolver has since
+        // been hardened to never merge on email, and the email column itself
+        // is now UNIQUE at the DB layer (SqlSchema.cs:434). The two together
+        // mean a colliding-email OAuth create fails loudly instead of
+        // silently usurping the victim's row.
         var resolver = _factory.Services.GetRequiredService<OAuthUserResolver>();
         var users = _factory.Services.GetRequiredService<UserRepository>();
 
@@ -277,26 +286,22 @@ public sealed class OAuthEndpointsTests : IClassFixture<DmartFactory>
         });
 
         var providerId = Guid.NewGuid().ToString("N")[..12];
-        var oauthShortname = $"google_{providerId}";
         try
         {
             var info = new OAuthUserInfo("google", providerId, email, "A", "B", null);
-            var resolved = await resolver.ResolveAsync(info);
-
-            // New account — shortname keyed on the provider id.
-            resolved.Shortname.ShouldBe(oauthShortname);
-            resolved.GoogleId.ShouldBe(providerId);
-            resolved.IsEmailVerified.ShouldBeTrue();
+            var ex = await Should.ThrowAsync<Npgsql.PostgresException>(
+                () => resolver.ResolveAsync(info));
+            ex.SqlState.ShouldBe("23505", "unique_violation on the email index");
 
             // Pre-existing local user is untouched — no google_id attached.
             var preExisting = await users.GetByShortnameAsync(shortname);
             preExisting.ShouldNotBeNull();
             preExisting!.GoogleId.ShouldBeNull();
+            preExisting.Email.ShouldBe(email);
         }
         finally
         {
             try { await users.DeleteAsync(shortname); } catch { }
-            try { await users.DeleteAsync(oauthShortname); } catch { }
         }
     }
 }
