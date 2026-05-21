@@ -75,7 +75,7 @@ public static class SubmitHandler
         // as data). Mint a fresh UUID-derived shortname server-side so one
         // caller can't squat on a name and concurrent submissions don't collide.
         var entryUuid = Guid.NewGuid();
-        var shortname = entryUuid.ToString("N")[..16];
+        var shortname = entryUuid.ToString("N")[..8];
 
         var entry = new Entry
         {

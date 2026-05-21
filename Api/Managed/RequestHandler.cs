@@ -279,7 +279,8 @@ public static class RequestHandler
     // ============================================================================
 
     // Python: settings.auto_uuid_rule = "auto". When shortname == "auto",
-    // generate a UUID and use the first 16 chars as the shortname.
+    // generate a UUID and use the first 8 chars as the shortname.
+    // Mirrors models/core.py::Meta.from_record:232 and User.from_record:593.
     private const string AutoShortname = "auto";
 
     internal static Record ResolveAutoShortname(Record rec)
@@ -287,7 +288,7 @@ public static class RequestHandler
         if (!string.Equals(rec.Shortname, AutoShortname, StringComparison.OrdinalIgnoreCase))
             return rec;
         var uuid = Guid.NewGuid();
-        return rec with { Shortname = uuid.ToString("N")[..16], Uuid = uuid.ToString() };
+        return rec with { Shortname = uuid.ToString("N")[..8], Uuid = uuid.ToString() };
     }
 
     private static Record WithCreatedMetaAttributes(

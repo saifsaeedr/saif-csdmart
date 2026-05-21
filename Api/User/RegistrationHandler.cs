@@ -41,12 +41,19 @@ public static class RegistrationHandler
                     Response.Fail(InternalErrorCode.INVALID_DATA, "missing body", ErrorTypes.Request),
                     DmartJsonContext.Default.Response, statusCode: 400);
 
-            // Python parity: shortname=="auto" expands to a UUID-derived
-            // value via Meta.from_record; a caller-supplied shortname is
-            // kept intact so the duplicate-check in UserService can surface
-            // a shortname conflict (SHORTNAME_ALREADY_EXIST, type=create).
-            if (string.IsNullOrWhiteSpace(record.Shortname))
-                record = record with { Shortname = "auto" };
+            // Python parity: core.Record declares `shortname: str = Field(pattern=regex.SHORTNAME)`
+            // so Pydantic rejects missing / empty / pattern-failing shortnames at
+            // deserialization (422). C# `required` only catches the missing-field
+            // case — empty strings and bad chars slip through, so enforce the
+            // same regex explicitly here. "auto" passes the pattern and is then
+            // expanded by Meta.from_record (mirrored by ResolveAutoShortname).
+            if (!Utils.RequestRegex.IsValidShortname(record.Shortname))
+                return Results.Json(
+                    Response.Fail(
+                        InternalErrorCode.INVALID_DATA,
+                        $"invalid shortname: '{record.Shortname}' fails {Utils.RequestRegex.ShortnamePattern}",
+                        ErrorTypes.Request),
+                    DmartJsonContext.Default.Response, statusCode: 400);
             record = RequestHandler.ResolveAutoShortname(record);
 
             // Python strips authorization/cookie from request_headers before
