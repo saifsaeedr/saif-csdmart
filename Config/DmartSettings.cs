@@ -92,6 +92,11 @@ public sealed class DmartSettings
     // window.
     public int AllowOtpResendAfter { get; set; } = 60;
 
+    // Minimum seconds between password-reset OTP re-sends for the same
+    // destination. Scoped to /user/password-reset-request so the reset flow's
+    // cadence can be tuned independently of generic /user/otp-request.
+    public int AllowPasswordResetResendAfter { get; set; } = 60;
+
     // If > 0, sessions that haven't been touched for this many seconds are
     // rejected at JWT validation time (and the session row is deleted). 0
     // disables the check. Mirrors Python's `session_inactivity_ttl`.

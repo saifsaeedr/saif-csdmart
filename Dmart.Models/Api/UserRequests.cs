@@ -29,6 +29,20 @@ public sealed record PasswordResetRequest(
     string? Email,
     string? Msisdn);
 
+// POST /user/password-reset-confirm — completes the flow started by
+// /user/password-reset-request. Identifier is one of {Shortname, Email,
+// Msisdn} — same shape as PasswordResetRequest so the two halves resolve to
+// the same user (and the same `pwd-reset:{dest}` key) without heuristic
+// re-detection of identifier shape. Otp is the code delivered to the user;
+// Password is the new password (plaintext on the wire, hashed server-side
+// via PasswordHasher.Hash).
+public sealed record PasswordResetConfirm(
+    string? Shortname,
+    string? Email,
+    string? Msisdn,
+    string Otp,
+    string Password);
+
 // /user/create — self-registration. Deliberately omits `shortname` and
 // `uuid`: the server allocates both so that anonymous callers cannot
 // squat on names or pre-empt identifiers. `attributes` carries the
@@ -39,7 +53,6 @@ public sealed record PasswordResetRequest(
 // "/users" on this endpoint.
 public sealed record UserCreateBody(
     Dictionary<string, object>? Attributes);
-
 // RFC 7591 dynamic client registration — MCP clients post this to /oauth/register
 // and we echo back a clients_id they use for the authorize+token flow.
 public sealed record RegisterRequest(

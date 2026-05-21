@@ -472,6 +472,13 @@ public sealed class UserService(
         return null;
     }
 
+    // Public wrapper around the private failed-attempt counter so out-of-class
+    // callers (currently only OtpHandler./password-reset-confirm) can apply the
+    // same account-lockout discipline /user/login enforces on wrong OTPs.
+    // Returns true when this attempt caused the account to lock.
+    public Task<bool> RecordFailedAttemptAsync(User user, CancellationToken ct = default)
+        => HandleFailedLoginAttemptAsync(user, ct);
+
     private async Task<bool> HandleFailedLoginAttemptAsync(User user, CancellationToken ct)
     {
         await users.IncrementAttemptAsync(user.Shortname, ct);
