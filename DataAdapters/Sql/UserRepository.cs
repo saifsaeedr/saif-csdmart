@@ -53,33 +53,6 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
         return await reader.ReadAsync(ct) ? Hydrate(reader) : null;
     }
 
-    public async Task<User?> GetByGoogleIdAsync(string googleId, CancellationToken ct = default)
-    {
-        await using var conn = await db.OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand($"{SelectAllColumns} WHERE google_id = $1", conn);
-        cmd.Parameters.Add(new() { Value = googleId });
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        return await reader.ReadAsync(ct) ? Hydrate(reader) : null;
-    }
-
-    public async Task<User?> GetByFacebookIdAsync(string facebookId, CancellationToken ct = default)
-    {
-        await using var conn = await db.OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand($"{SelectAllColumns} WHERE facebook_id = $1", conn);
-        cmd.Parameters.Add(new() { Value = facebookId });
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        return await reader.ReadAsync(ct) ? Hydrate(reader) : null;
-    }
-
-    public async Task<User?> GetByAppleIdAsync(string appleId, CancellationToken ct = default)
-    {
-        await using var conn = await db.OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand($"{SelectAllColumns} WHERE apple_id = $1", conn);
-        cmd.Parameters.Add(new() { Value = appleId });
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        return await reader.ReadAsync(ct) ? Hydrate(reader) : null;
-    }
-
     public async Task<bool> ExistsAsync(string? shortname, string? email, string? msisdn, CancellationToken ct = default)
     {
         await using var conn = await db.OpenAsync(ct);

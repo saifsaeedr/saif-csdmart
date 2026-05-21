@@ -70,18 +70,12 @@ public static class SubmitHandler
         {
             rawAttrs = new Dictionary<string, object>();
         }
-        // Anonymous callers always submit with the "auto" shortname sentinel —
-        // even a "shortname" field in the body is ignored for identity (it
-        // stays in Payload.Body as data). Mirrors AttachHandler /
-        // RegistrationHandler, which call RequestHandler.ResolveAutoShortname
-        // to expand the sentinel to a 16-char UUID-derived value so concurrent
-        // submissions don't collide.
+        // Anonymous callers never pick their own shortname — a "shortname"
+        // field in the body is ignored for identity (it stays in Payload.Body
+        // as data). Mint a fresh UUID-derived shortname server-side so one
+        // caller can't squat on a name and concurrent submissions don't collide.
         var entryUuid = Guid.NewGuid();
-        var shortname = "auto";
-        if (string.Equals(shortname, "auto", StringComparison.OrdinalIgnoreCase))
-        {
-            shortname = entryUuid.ToString("N")[..16];
-        }
+        var shortname = entryUuid.ToString("N")[..16];
 
         var entry = new Entry
         {
