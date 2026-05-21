@@ -130,8 +130,8 @@ public static class OtpHandler
         }).RequireRateLimiting("auth-by-ip");
 
         g.MapPost("/password-reset-request", async (PasswordResetRequest req,
-            UserRepository users, InvitationService invitations,
-            CancellationToken ct) =>
+            UserRepository users, OtpProvider otp, OtpRepository repo,
+            IOptions<DmartSettings> settings, CancellationToken ct) =>
         {
             Models.Core.User? user = null;
             if (!string.IsNullOrEmpty(req.Shortname))
@@ -145,11 +145,17 @@ public static class OtpHandler
             // or not. All silent-no-op branches below also fall through to Ok().
             if (user is null) return Response.Ok();
 
-            // Email-direct path: only mint when the supplied email actually
-            // matches the user's (case-insensitive — UserRepository already
-            // does LOWER(email)=LOWER($1) on the lookup, the equality check
-            // here guards against future lookup changes and against a
-            // mismatched email leaking through the `else` branch).
+            // Pick the destination using the same routing rules the prior
+            // invitation flow applied:
+            //   - Email-direct path: only when the request was email-only AND
+            //     the supplied email matches the user record (case-insensitive
+            //     equality guards against a mismatched email leaking through).
+            //   - Msisdn / shortname path: prefer the user's msisdn; the msisdn
+            //     equality check blocks an attacker probing whether a known
+            //     shortname belongs to a specific msisdn.
+            //   - Csdmart-only fallback: shortname-only request + user has no
+            //     msisdn → fall back to email so the reset still reaches them.
+            string? dest = null;
             var emailDirect = string.IsNullOrEmpty(req.Shortname)
                 && string.IsNullOrEmpty(req.Msisdn)
                 && !string.IsNullOrEmpty(req.Email);
@@ -157,40 +163,157 @@ public static class OtpHandler
             {
                 if (!string.IsNullOrEmpty(user.Email)
                     && string.Equals(user.Email, req.Email, StringComparison.OrdinalIgnoreCase))
-                {
-                    await invitations.MintAsync(user, Models.Enums.InvitationChannel.Email, isReset: true, ct);
-                }
-                return Response.Ok();
+                    dest = user.Email;
             }
-
-            // Msisdn / shortname path: prefer SMS. The msisdn equality check
-            // is tautological when the lookup was by msisdn (req.Msisdn was
-            // the key) but load-bearing when the caller supplied BOTH
-            // shortname and msisdn — it blocks an attacker probing whether
-            // a known shortname belongs to a specific msisdn.
-            //
-            // isReset=true selects the localized reset_message template (same
-            // one /user/reset uses) instead of the new-account invitation
-            // message — see InvitationService.MintAsync.
-            if (!string.IsNullOrEmpty(user.Msisdn)
-                && (string.IsNullOrEmpty(req.Msisdn)
-                    || string.Equals(user.Msisdn, req.Msisdn, StringComparison.Ordinal)))
+            else if (!string.IsNullOrEmpty(user.Msisdn)
+                     && (string.IsNullOrEmpty(req.Msisdn)
+                         || string.Equals(user.Msisdn, req.Msisdn, StringComparison.Ordinal)))
             {
-                await invitations.MintAsync(user, Models.Enums.InvitationChannel.Sms, isReset: true, ct);
+                dest = user.Msisdn;
             }
-            // Csdmart-only fallback (intentional divergence from upstream
-            // Python's reset_password, which silently no-ops here): when the
-            // caller supplied only a shortname and the user has no msisdn,
-            // fall back to email so the reset still reaches them via the
-            // available channel. NOT triggered when req.Msisdn is set —
-            // direct-msisdn requests honor the channel the caller picked.
             else if (!string.IsNullOrEmpty(req.Shortname)
                      && string.IsNullOrEmpty(req.Msisdn)
                      && !string.IsNullOrEmpty(user.Email))
             {
-                await invitations.MintAsync(user, Models.Enums.InvitationChannel.Email, isReset: true, ct);
+                dest = user.Email;
             }
 
+            if (string.IsNullOrEmpty(dest)) return Response.Ok();
+
+            // Reset OTPs live under a dedicated key (pwd-reset:{dest}) so the
+            // login OTP path (which reads bare {dest}) can't consume them and
+            // turn a password-reset code into a login credential.
+            var s = settings.Value;
+            var key = ResetOtpKey(dest);
+
+            // Resend cooldown — scoped to the reset key, independent of the
+            // generic /otp-request cooldown. Anti-enumeration: return Ok
+            // silently when the cooldown is in effect so paired requests can't
+            // distinguish "known user, just-issued OTP" from "unknown user"
+            // (both observable as 200 Ok with no body). Trade-off: a
+            // legitimate user who triple-taps "Resend" gets no feedback that
+            // the second/third call was a no-op.
+            var since = await repo.GetCreatedSinceAsync(key, ct);
+            if (since is int elapsed && elapsed < s.AllowPasswordResetResendAfter)
+                return Response.Ok();
+
+            // OTP delivery: OtpProvider.SendAsync renders the body from the
+            // `otp_message` language template, so the reset message uses the
+            // same wording as /otp-request.
+            var code = otp.Generate(dest);
+            var expiresAt = TimeUtils.Now().AddSeconds(s.OtpTokenTtl);
+            await repo.StoreAsync(key, code, expiresAt, ct);
+            await otp.SendAsync(dest, code, user.Language, ct);
+
+            return Response.Ok();
+        }).RequireRateLimiting("auth-by-ip");
+
+        // Completes the reset flow started by /password-reset-request:
+        // verifies the OTP at the reset-scoped key, then writes the new
+        // password hash on the user row. Typed identifier fields (same shape
+        // as PasswordResetRequest) so the two halves resolve to the same user
+        // — and the same `pwd-reset:{dest}` key — without heuristic shape
+        // detection that could mis-route a numeric shortname.
+        //
+        // Uniform OTP_INVALID response for {unknown user, no dest, mismatch,
+        // expired} so the endpoint doesn't leak which leg failed. Wrong OTPs
+        // count against the same failed-attempt counter /user/login uses, so
+        // an attacker can't brute-force the 6-digit code within its TTL
+        // without tripping the account lockout.
+        g.MapPost("/password-reset-confirm", async (PasswordResetConfirm req,
+            UserRepository users, OtpRepository repo, PasswordHasher hasher,
+            UserService userService, CancellationToken ct) =>
+        {
+            // Exactly one of {Shortname, Email, Msisdn} — mirrors the shape
+            // rules /otp-request and /password-reset-request use.
+            var provided = (string.IsNullOrEmpty(req.Shortname) ? 0 : 1)
+                         + (string.IsNullOrEmpty(req.Msisdn) ? 0 : 1)
+                         + (string.IsNullOrEmpty(req.Email) ? 0 : 1);
+            if (provided != 1 || string.IsNullOrWhiteSpace(req.Otp)
+                || string.IsNullOrWhiteSpace(req.Password))
+                return Response.Fail(InternalErrorCode.MISSING_DATA,
+                    "exactly one of [shortname, email, msisdn] plus otp and password are required",
+                    ErrorTypes.Request);
+
+            // Resolve user via the typed identifier the caller supplied.
+            Models.Core.User? user;
+            if (!string.IsNullOrEmpty(req.Shortname))
+                user = await users.GetByShortnameAsync(req.Shortname, ct);
+            else if (!string.IsNullOrEmpty(req.Msisdn))
+                user = await users.GetByMsisdnAsync(req.Msisdn, ct);
+            else
+                user = await users.GetByEmailAsync(req.Email!.ToLowerInvariant(), ct);
+
+            if (user is null)
+                return Response.Fail(InternalErrorCode.OTP_INVALID,
+                    "code mismatch or expired", ErrorTypes.Auth);
+
+            // Cheap-fails-first: validate password rules before the OTP probe.
+            // VerifyAndConsumeAsync only deletes on success, so the OTP isn't
+            // burned by this branch — but rejecting early avoids hashing work
+            // and keeps the failure-mode predictable.
+            if (!PasswordRules.IsValid(req.Password))
+                return Response.Fail(InternalErrorCode.INVALID_PASSWORD_RULES,
+                    "password does not meet complexity rules", ErrorTypes.Request);
+
+            // Account lockout pre-check — match /user/login's posture so a
+            // locked account can't be unlocked via the reset path either.
+            if (!user.IsActive)
+                return Response.Fail(InternalErrorCode.OTP_INVALID,
+                    "code mismatch or expired", ErrorTypes.Auth);
+
+            // Determine the dest /password-reset-request would have used so
+            // we hit the same `pwd-reset:{dest}` key:
+            //   email-direct + match → user.Email
+            //   msisdn-direct or shortname-with-msisdn → user.Msisdn
+            //   shortname-only no msisdn → user.Email
+            string? dest = null;
+            if (!string.IsNullOrEmpty(req.Email))
+            {
+                if (!string.IsNullOrEmpty(user.Email)
+                    && string.Equals(user.Email, req.Email, StringComparison.OrdinalIgnoreCase))
+                    dest = user.Email;
+            }
+            else if (!string.IsNullOrEmpty(user.Msisdn))
+            {
+                dest = user.Msisdn;
+            }
+            else if (!string.IsNullOrEmpty(req.Shortname)
+                     && !string.IsNullOrEmpty(user.Email))
+            {
+                dest = user.Email;
+            }
+
+            if (string.IsNullOrEmpty(dest))
+                return Response.Fail(InternalErrorCode.OTP_INVALID,
+                    "code mismatch or expired", ErrorTypes.Auth);
+
+            var ok = await repo.VerifyAndConsumeAsync(ResetOtpKey(dest), req.Otp, ct);
+            if (!ok)
+            {
+                // Wrong OTP counts against the failed-attempt counter — same
+                // guarantee /user/login OTP path enforces. Without this, the
+                // 6-digit code (10^6 keyspace, 300s TTL) is brute-forceable
+                // by a distributed caller inside its own validity window.
+                var locked = await userService.RecordFailedAttemptAsync(user, ct);
+                return locked
+                    ? Response.Fail(InternalErrorCode.USER_ACCOUNT_LOCKED,
+                        "Account has been locked due to too many failed login attempts.",
+                        ErrorTypes.Auth)
+                    : Response.Fail(InternalErrorCode.OTP_INVALID,
+                        "code mismatch or expired", ErrorTypes.Auth);
+            }
+
+            var updated = user with
+            {
+                Password = hasher.Hash(req.Password),
+                ForcePasswordChange = false,
+                UpdatedAt = TimeUtils.Now(),
+            };
+            await users.UpsertAsync(updated, ct);
+            // Successful reset clears the failed-attempt counter — symmetric
+            // with the password-login success path (ProcessLoginAsync).
+            await users.ResetAttemptsAsync(user.Shortname, ct);
             return Response.Ok();
         }).RequireRateLimiting("auth-by-ip");
 
@@ -224,4 +347,9 @@ public static class OtpHandler
             return Response.Ok();
         }).RequireRateLimiting("auth-by-ip");
     }
+
+    // Reset OTPs are stored under a dedicated key prefix so the login OTP
+    // path (which reads bare {dest}) can't consume them as a login credential.
+    private const string ResetOtpPrefix = "pwd-reset:";
+    internal static string ResetOtpKey(string dest) => ResetOtpPrefix + dest;
 }

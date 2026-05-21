@@ -12,20 +12,23 @@ using Xunit;
 
 namespace Dmart.Tests.Integration;
 
-// /user/password-reset-request mints an invitation token and delivers a reset
-// link via the channel matching the supplied identifier
-// (msisdn/shortname → SMS, email → Email). Previously the C# port generated
-// an OTP, stored it under `reset:{dest}`, and never sent it — the SMS gateway
-// was never invoked and no consumer read the row. These tests assert the
-// invitation row that the new flow writes, since SmsSender/SmtpSender
-// short-circuit silently in mock mode and have no observable side effect.
+// /user/password-reset-request sends an OTP via the channel matching the
+// supplied identifier (msisdn/shortname → SMS, email → Email). The OTP body
+// renders from the `otp_message` language template, the same one /otp-request
+// uses. These tests assert the otp row that the handler writes, since
+// SmsSender/SmtpSender short-circuit silently in mock mode and have no
+// observable side effect on the wire.
 public sealed class PasswordResetRequestTests : IClassFixture<DmartFactory>
 {
     private readonly DmartFactory _factory;
     public PasswordResetRequestTests(DmartFactory factory) => _factory = factory;
 
+    // Mirrors OtpHandler.ResetOtpPrefix — handler constant is private, so the
+    // tests duplicate the literal. Any drift breaks the assertions loudly.
+    private const string ResetPrefix = "pwd-reset:";
+
     [FactIfPg]
-    public async Task ShortnameOnly_Mints_Sms_Invitation_For_Users_Msisdn()
+    public async Task ShortnameOnly_Sends_Otp_To_Users_Msisdn()
     {
         var (shortname, email, msisdn) = await CreateUserAsync(withMsisdn: true);
         try
@@ -36,12 +39,11 @@ public sealed class PasswordResetRequestTests : IClassFixture<DmartFactory>
                 DmartJsonContext.Default.PasswordResetRequest);
             resp.StatusCode.ShouldBe(HttpStatusCode.OK);
 
-            // InvitationService writes a row keyed by the JWT, valued
-            // "SMS:{msisdn}" — assert that exactly one such row exists for
-            // this user's destination.
-            (await CountInvitationsAsync($"SMS:{msisdn}")).ShouldBe(1);
-            (await CountInvitationsAsync($"EMAIL:{email}")).ShouldBe(0,
-                "user has msisdn — must not also mint an email invitation");
+            // OtpRepository.StoreAsync keys the row by the destination — assert
+            // a code was stored at the user's msisdn and not at their email.
+            (await OtpExistsAsync(msisdn)).ShouldBeTrue();
+            (await OtpExistsAsync(email)).ShouldBeFalse(
+                "user has msisdn — must not also send to email");
         }
         finally { await CleanupAsync(shortname, email, msisdn); }
     }
@@ -65,14 +67,14 @@ public sealed class PasswordResetRequestTests : IClassFixture<DmartFactory>
                 DmartJsonContext.Default.PasswordResetRequest);
             resp.StatusCode.ShouldBe(HttpStatusCode.OK);
 
-            (await CountInvitationsAsync($"EMAIL:{email}")).ShouldBe(1,
+            (await OtpExistsAsync(email)).ShouldBeTrue(
                 "shortname-only with no msisdn falls back to email");
         }
         finally { await CleanupAsync(shortname, email, msisdn: null); }
     }
 
     [FactIfPg]
-    public async Task ShortnameOnly_UnknownUser_Returns_Ok_AndMints_Nothing()
+    public async Task ShortnameOnly_UnknownUser_Returns_Ok_AndSends_Nothing()
     {
         // Anti-enumeration: should not leak whether the shortname exists.
         var unknown = $"definitely_not_a_user_{Guid.NewGuid():N}".Substring(0, 30);
@@ -82,11 +84,11 @@ public sealed class PasswordResetRequestTests : IClassFixture<DmartFactory>
             DmartJsonContext.Default.PasswordResetRequest);
         resp.StatusCode.ShouldBe(HttpStatusCode.OK);
         // No row should exist — the user never existed, so there's nothing
-        // to mint for. Status code being OK is the anti-enumeration check.
+        // to send for. Status code being OK is the anti-enumeration check.
     }
 
     [FactIfPg]
-    public async Task EmailDirect_Mints_Email_Invitation()
+    public async Task EmailDirect_Sends_Otp_To_Email()
     {
         var (shortname, email, _) = await CreateUserAsync(withMsisdn: false);
         try
@@ -97,15 +99,13 @@ public sealed class PasswordResetRequestTests : IClassFixture<DmartFactory>
                 DmartJsonContext.Default.PasswordResetRequest);
             resp.StatusCode.ShouldBe(HttpStatusCode.OK);
 
-            (await CountInvitationsAsync($"EMAIL:{email}")).ShouldBe(1);
-            (await CountInvitationsAsync($"SMS:{email}")).ShouldBe(0,
-                "email path must not mint an SMS invitation");
+            (await OtpExistsAsync(email)).ShouldBeTrue();
         }
         finally { await CleanupAsync(shortname, email, msisdn: null); }
     }
 
     [FactIfPg]
-    public async Task MsisdnDirect_Mints_Sms_Invitation()
+    public async Task MsisdnDirect_Sends_Otp_To_Msisdn()
     {
         var (shortname, email, msisdn) = await CreateUserAsync(withMsisdn: true);
         try
@@ -116,9 +116,9 @@ public sealed class PasswordResetRequestTests : IClassFixture<DmartFactory>
                 DmartJsonContext.Default.PasswordResetRequest);
             resp.StatusCode.ShouldBe(HttpStatusCode.OK);
 
-            (await CountInvitationsAsync($"SMS:{msisdn}")).ShouldBe(1);
-            (await CountInvitationsAsync($"EMAIL:{email}")).ShouldBe(0,
-                "msisdn-direct must not mint an email invitation");
+            (await OtpExistsAsync(msisdn)).ShouldBeTrue();
+            (await OtpExistsAsync(email)).ShouldBeFalse(
+                "msisdn-direct must not also send to email");
         }
         finally { await CleanupAsync(shortname, email, msisdn); }
     }
@@ -141,17 +141,17 @@ public sealed class PasswordResetRequestTests : IClassFixture<DmartFactory>
                 DmartJsonContext.Default.PasswordResetRequest);
             resp.StatusCode.ShouldBe(HttpStatusCode.OK);
 
-            (await CountInvitationsAsync($"SMS:{ghostMsisdn}")).ShouldBe(0);
-            (await CountInvitationsAsync($"EMAIL:{email}")).ShouldBe(0,
+            (await OtpExistsAsync(ghostMsisdn)).ShouldBeFalse();
+            (await OtpExistsAsync(email)).ShouldBeFalse(
                 "direct-msisdn lookup must not fall back to the user's email");
         }
         finally { await CleanupAsync(shortname, email, msisdn: null); }
     }
 
     [FactIfPg]
-    public async Task EmailDirect_Mismatched_Email_Mints_Nothing()
+    public async Task EmailDirect_Mismatched_Email_Sends_Nothing()
     {
-        // The email branch only mints when user.email matches the request's
+        // The email branch only sends when user.email matches the request's
         // email value. A mismatched email must not leak.
         var (shortname, email, _) = await CreateUserAsync(withMsisdn: false);
         try
@@ -163,23 +163,21 @@ public sealed class PasswordResetRequestTests : IClassFixture<DmartFactory>
                 DmartJsonContext.Default.PasswordResetRequest);
             resp.StatusCode.ShouldBe(HttpStatusCode.OK);
 
-            (await CountInvitationsAsync($"EMAIL:{email}")).ShouldBe(0);
-            (await CountInvitationsAsync($"EMAIL:{stranger}")).ShouldBe(0);
+            (await OtpExistsAsync(email)).ShouldBeFalse();
+            (await OtpExistsAsync(stranger)).ShouldBeFalse();
         }
         finally { await CleanupAsync(shortname, email, msisdn: null); }
     }
 
     // ---- helpers ----
 
-    private async Task<int> CountInvitationsAsync(string invitationValue)
+    // Reset OTPs are stored under the "pwd-reset:" prefix so they can't be
+    // consumed by /user/login's OTP path. Tests pass the bare destination;
+    // this helper prepends the prefix to match what the handler writes.
+    private async Task<bool> OtpExistsAsync(string dest)
     {
-        var db = _factory.Services.GetRequiredService<Db>();
-        await using var conn = await db.OpenAsync();
-        await using var cmd = new Npgsql.NpgsqlCommand(
-            "SELECT COUNT(*) FROM invitations WHERE invitation_value = $1", conn);
-        cmd.Parameters.Add(new() { Value = invitationValue });
-        var raw = await cmd.ExecuteScalarAsync();
-        return Convert.ToInt32(raw);
+        var repo = _factory.Services.GetRequiredService<OtpRepository>();
+        return await repo.GetCodeAsync(ResetPrefix + dest) is not null;
     }
 
     private async Task<(string Shortname, string Email, string Msisdn)> CreateUserAsync(bool withMsisdn)
@@ -216,23 +214,21 @@ public sealed class PasswordResetRequestTests : IClassFixture<DmartFactory>
             var users = _factory.Services.GetRequiredService<UserRepository>();
             await users.DeleteAsync(shortname);
 
-            // Build the exact set of invitation_value keys this test could
-            // have produced; delete those rows so back-to-back test runs
-            // start clean. Exact equality (vs LIKE %shortname%) means a
-            // future change to CreateUserAsync's naming can't accidentally
-            // cause one test to clobber another's rows.
-            var values = new List<string>();
-            if (!string.IsNullOrEmpty(email)) values.Add($"EMAIL:{email}");
-            if (!string.IsNullOrEmpty(msisdn)) values.Add($"SMS:{msisdn}");
-            if (values.Count == 0) return;
+            // Build the exact set of otp keys this test could have produced;
+            // delete those rows so back-to-back test runs start clean. Reset
+            // OTPs live under the "pwd-reset:" prefix.
+            var keys = new List<string>();
+            if (!string.IsNullOrEmpty(email)) keys.Add(ResetPrefix + email);
+            if (!string.IsNullOrEmpty(msisdn)) keys.Add(ResetPrefix + msisdn);
+            if (keys.Count == 0) return;
 
             var db = _factory.Services.GetRequiredService<Db>();
             await using var conn = await db.OpenAsync();
             await using var cmd = new Npgsql.NpgsqlCommand(
-                "DELETE FROM invitations WHERE invitation_value = ANY($1)", conn);
+                "DELETE FROM otp WHERE key = ANY($1)", conn);
             cmd.Parameters.Add(new()
             {
-                Value = values.ToArray(),
+                Value = keys.ToArray(),
                 NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text,
             });
             await cmd.ExecuteNonQueryAsync();
