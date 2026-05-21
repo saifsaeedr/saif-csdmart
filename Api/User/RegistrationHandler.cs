@@ -41,19 +41,23 @@ public static class RegistrationHandler
                     Response.Fail(InternalErrorCode.INVALID_DATA, "missing body", ErrorTypes.Request),
                     DmartJsonContext.Default.Response, statusCode: 400);
 
-            // Python parity: core.Record declares `shortname: str = Field(pattern=regex.SHORTNAME)`
-            // so Pydantic rejects missing / empty / pattern-failing shortnames at
-            // deserialization (422). C# `required` only catches the missing-field
-            // case — empty strings and bad chars slip through, so enforce the
-            // same regex explicitly here. "auto" passes the pattern and is then
-            // expanded by Meta.from_record (mirrored by ResolveAutoShortname).
-            if (!Utils.RequestRegex.IsValidShortname(record.Shortname))
+            // Anonymous self-registration: the caller never picks the
+            // shortname. Only "auto" or empty/missing (treated as "auto") is
+            // accepted; the server always allocates so no caller can squat
+            // on a name or pre-empt one for a future legitimate user. This
+            // is intentionally stricter than Python parity — pydantic's
+            // regex would let a caller-supplied shortname through, and we
+            // don't want that on a public registration endpoint.
+            var requested = record.Shortname?.Trim();
+            if (!string.IsNullOrEmpty(requested)
+                && !string.Equals(requested, "auto", StringComparison.OrdinalIgnoreCase))
                 return Results.Json(
                     Response.Fail(
                         InternalErrorCode.INVALID_DATA,
-                        $"invalid shortname: '{record.Shortname}' fails {Utils.RequestRegex.ShortnamePattern}",
+                        "user shortname must be 'auto' or omitted; server-side allocation is mandatory",
                         ErrorTypes.Request),
                     DmartJsonContext.Default.Response, statusCode: 400);
+            record = record with { Shortname = "auto" };
             record = RequestHandler.ResolveAutoShortname(record);
 
             // Python strips authorization/cookie from request_headers before
