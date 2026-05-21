@@ -280,6 +280,7 @@ public static class RequestHandler
 
     // Python: settings.auto_uuid_rule = "auto". When shortname == "auto",
     // generate a UUID and use the first 8 chars as the shortname.
+    // Mirrors models/core.py::Meta.from_record:232 and User.from_record:593.
     private const string AutoShortname = "auto";
 
     internal static Record ResolveAutoShortname(Record rec)

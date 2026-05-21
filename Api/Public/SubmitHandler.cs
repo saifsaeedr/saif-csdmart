@@ -70,15 +70,16 @@ public static class SubmitHandler
         {
             rawAttrs = new Dictionary<string, object>();
         }
-        // Anonymous callers never pick their own shortname — even a "shortname"
+        // Anonymous callers never pick their own shortname — a "shortname"
         // field in the body is ignored for identity (it stays in Payload.Body
-        // as data). Always mint a fresh UUID-derived shortname server-side so
-        // one caller can't squat on a name or overwrite another's submission.
-        var shortname = Guid.NewGuid().ToString("n")[..8];
+        // as data). Mint a fresh UUID-derived shortname server-side so one
+        // caller can't squat on a name and concurrent submissions don't collide.
+        var entryUuid = Guid.NewGuid();
+        var shortname = entryUuid.ToString("N")[..8];
 
         var entry = new Entry
         {
-            Uuid = Guid.NewGuid().ToString(),
+            Uuid = entryUuid.ToString(),
             Shortname = shortname,
             SpaceName = space,
             Subpath = "/" + subpath.TrimStart('/'),

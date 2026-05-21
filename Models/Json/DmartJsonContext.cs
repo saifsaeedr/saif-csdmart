@@ -40,6 +40,7 @@ namespace Dmart.Models.Json;
 [JsonSerializable(typeof(ConfirmOTPRequest))]
 [JsonSerializable(typeof(PasswordResetRequest))]
 [JsonSerializable(typeof(PasswordResetConfirm))]
+[JsonSerializable(typeof(UserCreateBody))]
 [JsonSerializable(typeof(RegisterRequest))]
 [JsonSerializable(typeof(RegisterResponse))]
 // Documentation-only request shapes (see Dmart.Models/Api/DocsDtos.cs).

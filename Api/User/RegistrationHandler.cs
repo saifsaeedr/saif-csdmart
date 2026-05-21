@@ -15,20 +15,24 @@ public static class RegistrationHandler
 {
     public static void Map(RouteGroupBuilder g)
     {
-        // Python parity: POST /user/create takes a core.Record body
-        //   {shortname, subpath, resource_type, attributes:{email, msisdn,
-        //    password, email_otp, msisdn_otp, roles, displayname, description,
-        //    payload:{content_type, body}, ...}}
+        // POST /user/create — self-registration. The wire shape is
+        //   {attributes:{email, msisdn, password, email_otp, msisdn_otp,
+        //    roles, displayname, description, payload:{content_type, body},
+        //    ...}}
         // and returns a Record with session attributes (access_token, type,
-        // displayname?) after auto-logging the user in.
+        // displayname?) after auto-logging the user in. Shortname + uuid
+        // are server-allocated and intentionally not part of the request
+        // shape — this is a deliberate divergence from Python parity (which
+        // accepts caller-supplied shortnames) so that no caller can squat
+        // on a name on this public endpoint.
         g.MapPost("/create", async Task<IResult> (HttpContext http, UserService svc,
             PluginManager plugins, IOptions<DmartSettings> settings, CancellationToken ct) =>
         {
-            Record? record;
+            UserCreateBody? body;
             try
             {
-                record = await JsonSerializer.DeserializeAsync(
-                    http.Request.Body, DmartJsonContext.Default.Record, ct);
+                body = await JsonSerializer.DeserializeAsync(
+                    http.Request.Body, DmartJsonContext.Default.UserCreateBody, ct);
             }
             catch (JsonException ex)
             {
@@ -36,15 +40,21 @@ public static class RegistrationHandler
                     Response.Fail(InternalErrorCode.INVALID_DATA, ex.Message, ErrorTypes.Request),
                     DmartJsonContext.Default.Response, statusCode: 400);
             }
-            if (record is null)
+            if (body is null)
                 return Results.Json(
                     Response.Fail(InternalErrorCode.INVALID_DATA, "missing body", ErrorTypes.Request),
                     DmartJsonContext.Default.Response, statusCode: 400);
 
-            // Python: Meta.from_record in models/core.py resolves shortname=="auto"
-            // centrally for every resource type before persistence. Mirror it here
-            // so /user/create produces a UUID-derived shortname instead of the
-            // literal "auto" (same helper is used by managed CRUD + multipart).
+            // Build the internal Record server-side. Shortname is sent as
+            // the "auto" sentinel so ResolveAutoShortname mints a fresh
+            // UUID-derived 8-char value, matching every other create path.
+            var record = new Record
+            {
+                ResourceType = ResourceType.User,
+                Shortname = "auto",
+                Subpath = "/",
+                Attributes = body.Attributes,
+            };
             record = RequestHandler.ResolveAutoShortname(record);
 
             // Python strips authorization/cookie from request_headers before
@@ -114,7 +124,7 @@ public static class RegistrationHandler
             return Results.Json(Response.Ok(new[] { responseRecord }),
                 DmartJsonContext.Default.Response);
         })
-        .Accepts<Record>("application/json")
+        .Accepts<UserCreateBody>("application/json")
         .Produces<Response>();
     }
 }

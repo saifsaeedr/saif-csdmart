@@ -152,6 +152,7 @@ export function generateUuidV4(): string {
  * Mirrors Python DMart's `Meta.from_record` auto-uuid behavior:
  * when `shortname == "auto"`, the shortname is replaced with the first 8
  * chars of a freshly generated UUID and the UUID is stored in attributes.
+ * (models/core.py::Meta.from_record:232 — `str(record.uuid)[:8]`.)
  */
 export function resolveAutoShortname(
   shortname: string,
