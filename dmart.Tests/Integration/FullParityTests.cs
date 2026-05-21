@@ -527,13 +527,13 @@ public class FullParityTests : IClassFixture<DmartFactory>
         // Pre-store an OTP against the email, then /user/create peeks it
         // (Python parity — verify_user doesn't consume).
         var otpRepo = _factory.Services.GetRequiredService<OtpRepository>();
-        var shortname = "otpok_" + Guid.NewGuid().ToString("N")[..6];
-        var email = shortname + "@example.test";
+        var email = "otpok_" + Guid.NewGuid().ToString("N")[..6] + "@example.test";
         var code = "654321";
         await otpRepo.StoreAsync(email, code, DateTime.UtcNow.AddMinutes(5));
 
         var client = _factory.CreateClient();
-        var body = "{\"resource_type\":\"user\",\"shortname\":\"" + shortname + "\",\"subpath\":\"/\",\"attributes\":{\"email\":\"" + email + "\",\"password\":\"Testtest1234\",\"email_otp\":\"" + code + "\"}}";
+        // No shortname on the wire: /user/create allocates it server-side.
+        var body = "{\"attributes\":{\"email\":\"" + email + "\",\"password\":\"Testtest1234\",\"email_otp\":\"" + code + "\"}}";
         var resp = await client.PostAsync("/user/create",
             new StringContent(body, Encoding.UTF8, "application/json"));
         var result = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
@@ -545,7 +545,9 @@ public class FullParityTests : IClassFixture<DmartFactory>
         // /user/create fires resource_folders_creation, which materializes
         // personal/people/{shortname}/* folders owned by the new user. The
         // helper purges those before deleting the user so the FK holds.
-        await TestUserCleanup.DeleteUserAndOwnedAsync(_factory.Services, shortname);
+        // Use the server-allocated shortname from the response, not a
+        // caller-chosen value (which the API no longer accepts).
+        await TestUserCleanup.DeleteUserAndOwnedAsync(_factory.Services, result.Records![0].Shortname);
     }
 
     // ==================== session_inactivity_ttl enforcement ====================
@@ -592,14 +594,15 @@ public class FullParityTests : IClassFixture<DmartFactory>
             svcs.Configure<Dmart.Config.DmartSettings>(s => s.IsOtpForCreateRequired = false);
         }));
         var client = factory.CreateClient();
-        var shortname = "otpoff_" + Guid.NewGuid().ToString("N")[..6];
-        var body = "{\"resource_type\":\"user\",\"shortname\":\"" + shortname + "\",\"subpath\":\"/\",\"attributes\":{\"email\":\"" + shortname + "@x.y\",\"password\":\"Testtest1234\"}}";
+        var email = "otpoff_" + Guid.NewGuid().ToString("N")[..6] + "@x.y";
+        // No shortname on the wire: /user/create allocates it server-side.
+        var body = "{\"attributes\":{\"email\":\"" + email + "\",\"password\":\"Testtest1234\"}}";
         var resp = await client.PostAsync("/user/create",
             new StringContent(body, Encoding.UTF8, "application/json"));
         var result = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
         result!.Status.ShouldBe(Status.Success);
 
-        await TestUserCleanup.DeleteUserAndOwnedAsync(factory.Services, shortname);
+        await TestUserCleanup.DeleteUserAndOwnedAsync(factory.Services, result.Records![0].Shortname);
     }
 
     // ==================== bot session-inactivity exemption ====================

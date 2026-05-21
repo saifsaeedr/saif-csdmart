@@ -29,6 +29,17 @@ public sealed record PasswordResetRequest(
     string? Email,
     string? Msisdn);
 
+// /user/create — self-registration. Deliberately omits `shortname` and
+// `uuid`: the server allocates both so that anonymous callers cannot
+// squat on names or pre-empt identifiers. `attributes` carries the
+// usual user payload (email, msisdn, password, OTPs, displayname, etc.).
+// Other top-level fields a caller might send (resource_type, subpath,
+// shortname, uuid) are accepted-and-ignored as unknown JSON properties
+// — the resource type is always "user" and the subpath is always
+// "/users" on this endpoint.
+public sealed record UserCreateBody(
+    Dictionary<string, object>? Attributes);
+
 // RFC 7591 dynamic client registration — MCP clients post this to /oauth/register
 // and we echo back a clients_id they use for the authorize+token flow.
 public sealed record RegisterRequest(

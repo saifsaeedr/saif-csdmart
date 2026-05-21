@@ -49,21 +49,32 @@ internal static class OpenApiExamples
             }
             """)!,
 
-        // POST /user/create — body is a Record envelope with the new
-        // user's attributes nested inside.
-        //
-        // Caveat: this same example is reused for every other Record-bodied
-        // endpoint (/user/registration, /public/submit, etc.) — there's
-        // only one slot per CLR type in the registry. The user-create form
-        // is the most generic starting point; users on other endpoints
-        // edit `resource_type` + `attributes` to match. If a specific
-        // endpoint warrants its own shape, lift it onto a docs-only DTO
-        // (see DocsDtos.cs) so it gets a distinct registry entry.
+        // Record envelope — reused as the example for every Record-bodied
+        // endpoint (/managed/request, /public/submit, etc.). Note that
+        // /user/create has its own dedicated UserCreateBody example below
+        // (shortname is server-allocated there and not part of the wire
+        // shape). If a different endpoint warrants its own shape, lift
+        // it onto a docs-only DTO (see DocsDtos.cs).
         [typeof(Record)] = JsonNode.Parse("""
             {
-              "resource_type": "user",
-              "shortname": "newuser",
-              "subpath": "/users",
+              "resource_type": "content",
+              "shortname": "my_entry",
+              "subpath": "/items",
+              "attributes": {
+                "is_active": true,
+                "payload": {
+                  "content_type": "json",
+                  "body": { "title": "Hello" }
+                }
+              }
+            }
+            """)!,
+
+        // POST /user/create — server allocates shortname + uuid. Callers
+        // send only `attributes`. Any extra top-level fields are silently
+        // ignored as unknown JSON properties.
+        [typeof(UserCreateBody)] = JsonNode.Parse("""
+            {
               "attributes": {
                 "email": "newuser@example.com",
                 "password": "Password1234",
