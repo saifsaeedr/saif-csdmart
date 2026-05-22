@@ -467,6 +467,21 @@ switch (subcommand)
                 return;
             }
         }
+        // --batch-size=N caps the in-memory bulk-COPY accumulator. Lower
+        // it for fat payloads (e.g. base64-encoded blobs in payload.body)
+        // where 10k rows × payload would exceed the host RAM budget; raise
+        // it for tiny payloads where the COPY round-trip overhead matters.
+        // Only meaningful with --fast (slow path doesn't accumulate).
+        var batchSize = Dmart.Services.ImportExportService.DefaultBatchSize;
+        var batchArg = serverArgs.FirstOrDefault(a => a.StartsWith("--batch-size=", StringComparison.Ordinal));
+        if (batchArg is not null)
+        {
+            if (!int.TryParse(batchArg["--batch-size=".Length..], out batchSize) || batchSize < 1 || batchSize > 1_000_000)
+            {
+                Bail("--batch-size must be an integer in [1, 1000000]");
+                return;
+            }
+        }
         // --type={zip|fs} selects the source kind. Default is auto-detected
         // from the target: a regular file ⇒ zip, a directory ⇒ fs. When
         // explicitly set and the user's choice disagrees with the target's
@@ -488,7 +503,7 @@ switch (subcommand)
         }
         if (string.IsNullOrEmpty(targetPath))
         {
-            Bail("Usage: dmart import [-r|--replace] [--fast] [--fast-parallelism=N] [--type=zip|fs] <path>");
+            Bail("Usage: dmart import [-r|--replace] [--fast] [--fast-parallelism=N] [--batch-size=N] [--type=zip|fs] <path>");
             return;
         }
 
@@ -534,7 +549,7 @@ switch (subcommand)
             return;
         }
 
-        Console.WriteLine($"Importing from {targetPath} (type={effectiveType}, replace={replace}, fast={fast}, parallelism={parallelism})");
+        Console.WriteLine($"Importing from {targetPath} (type={effectiveType}, replace={replace}, fast={fast}, parallelism={parallelism}, batch-size={batchSize})");
 
         var (s, dbInst) = CliBootstrap.BuildOrExit(dotenvPath, dotenvValues);
         var importService = CliBootstrap.BuildImportExportService(s, dbInst);
@@ -549,13 +564,13 @@ switch (subcommand)
         if (effectiveType == "fs")
         {
             resp = await importService.ImportFolderAsync(targetPath, actor: null,
-                preserveExisting: !replace, fastUnsafeNoFkCheck: fast, fastParallelism: parallelism);
+                preserveExisting: !replace, fastUnsafeNoFkCheck: fast, fastParallelism: parallelism, batchSize: batchSize);
         }
         else
         {
             await using var zipStream = File.OpenRead(targetPath);
             resp = await importService.ImportZipAsync(zipStream, actor: null,
-                preserveExisting: !replace, fastUnsafeNoFkCheck: fast, fastParallelism: parallelism);
+                preserveExisting: !replace, fastUnsafeNoFkCheck: fast, fastParallelism: parallelism, batchSize: batchSize);
         }
 
         if (resp.Status != Status.Success)

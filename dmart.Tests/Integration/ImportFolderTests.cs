@@ -184,6 +184,86 @@ public class ImportFolderTests : IClassFixture<DmartFactory>
         }
     }
 
+    [FactIfFastImport]
+    public async Task Folder_Import_With_BatchSize_One_Round_Trips()
+    {
+        // Pins the per-row batched flush path. With batchSize=1 the loop in
+        // RunTailPassesAsync calls BulkInsertEntriesAsync after every Add,
+        // exercising the path that would otherwise only run on imports with
+        // millions of entries. If batching is correct, the final state must
+        // match the no-batching (large-batchSize) round-trip exactly.
+        var sp = _factory.Services;
+        _factory.CreateClient();
+        var io = sp.GetRequiredService<ImportExportService>();
+        var entryRepo = sp.GetRequiredService<EntryRepository>();
+        var spaceRepo = sp.GetRequiredService<SpaceRepository>();
+
+        var spaceName = "iexbatch_" + Guid.NewGuid().ToString("N")[..6];
+        await spaceRepo.UpsertAsync(new Space
+        {
+            Uuid = Guid.NewGuid().ToString(), Shortname = spaceName, SpaceName = spaceName,
+            Subpath = "/", OwnerShortname = "dmart", IsActive = true,
+            Languages = new() { Language.En },
+            CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        });
+
+        var folder = new Entry
+        {
+            Uuid = Guid.NewGuid().ToString(), Shortname = "batched", SpaceName = spaceName,
+            Subpath = "/", ResourceType = ResourceType.Folder, IsActive = true,
+            OwnerShortname = "dmart", CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        };
+        // Five content entries so batchSize=1 yields multiple bulk-COPY
+        // flushes (the original code would have done one).
+        var seeded = new List<Entry> { folder };
+        for (var i = 0; i < 5; i++)
+            seeded.Add(MakeContent(spaceName, "/batched", $"b{i}", new { idx = i }));
+        foreach (var e in seeded)
+            await entryRepo.UpsertAsync(e);
+
+        var q = new Query
+        {
+            Type = QueryType.Search, SpaceName = spaceName, Subpath = "/",
+            FilterSchemaNames = new(), Limit = 10_000, RetrieveJsonPayload = true,
+        };
+        await using var exported = await io.ExportAsync(q, actor: null);
+        using var ms = new MemoryStream();
+        await exported.CopyToAsync(ms);
+        ms.Position = 0;
+
+        var stagingDir = Path.Combine(Path.GetTempPath(), $"dmart-batch-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(stagingDir);
+        try
+        {
+            using (var read = new ZipArchive(ms, ZipArchiveMode.Read))
+                read.ExtractToDirectory(stagingDir);
+
+            foreach (var e in seeded)
+                await entryRepo.DeleteAsync(e.SpaceName, e.Subpath, e.Shortname, e.ResourceType);
+
+            // batchSize=1 with --fast forces a BulkInsertEntriesAsync call
+            // after every entry, hammering the batched-flush path.
+            var resp = await io.ImportFolderAsync(stagingDir, actor: null,
+                preserveExisting: false, fastUnsafeNoFkCheck: true, fastParallelism: 1, batchSize: 1);
+            resp.Status.ShouldBe(Status.Success,
+                customMessage: $"unexpected error: {resp.Error?.Message}");
+
+            for (var i = 0; i < 5; i++)
+            {
+                var got = await entryRepo.GetAsync(spaceName, "/batched", $"b{i}", ResourceType.Content);
+                got.ShouldNotBeNull($"entry b{i} missing after batched import");
+                got!.Payload!.Body!.Value.GetProperty("idx").GetInt32().ShouldBe(i);
+            }
+        }
+        finally
+        {
+            foreach (var e in seeded)
+                try { await entryRepo.DeleteAsync(e.SpaceName, e.Subpath, e.Shortname, e.ResourceType); } catch { }
+            try { await spaceRepo.DeleteAsync(spaceName); } catch { }
+            try { Directory.Delete(stagingDir, recursive: true); } catch { }
+        }
+    }
+
     [Fact]
     public void Cli_Import_TypeZip_On_Directory_Exits_Nonzero()
     {

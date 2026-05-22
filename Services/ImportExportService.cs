@@ -59,6 +59,16 @@ public sealed class ImportExportService(
     ILogger<ImportExportService> log)
 {
     private const int QueryLimit = 100_000;
+
+    // Maximum rows accumulated in memory before a bulk COPY flush. Bounds
+    // peak working-set of `bulkEntries` / `bulkAttachments` independent of
+    // total import size — without this, a single space with millions of
+    // entries would materialize every parsed Entry (with inlined JSON
+    // payload) in RAM before the one COPY at the end of RunTailPassesAsync.
+    // At ~10k rows × ~10 KB avg payload, the accumulator caps around
+    // ~100 MB; operators with larger payloads should lower via --batch-size.
+    public const int DefaultBatchSize = 10_000;
+
     private string MgmtSpace => settingsOpt.Value.ManagementSpace;
 
     // ========================================================================
@@ -396,13 +406,13 @@ public sealed class ImportExportService(
     // ========================================================================
 
     public Task<Response> ImportZipAsync(Stream zip, string? actor, CancellationToken ct = default)
-        => ImportZipAsync(zip, actor, preserveExisting: false, fastUnsafeNoFkCheck: false, fastParallelism: 1, ct);
+        => ImportZipAsync(zip, actor, preserveExisting: false, fastUnsafeNoFkCheck: false, fastParallelism: 1, ct: ct);
 
     public Task<Response> ImportZipAsync(Stream zip, string? actor, bool preserveExisting, CancellationToken ct = default)
-        => ImportZipAsync(zip, actor, preserveExisting, fastUnsafeNoFkCheck: false, fastParallelism: 1, ct);
+        => ImportZipAsync(zip, actor, preserveExisting, fastUnsafeNoFkCheck: false, fastParallelism: 1, ct: ct);
 
     public Task<Response> ImportZipAsync(Stream zip, string? actor, bool preserveExisting, bool fastUnsafeNoFkCheck, CancellationToken ct = default)
-        => ImportZipAsync(zip, actor, preserveExisting, fastUnsafeNoFkCheck, fastParallelism: 1, ct);
+        => ImportZipAsync(zip, actor, preserveExisting, fastUnsafeNoFkCheck, fastParallelism: 1, ct: ct);
 
     /// <summary>
     /// Import a dmart zip into the database.
@@ -437,7 +447,7 @@ public sealed class ImportExportService(
     /// is false — would have no effect since the slow path has no scoped
     /// session to share. Clamped to <c>[1, 16]</c> defensively.
     /// </param>
-    public async Task<Response> ImportZipAsync(Stream zip, string? actor, bool preserveExisting, bool fastUnsafeNoFkCheck, int fastParallelism, CancellationToken ct = default)
+    public async Task<Response> ImportZipAsync(Stream zip, string? actor, bool preserveExisting, bool fastUnsafeNoFkCheck, int fastParallelism, int batchSize = DefaultBatchSize, CancellationToken ct = default)
     {
         // `actor` is accepted for API stability but no longer threaded through —
         // every imported record's owner comes from its meta's owner_shortname,
@@ -450,17 +460,17 @@ public sealed class ImportExportService(
             .Select(ImportEntryRef.FromZip)
             .ToList();
         return await ImportFromEntriesAsync(entries, ImportSourceKind.Zip,
-            preserveExisting, fastUnsafeNoFkCheck, fastParallelism, ct);
+            preserveExisting, fastUnsafeNoFkCheck, fastParallelism, batchSize, ct);
     }
 
     public Task<Response> ImportFolderAsync(string folderPath, string? actor, CancellationToken ct = default)
-        => ImportFolderAsync(folderPath, actor, preserveExisting: false, fastUnsafeNoFkCheck: false, fastParallelism: 1, ct);
+        => ImportFolderAsync(folderPath, actor, preserveExisting: false, fastUnsafeNoFkCheck: false, fastParallelism: 1, ct: ct);
 
     public Task<Response> ImportFolderAsync(string folderPath, string? actor, bool preserveExisting, CancellationToken ct = default)
-        => ImportFolderAsync(folderPath, actor, preserveExisting, fastUnsafeNoFkCheck: false, fastParallelism: 1, ct);
+        => ImportFolderAsync(folderPath, actor, preserveExisting, fastUnsafeNoFkCheck: false, fastParallelism: 1, ct: ct);
 
     public Task<Response> ImportFolderAsync(string folderPath, string? actor, bool preserveExisting, bool fastUnsafeNoFkCheck, CancellationToken ct = default)
-        => ImportFolderAsync(folderPath, actor, preserveExisting, fastUnsafeNoFkCheck, fastParallelism: 1, ct);
+        => ImportFolderAsync(folderPath, actor, preserveExisting, fastUnsafeNoFkCheck, fastParallelism: 1, ct: ct);
 
     /// <summary>
     /// Import a folder laid out like the inside of a dmart export zip
@@ -469,7 +479,7 @@ public sealed class ImportExportService(
     /// <see cref="ImportZipAsync"/>; the only difference is that file
     /// bytes are read directly from disk instead of from a zip archive.
     /// </summary>
-    public async Task<Response> ImportFolderAsync(string folderPath, string? actor, bool preserveExisting, bool fastUnsafeNoFkCheck, int fastParallelism, CancellationToken ct = default)
+    public async Task<Response> ImportFolderAsync(string folderPath, string? actor, bool preserveExisting, bool fastUnsafeNoFkCheck, int fastParallelism, int batchSize = DefaultBatchSize, CancellationToken ct = default)
     {
         _ = actor;
         if (!Directory.Exists(folderPath))
@@ -522,7 +532,7 @@ public sealed class ImportExportService(
             entries.Add(ImportEntryRef.FromFile(rel, abs));
         }
         return await ImportFromEntriesAsync(entries, ImportSourceKind.Filesystem,
-            preserveExisting, fastUnsafeNoFkCheck, fastParallelism, ct);
+            preserveExisting, fastUnsafeNoFkCheck, fastParallelism, batchSize, ct);
     }
 
     // Same pipeline that drives ImportZipAsync, but source-agnostic so the
@@ -538,8 +548,15 @@ public sealed class ImportExportService(
     // below assumes every entry is a file with a non-empty path.
     private async Task<Response> ImportFromEntriesAsync(
         IReadOnlyList<ImportEntryRef> entries, ImportSourceKind sourceKind,
-        bool preserveExisting, bool fastUnsafeNoFkCheck, int fastParallelism, CancellationToken ct)
+        bool preserveExisting, bool fastUnsafeNoFkCheck, int fastParallelism,
+        int batchSize, CancellationToken ct)
     {
+        // Clamp batch size — operators tune via --batch-size for their data
+        // shape (smaller for fat payloads, larger for tiny ones). The hard
+        // floor of 1 guarantees the batched loop always makes progress, and
+        // the ceiling of 1M is a sanity cap (above that, peak working-set
+        // approaches the pre-batching world even with --fast).
+        batchSize = Math.Clamp(batchSize, 1, 1_000_000);
         // Layout validation — hard-fail on the legacy flat C# layout. Every
         // entry must live under `{space}/…` where `{space}` has no leading
         // slash and no `.dm` segment at position 0.
@@ -648,7 +665,7 @@ public sealed class ImportExportService(
                     spaceGroups,
                     new ParallelOptions { MaxDegreeOfParallelism = workers, CancellationToken = ct },
                     async (group, ictx) =>
-                        await ImportSpaceTailAsync(group.ToList(), preserveExisting, results, ictx));
+                        await ImportSpaceTailAsync(group.ToList(), preserveExisting, results, batchSize, ictx));
             }
             finally
             {
@@ -669,7 +686,7 @@ public sealed class ImportExportService(
                 (tailConn, tailScope) = await db.BeginFastImportSessionAsync(ct);
             try
             {
-                await RunTailPassesAsync(tailConn, tailEntries, preserveExisting, results, ct);
+                await RunTailPassesAsync(tailConn, tailEntries, preserveExisting, results, batchSize, ct);
                 tailScope?.MarkSuccess();
             }
             finally
@@ -761,12 +778,13 @@ public sealed class ImportExportService(
         List<ImportEntryRef> spaceEntries,
         bool preserveExisting,
         ImportStats results,
+        int batchSize,
         CancellationToken ct)
     {
         var (conn, scope) = await db.BeginFastImportSessionAsync(ct);
         try
         {
-            await RunTailPassesAsync(conn, spaceEntries, preserveExisting, results, ct);
+            await RunTailPassesAsync(conn, spaceEntries, preserveExisting, results, batchSize, ct);
             scope.MarkSuccess();
         }
         finally
@@ -789,6 +807,7 @@ public sealed class ImportExportService(
         IReadOnlyList<ImportEntryRef> zes,
         bool preserveExisting,
         ImportStats results,
+        int batchSize,
         CancellationToken ct)
     {
         // ---- Pass 3: Entries (including folders) ----
@@ -799,9 +818,23 @@ public sealed class ImportExportService(
 
         // Bulk COPY mode kicks in when we have a fast-import connection in
         // hand. Without one (slow path) the per-row Upsert path is used.
-        var bulkEntries = conn is not null ? new List<Entry>() : null;
+        //
+        // The bulkEntries accumulator is flushed every `batchSize` rows
+        // rather than once at the end — without this, a single space with
+        // millions of entries holds every parsed Entry (with inlined JSON
+        // payload bodies) in RAM until the loop completes. At ~10 KB avg
+        // payload and 10k batch size, peak per-batch is ~100 MB; the full
+        // import is bounded regardless of total entry count.
+        var bulkEntries = conn is not null ? new List<Entry>(batchSize) : null;
         foreach (var ze in zes.Where(IsEntryMeta))
+        {
             await TryImportEntryAsync(ze, bodyLookup, results, preserveExisting, conn, bulkEntries, ct);
+            if (bulkEntries is { Count: > 0 } && bulkEntries.Count >= batchSize)
+            {
+                await BulkInsertEntriesAsync(conn!, bulkEntries, preserveExisting, results, ct);
+                bulkEntries.Clear();
+            }
+        }
         if (bulkEntries is { Count: > 0 })
             await BulkInsertEntriesAsync(conn!, bulkEntries, preserveExisting, results, ct);
 
@@ -811,9 +844,16 @@ public sealed class ImportExportService(
             if (ze.FullName.Contains("/attachments.", StringComparison.Ordinal) && !ze.Name.StartsWith("meta.", StringComparison.Ordinal))
                 attachmentBodies[ze.FullName] = ze;
 
-        var bulkAttachments = conn is not null ? new List<Attachment>() : null;
+        var bulkAttachments = conn is not null ? new List<Attachment>(batchSize) : null;
         foreach (var ze in zes.Where(IsAttachmentMeta))
+        {
             await TryImportAttachmentAsync(ze, attachmentBodies, results, preserveExisting, conn, bulkAttachments, ct);
+            if (bulkAttachments is { Count: > 0 } && bulkAttachments.Count >= batchSize)
+            {
+                await BulkInsertAttachmentsAsync(conn!, bulkAttachments, preserveExisting, results, ct);
+                bulkAttachments.Clear();
+            }
+        }
         if (bulkAttachments is { Count: > 0 })
             await BulkInsertAttachmentsAsync(conn!, bulkAttachments, preserveExisting, results, ct);
 
