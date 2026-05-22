@@ -445,29 +445,93 @@ public sealed class ImportExportService(
         // (which is guaranteed to exist via AdminBootstrap).
         _ = actor;
         using var archive = new ZipArchive(zip, ZipArchiveMode.Read);
+        var entries = archive.Entries
+            .Where(z => !string.IsNullOrEmpty(z.FullName) && !z.FullName.EndsWith("/"))
+            .Select(ImportEntryRef.FromZip)
+            .ToList();
+        return await ImportFromEntriesAsync(entries, sourceKind: "zip entry",
+            preserveExisting, fastUnsafeNoFkCheck, fastParallelism, ct);
+    }
 
-        // Layout validation — hard-fail on the legacy flat C# layout. Every
-        // non-empty entry must live under `{space}/…` where `{space}` has no
-        // leading slash and no `.dm` segment at position 0. Directories with
-        // a dot extension (like `.DS_Store`) get ignored.
-        foreach (var ze in archive.Entries)
+    public Task<Response> ImportFolderAsync(string folderPath, string? actor, CancellationToken ct = default)
+        => ImportFolderAsync(folderPath, actor, preserveExisting: false, fastUnsafeNoFkCheck: false, fastParallelism: 1, ct);
+
+    public Task<Response> ImportFolderAsync(string folderPath, string? actor, bool preserveExisting, CancellationToken ct = default)
+        => ImportFolderAsync(folderPath, actor, preserveExisting, fastUnsafeNoFkCheck: false, fastParallelism: 1, ct);
+
+    public Task<Response> ImportFolderAsync(string folderPath, string? actor, bool preserveExisting, bool fastUnsafeNoFkCheck, CancellationToken ct = default)
+        => ImportFolderAsync(folderPath, actor, preserveExisting, fastUnsafeNoFkCheck, fastParallelism: 1, ct);
+
+    /// <summary>
+    /// Import a folder laid out like the inside of a dmart export zip
+    /// (one or more <c>{space}/</c> directories at the top level). All
+    /// semantics — preserveExisting, --fast, parallelism — match
+    /// <see cref="ImportZipAsync"/>; the only difference is that file
+    /// bytes are read directly from disk instead of from a zip archive.
+    /// </summary>
+    public async Task<Response> ImportFolderAsync(string folderPath, string? actor, bool preserveExisting, bool fastUnsafeNoFkCheck, int fastParallelism, CancellationToken ct = default)
+    {
+        _ = actor;
+        if (!Directory.Exists(folderPath))
+            return Response.Fail(InternalErrorCode.INVALID_DATA,
+                $"import folder '{folderPath}' does not exist or is not a directory",
+                ErrorTypes.Request);
+
+        // Sanity check the layout: at least one immediate subdirectory
+        // must look like a dmart space (carry .dm/meta.space.json). Cheap
+        // to compute, catches typos that point the import at the wrong
+        // directory before we burn a fast-import session on nothing.
+        var hasSpace = Directory.EnumerateDirectories(folderPath)
+            .Any(d => File.Exists(Path.Combine(d, ".dm", "meta.space.json")));
+        if (!hasSpace)
+            return Response.Fail(InternalErrorCode.INVALID_DATA,
+                $"target folder '{folderPath}' does not look like a dmart space dump "
+                + "(no */.dm/meta.space.json found)",
+                ErrorTypes.Request);
+
+        // Skip OS junk only. Hidden dotfiles in general are NOT excluded —
+        // `.dm/` directories are load-bearing in the dmart layout.
+        static bool IsJunk(string name) => name is ".DS_Store" or "Thumbs.db";
+
+        var entries = new List<ImportEntryRef>();
+        foreach (var abs in Directory.EnumerateFiles(folderPath, "*", SearchOption.AllDirectories))
         {
-            if (string.IsNullOrEmpty(ze.FullName) || ze.FullName.EndsWith("/")) continue;
+            if (IsJunk(Path.GetFileName(abs))) continue;
+            var rel = Path.GetRelativePath(folderPath, abs).Replace(Path.DirectorySeparatorChar, '/');
+            entries.Add(ImportEntryRef.FromFile(rel, abs));
+        }
+        return await ImportFromEntriesAsync(entries, sourceKind: "file",
+            preserveExisting, fastUnsafeNoFkCheck, fastParallelism, ct);
+    }
+
+    // Same pipeline that drives ImportZipAsync, but source-agnostic so the
+    // folder importer (ImportFolderAsync) can share it. `sourceKind` is the
+    // noun used in error messages — "zip entry" or "file" — so the operator
+    // sees the wording they expect for whichever source they invoked.
+    private async Task<Response> ImportFromEntriesAsync(
+        IReadOnlyList<ImportEntryRef> entries, string sourceKind,
+        bool preserveExisting, bool fastUnsafeNoFkCheck, int fastParallelism, CancellationToken ct)
+    {
+        // Layout validation — hard-fail on the legacy flat C# layout. Every
+        // entry must live under `{space}/…` where `{space}` has no leading
+        // slash and no `.dm` segment at position 0.
+        foreach (var ze in entries)
+        {
             var first = ze.FullName.IndexOf('/');
             if (first <= 0 || ze.FullName.StartsWith(".dm/", StringComparison.Ordinal))
                 return Response.Fail(InternalErrorCode.INVALID_DATA,
-                    $"zip entry '{ze.FullName}' is not under a top-level space directory — "
+                    $"{sourceKind} '{ze.FullName}' is not under a top-level space directory — "
                     + "legacy flat layout is not supported, re-export with the current release",
                     ErrorTypes.Request);
         }
 
-        // Group entries by their space root (first path segment) and
-        // classify each by role: space meta / user / role / permission /
-        // entry meta / attachment meta / attachment body / history / body file.
+        // Pre-build a global path → entry dict so the head passes (users)
+        // and InlinePayloadBodyAsync can resolve sibling body files without
+        // depending on a ZipArchive.GetEntry lookup. Same dict shape works
+        // for both zip and folder sources.
+        var allByPath = entries.ToDictionary(e => e.FullName, e => e, StringComparer.Ordinal);
+
         var results = new ImportStats();
-        var zes = archive.Entries
-            .Where(z => !string.IsNullOrEmpty(z.FullName) && !z.FullName.EndsWith("/"))
-            .ToList();
 
         // Clamp parallelism defensively. <=1 means serial (today's behaviour).
         // >16 is rejected as nonsense for a CLI import — the Npgsql default
@@ -486,13 +550,13 @@ public sealed class ImportExportService(
             (headConn, headScope) = await db.BeginFastImportSessionAsync(ct);
         try
         {
-            foreach (var ze in zes.Where(IsUserMeta))
-                await TryImportUserAsync(ze, results, preserveExisting, headConn, ct);
-            foreach (var ze in zes.Where(z => z.FullName.EndsWith("/.dm/meta.space.json", StringComparison.Ordinal)))
+            foreach (var ze in entries.Where(IsUserMeta))
+                await TryImportUserAsync(ze, allByPath, results, preserveExisting, headConn, ct);
+            foreach (var ze in entries.Where(z => z.FullName.EndsWith("/.dm/meta.space.json", StringComparison.Ordinal)))
                 await TryImportSpaceAsync(ze, results, preserveExisting, headConn, ct);
-            foreach (var ze in zes.Where(IsRoleMeta))
+            foreach (var ze in entries.Where(IsRoleMeta))
                 await TryImportRoleAsync(ze, results, preserveExisting, headConn, ct);
-            foreach (var ze in zes.Where(IsPermissionMeta))
+            foreach (var ze in entries.Where(IsPermissionMeta))
                 await TryImportPermissionAsync(ze, results, preserveExisting, headConn, ct);
             headScope?.MarkSuccess();
         }
@@ -507,8 +571,8 @@ public sealed class ImportExportService(
         // session_replication_role='replica' sessions) AND fastParallelism>1
         // AND more than one space worth of work (no point spinning up
         // workers for a single space — same elapsed time, more code paths).
-        var tailZes = zes.Where(IsTailZipEntry).ToList();
-        var spaceGroups = tailZes
+        var tailEntries = entries.Where(IsTailEntry).ToList();
+        var spaceGroups = tailEntries
             .GroupBy(GetSpaceName, StringComparer.Ordinal)
             .Where(g => !string.IsNullOrEmpty(g.Key))
             .ToList();
@@ -520,9 +584,11 @@ public sealed class ImportExportService(
             // ("local file header is corrupt" otherwise). Pre-read every tail
             // entry's bytes once on the main thread, hand workers MemoryStream
             // views over the cached buffers via OpenEntry. Memory cost is
-            // O(zip body bytes) — acceptable for a CLI bulk-load tool.
-            var prefetched = new Dictionary<string, byte[]>(tailZes.Count, StringComparer.Ordinal);
-            foreach (var ze in tailZes)
+            // O(source body bytes) — acceptable for a CLI bulk-load tool.
+            // For folder sources File.OpenRead is thread-safe, but prefetching
+            // still works fine (and keeps OpenEntry uniform).
+            var prefetched = new Dictionary<string, byte[]>(tailEntries.Count, StringComparer.Ordinal);
+            foreach (var ze in tailEntries)
             {
                 await using var s = ze.Open();
                 using var mem = new MemoryStream();
@@ -564,7 +630,7 @@ public sealed class ImportExportService(
                 (tailConn, tailScope) = await db.BeginFastImportSessionAsync(ct);
             try
             {
-                await RunTailPassesAsync(tailConn, tailZes, preserveExisting, results, ct);
+                await RunTailPassesAsync(tailConn, tailEntries, preserveExisting, results, ct);
                 tailScope?.MarkSuccess();
             }
             finally
@@ -601,14 +667,14 @@ public sealed class ImportExportService(
 
     // ---- layout classifiers ----
 
-    private static bool IsUserMeta(ZipArchiveEntry ze)       => MatchDotDmMeta(ze, "users", "user");
-    private static bool IsRoleMeta(ZipArchiveEntry ze)       => MatchDotDmMeta(ze, "roles", "role");
-    private static bool IsPermissionMeta(ZipArchiveEntry ze) => MatchDotDmMeta(ze, "permissions", "permission");
-    private static bool MatchDotDmMeta(ZipArchiveEntry ze, string parent, string metaType)
+    private static bool IsUserMeta(ImportEntryRef ze)       => MatchDotDmMeta(ze, "users", "user");
+    private static bool IsRoleMeta(ImportEntryRef ze)       => MatchDotDmMeta(ze, "roles", "role");
+    private static bool IsPermissionMeta(ImportEntryRef ze) => MatchDotDmMeta(ze, "permissions", "permission");
+    private static bool MatchDotDmMeta(ImportEntryRef ze, string parent, string metaType)
         => ze.FullName.Contains($"/{parent}/.dm/", StringComparison.Ordinal)
            && ze.Name == $"meta.{metaType}.json";
 
-    private static bool IsEntryMeta(ZipArchiveEntry ze)
+    private static bool IsEntryMeta(ImportEntryRef ze)
     {
         if (!ze.FullName.Contains("/.dm/", StringComparison.Ordinal)) return false;
         if (!ze.Name.StartsWith("meta.", StringComparison.Ordinal)) return false;
@@ -620,28 +686,28 @@ public sealed class ImportExportService(
         return true;
     }
 
-    private static bool IsAttachmentMeta(ZipArchiveEntry ze)
+    private static bool IsAttachmentMeta(ImportEntryRef ze)
         => ze.FullName.Contains("/attachments.", StringComparison.Ordinal)
            && ze.Name.StartsWith("meta.", StringComparison.Ordinal)
            && ze.Name.EndsWith(".json", StringComparison.Ordinal);
 
-    // True for zip entries that belong to the tail passes (Pass 3 entries,
+    // True for entries that belong to the tail passes (Pass 3 entries,
     // Pass 4 attachments, Pass 5 histories) — i.e. everything that is NOT a
     // Pass-1 user meta or a Pass-2 space/role/permission meta. Body files
     // and attachment body files count as tail because the tail passes
     // re-inline them.
-    private static bool IsTailZipEntry(ZipArchiveEntry ze)
+    private static bool IsTailEntry(ImportEntryRef ze)
         => !IsUserMeta(ze)
            && !ze.FullName.EndsWith("/.dm/meta.space.json", StringComparison.Ordinal)
            && !IsRoleMeta(ze)
            && !IsPermissionMeta(ze);
 
-    // Extracts the space-root segment (the first path segment) from a zip
+    // Extracts the space-root segment (the first path segment) from an
     // entry path. The import already hard-fails the layout check above on
     // any entry that doesn't sit under a `{space}/...` root, so this is
     // total — but defend against an empty string just in case the upstream
     // filter changes.
-    private static string GetSpaceName(ZipArchiveEntry ze)
+    private static string GetSpaceName(ImportEntryRef ze)
     {
         var first = ze.FullName.IndexOf('/');
         return first <= 0 ? "" : ze.FullName[..first];
@@ -653,7 +719,7 @@ public sealed class ImportExportService(
     // this worker's transaction rolls back — sibling workers committing in
     // parallel are unaffected.
     private async Task ImportSpaceTailAsync(
-        List<ZipArchiveEntry> spaceEntries,
+        List<ImportEntryRef> spaceEntries,
         bool preserveExisting,
         ImportStats results,
         CancellationToken ct)
@@ -671,7 +737,7 @@ public sealed class ImportExportService(
     }
 
     // Runs Pass 3 (entries), Pass 4 (attachments), Pass 5 (histories) for a
-    // given zip-entry slice on a given connection. The connection is
+    // given entry slice on a given connection. The connection is
     // optional: when null we're on the slow (non-fast) path and the repos
     // each open their own connection per call. When non-null we're inside a
     // fast scope (single-session, replica mode) and bulk COPY kicks in.
@@ -681,13 +747,13 @@ public sealed class ImportExportService(
     // tail entries on its own session).
     private async Task RunTailPassesAsync(
         NpgsqlConnection? conn,
-        IReadOnlyList<ZipArchiveEntry> zes,
+        IReadOnlyList<ImportEntryRef> zes,
         bool preserveExisting,
         ImportStats results,
         CancellationToken ct)
     {
         // ---- Pass 3: Entries (including folders) ----
-        var bodyLookup = new Dictionary<string, ZipArchiveEntry>(StringComparer.Ordinal);
+        var bodyLookup = new Dictionary<string, ImportEntryRef>(StringComparer.Ordinal);
         foreach (var ze in zes)
             if (!ze.FullName.Contains("/.dm/", StringComparison.Ordinal))
                 bodyLookup[ze.FullName] = ze;
@@ -701,7 +767,7 @@ public sealed class ImportExportService(
             await BulkInsertEntriesAsync(conn!, bulkEntries, preserveExisting, results, ct);
 
         // ---- Pass 4: Attachments ----
-        var attachmentBodies = new Dictionary<string, ZipArchiveEntry>(StringComparer.Ordinal);
+        var attachmentBodies = new Dictionary<string, ImportEntryRef>(StringComparer.Ordinal);
         foreach (var ze in zes)
             if (ze.FullName.Contains("/attachments.", StringComparison.Ordinal) && !ze.Name.StartsWith("meta.", StringComparison.Ordinal))
                 attachmentBodies[ze.FullName] = ze;
@@ -730,7 +796,7 @@ public sealed class ImportExportService(
             node["owner_shortname"] = "dmart";
     }
 
-    private async Task TryImportSpaceAsync(ZipArchiveEntry ze, ImportStats st, bool preserveExisting, NpgsqlConnection? conn, CancellationToken ct)
+    private async Task TryImportSpaceAsync(ImportEntryRef ze, ImportStats st, bool preserveExisting, NpgsqlConnection? conn, CancellationToken ct)
     {
         try
         {
@@ -758,7 +824,7 @@ public sealed class ImportExportService(
         }
     }
 
-    private async Task TryImportUserAsync(ZipArchiveEntry ze, ImportStats st, bool preserveExisting, NpgsqlConnection? conn, CancellationToken ct)
+    private async Task TryImportUserAsync(ImportEntryRef ze, IReadOnlyDictionary<string, ImportEntryRef> allByPath, ImportStats st, bool preserveExisting, NpgsqlConnection? conn, CancellationToken ct)
     {
         try
         {
@@ -767,7 +833,7 @@ public sealed class ImportExportService(
             node["space_name"] = spaceName;
             node["subpath"] = "/users";
             EnsureOwner(node);
-            await InlinePayloadBodyAsync(ze, node, $"{spaceName}/users", ct);
+            await InlinePayloadBodyAsync(node, $"{spaceName}/users", allByPath, ct);
             var user = node.Deserialize(DmartJsonContext.Default.User);
             if (user is null) { st.AddFailure(new() { ["path"] = ze.FullName, ["error"] = "empty user meta" }); return; }
             if (preserveExisting && await (conn is null ? users.GetByShortnameAsync(user.Shortname, ct) : users.GetByShortnameAsync(user.Shortname, conn, ct)) is not null)
@@ -786,7 +852,7 @@ public sealed class ImportExportService(
         }
     }
 
-    private async Task TryImportRoleAsync(ZipArchiveEntry ze, ImportStats st, bool preserveExisting, NpgsqlConnection? conn, CancellationToken ct)
+    private async Task TryImportRoleAsync(ImportEntryRef ze, ImportStats st, bool preserveExisting, NpgsqlConnection? conn, CancellationToken ct)
     {
         try
         {
@@ -813,7 +879,7 @@ public sealed class ImportExportService(
         }
     }
 
-    private async Task TryImportPermissionAsync(ZipArchiveEntry ze, ImportStats st, bool preserveExisting, NpgsqlConnection? conn, CancellationToken ct)
+    private async Task TryImportPermissionAsync(ImportEntryRef ze, ImportStats st, bool preserveExisting, NpgsqlConnection? conn, CancellationToken ct)
     {
         try
         {
@@ -893,7 +959,7 @@ public sealed class ImportExportService(
     }
 
     private async Task TryImportEntryAsync(
-        ZipArchiveEntry ze, Dictionary<string, ZipArchiveEntry> bodyLookup,
+        ImportEntryRef ze, Dictionary<string, ImportEntryRef> bodyLookup,
         ImportStats st, bool preserveExisting, NpgsqlConnection? conn,
         List<Entry>? bulkCollect, CancellationToken ct)
     {
@@ -969,7 +1035,7 @@ public sealed class ImportExportService(
     }
 
     private async Task TryImportAttachmentAsync(
-        ZipArchiveEntry ze, Dictionary<string, ZipArchiveEntry> bodies,
+        ImportEntryRef ze, Dictionary<string, ImportEntryRef> bodies,
         ImportStats st, bool preserveExisting, NpgsqlConnection? conn,
         List<Attachment>? bulkCollect, CancellationToken ct)
     {
@@ -1061,7 +1127,7 @@ public sealed class ImportExportService(
         }
     }
 
-    private async Task TryImportHistoryAsync(ZipArchiveEntry ze, ImportStats st, NpgsqlConnection? conn, CancellationToken ct)
+    private async Task TryImportHistoryAsync(ImportEntryRef ze, ImportStats st, NpgsqlConnection? conn, CancellationToken ct)
     {
         try
         {
@@ -1465,7 +1531,7 @@ public sealed class ImportExportService(
     // Re-inline the externalized payload.body from a sibling body file.
     // Mutates `metaNode` in place.
     private static void InlinePayloadBody(
-        JsonObject metaNode, string baseDir, Dictionary<string, ZipArchiveEntry> bodies)
+        JsonObject metaNode, string baseDir, Dictionary<string, ImportEntryRef> bodies)
     {
         if (metaNode["payload"] is not JsonObject payload) return;
         if (payload["body"] is not JsonValue bodyVal) return;
@@ -1489,8 +1555,14 @@ public sealed class ImportExportService(
         }
     }
 
+    // Async variant used by the user/role/permission passes which need to
+    // resolve a body file by path before the per-pass body lookup dicts
+    // (built per-space in RunTailPassesAsync) exist. Takes a global
+    // path → entry dict built once at the top of ImportFromEntriesAsync so
+    // both the zip and folder sources can resolve siblings the same way.
     private static async Task InlinePayloadBodyAsync(
-        ZipArchiveEntry metaZe, JsonObject metaNode, string baseDir, CancellationToken ct)
+        JsonObject metaNode, string baseDir,
+        IReadOnlyDictionary<string, ImportEntryRef> allByPath, CancellationToken ct)
     {
         if (metaNode["payload"] is not JsonObject payload) return;
         if (payload["body"] is not JsonValue bodyVal) return;
@@ -1498,10 +1570,8 @@ public sealed class ImportExportService(
         var contentType = (payload["content_type"]?.GetValue<string>() ?? "").ToLowerInvariant();
         if (!InlinableContentTypes.Contains(contentType)) return;
         var bodyPath = $"{baseDir}/{filename}".Replace("//", "/");
-        var archive = metaZe.Archive!;
-        var bodyZe = archive.GetEntry(bodyPath);
-        if (bodyZe is null) return;
-        await using var s = OpenEntry(bodyZe);
+        if (!allByPath.TryGetValue(bodyPath, out var bodyRef)) return;
+        await using var s = OpenEntry(bodyRef);
         using var sr = new StreamReader(s);
         var raw = await sr.ReadToEndAsync(ct);
         if (string.Equals(contentType, "json", StringComparison.OrdinalIgnoreCase))
@@ -1539,12 +1609,14 @@ public sealed class ImportExportService(
     // OpenEntry; serial paths leave it null and read from the archive directly.
     private static readonly AsyncLocal<IReadOnlyDictionary<string, byte[]>?> _prefetchedBodies = new();
 
-    // Returns a Stream over the entry's bytes. In serial mode this is just
-    // ZipArchiveEntry.Open(). In parallel mode the bytes were pre-read in
-    // the main thread and we hand out a fresh non-writable MemoryStream
-    // per call — each MemoryStream has its own position so concurrent
-    // readers don't race on the underlying buffer.
-    private static Stream OpenEntry(ZipArchiveEntry ze)
+    // Returns a Stream over the entry's bytes. In serial mode (or folder
+    // source mode) this is just the underlying Open(). In zip parallel
+    // mode the bytes were pre-read in the main thread and we hand out a
+    // fresh non-writable MemoryStream per call — each MemoryStream has its
+    // own position so concurrent readers don't race on the underlying
+    // buffer. Folder source never populates the prefetch cache (File.OpenRead
+    // is thread-safe), so the cache check is a cheap no-op there.
+    private static Stream OpenEntry(ImportEntryRef ze)
     {
         var prefetched = _prefetchedBodies.Value;
         if (prefetched is not null && prefetched.TryGetValue(ze.FullName, out var bytes))
@@ -1552,7 +1624,7 @@ public sealed class ImportExportService(
         return ze.Open();
     }
 
-    private static async Task<JsonObject> ReadJsonObjectAsync(ZipArchiveEntry ze, CancellationToken ct)
+    private static async Task<JsonObject> ReadJsonObjectAsync(ImportEntryRef ze, CancellationToken ct)
     {
         await using var s = OpenEntry(ze);
         var node = await JsonNode.ParseAsync(s, cancellationToken: ct);
