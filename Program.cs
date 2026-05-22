@@ -425,6 +425,16 @@ switch (subcommand)
 
     case "import":
     {
+        // Local helper: write the error to stderr, set the process exit
+        // code to 1, and return — callers do `Bail("..."); return;` to
+        // collapse the four-line "WriteLine + ExitCode + return" pattern
+        // into two lines per error site.
+        static void Bail(string msg)
+        {
+            Console.Error.WriteLine(msg);
+            Environment.ExitCode = 1;
+        }
+
         var targetPath = serverArgs.FirstOrDefault(a => !a.StartsWith('-'));
         // -r / --replace flips the default patch behavior: existing rows
         // get their non-key columns rewritten from the source's meta. Without
@@ -448,14 +458,12 @@ switch (subcommand)
         {
             if (!int.TryParse(parallelArg["--fast-parallelism=".Length..], out parallelism) || parallelism < 1 || parallelism > 16)
             {
-                Console.Error.WriteLine("--fast-parallelism must be an integer in [1, 16]");
-                Environment.ExitCode = 1;
+                Bail("--fast-parallelism must be an integer in [1, 16]");
                 return;
             }
             if (!fast)
             {
-                Console.Error.WriteLine("--fast-parallelism requires --fast (it has no effect on the slow path)");
-                Environment.ExitCode = 1;
+                Bail("--fast-parallelism requires --fast (it has no effect on the slow path)");
                 return;
             }
         }
@@ -474,15 +482,13 @@ switch (subcommand)
             explicitType = typeArg["--type=".Length..];
             if (explicitType is not "zip" and not "fs")
             {
-                Console.Error.WriteLine("--type must be 'zip' or 'fs'");
-                Environment.ExitCode = 1;
+                Bail("--type must be 'zip' or 'fs'");
                 return;
             }
         }
         if (string.IsNullOrEmpty(targetPath))
         {
-            Console.Error.WriteLine("Usage: dmart import [-r|--replace] [--fast] [--fast-parallelism=N] [--type=zip|fs] <path>");
-            Environment.ExitCode = 1;
+            Bail("Usage: dmart import [-r|--replace] [--fast] [--fast-parallelism=N] [--type=zip|fs] <path>");
             return;
         }
 
@@ -490,8 +496,7 @@ switch (subcommand)
         var targetIsDir = Directory.Exists(targetPath);
         if (!targetIsFile && !targetIsDir)
         {
-            Console.Error.WriteLine($"Path not found: {targetPath}");
-            Environment.ExitCode = 1;
+            Bail($"Path not found: {targetPath}");
             return;
         }
         var detectedType = targetIsDir ? "fs" : "zip";
@@ -505,8 +510,7 @@ switch (subcommand)
                 var line = Console.ReadLine();
                 if (!string.Equals(line?.Trim(), "y", StringComparison.OrdinalIgnoreCase))
                 {
-                    Console.Error.WriteLine("Aborted.");
-                    Environment.ExitCode = 1;
+                    Bail("Aborted.");
                     return;
                 }
             }
@@ -521,14 +525,12 @@ switch (subcommand)
         // throw a raw IO exception further down.
         if (effectiveType == "zip" && !targetIsFile)
         {
-            Console.Error.WriteLine($"Error: --type=zip requires a regular file, but '{targetPath}' is not a regular file.");
-            Environment.ExitCode = 1;
+            Bail($"Error: --type=zip requires a regular file, but '{targetPath}' is not a regular file.");
             return;
         }
         if (effectiveType == "fs" && !targetIsDir)
         {
-            Console.Error.WriteLine($"Error: --type=fs requires a directory, but '{targetPath}' is not a directory.");
-            Environment.ExitCode = 1;
+            Bail($"Error: --type=fs requires a directory, but '{targetPath}' is not a directory.");
             return;
         }
 

@@ -449,7 +449,7 @@ public sealed class ImportExportService(
             .Where(z => !string.IsNullOrEmpty(z.FullName) && !z.FullName.EndsWith("/"))
             .Select(ImportEntryRef.FromZip)
             .ToList();
-        return await ImportFromEntriesAsync(entries, sourceKind: "zip entry",
+        return await ImportFromEntriesAsync(entries, ImportSourceKind.Zip,
             preserveExisting, fastUnsafeNoFkCheck, fastParallelism, ct);
     }
 
@@ -489,47 +489,82 @@ public sealed class ImportExportService(
                 + "(no */.dm/meta.space.json found)",
                 ErrorTypes.Request);
 
-        // Skip OS junk only. Hidden dotfiles in general are NOT excluded —
-        // `.dm/` directories are load-bearing in the dmart layout.
-        static bool IsJunk(string name) => name is ".DS_Store" or "Thumbs.db";
+        // Skip dot-prefixed segments (e.g. `.git/`, `.DS_Store`, vim swap
+        // `.foo.swp`, editor backup state) EXCEPT `.dm/` which is
+        // load-bearing in the dmart layout. The check runs on every path
+        // segment so a file like `space/.git/HEAD` is rejected even though
+        // its filename doesn't itself start with a dot.
+        static bool ShouldSkip(string relPath)
+        {
+            foreach (var seg in relPath.Split('/'))
+                if (seg.Length > 0 && seg[0] == '.' && seg != ".dm")
+                    return true;
+            return false;
+        }
+
+        // EnumerationOptions.AttributesToSkip = ReparsePoint guards against
+        // symlinks pointing outside the import folder (e.g. /etc/passwd).
+        // Operator-trusted CLI usage rarely needs symlink traversal, and
+        // the cost of skipping is "the operator can't symlink their dump"
+        // — acceptable in exchange for the safety property.
+        var enumOpts = new EnumerationOptions
+        {
+            RecurseSubdirectories = true,
+            AttributesToSkip = FileAttributes.ReparsePoint,
+            IgnoreInaccessible = true,
+        };
 
         var entries = new List<ImportEntryRef>();
-        foreach (var abs in Directory.EnumerateFiles(folderPath, "*", SearchOption.AllDirectories))
+        foreach (var abs in Directory.EnumerateFiles(folderPath, "*", enumOpts))
         {
-            if (IsJunk(Path.GetFileName(abs))) continue;
             var rel = Path.GetRelativePath(folderPath, abs).Replace(Path.DirectorySeparatorChar, '/');
+            if (ShouldSkip(rel)) continue;
             entries.Add(ImportEntryRef.FromFile(rel, abs));
         }
-        return await ImportFromEntriesAsync(entries, sourceKind: "file",
+        return await ImportFromEntriesAsync(entries, ImportSourceKind.Filesystem,
             preserveExisting, fastUnsafeNoFkCheck, fastParallelism, ct);
     }
 
     // Same pipeline that drives ImportZipAsync, but source-agnostic so the
-    // folder importer (ImportFolderAsync) can share it. `sourceKind` is the
-    // noun used in error messages — "zip entry" or "file" — so the operator
-    // sees the wording they expect for whichever source they invoked.
+    // folder importer (ImportFolderAsync) can share it. `sourceKind` drives
+    // (a) the noun used in error messages and (b) whether the parallel-tail
+    // prefetch step runs — only zip needs it (ZipArchive isn't thread-safe);
+    // filesystem sources skip the prefetch to avoid an O(body bytes)
+    // memory spike on large imports.
+    //
+    // Precondition: callers must filter out directory entries (those ending
+    // in `/` for zip; conceptually irrelevant for filesystem since
+    // EnumerateFiles already returns only files). The layout validator
+    // below assumes every entry is a file with a non-empty path.
     private async Task<Response> ImportFromEntriesAsync(
-        IReadOnlyList<ImportEntryRef> entries, string sourceKind,
+        IReadOnlyList<ImportEntryRef> entries, ImportSourceKind sourceKind,
         bool preserveExisting, bool fastUnsafeNoFkCheck, int fastParallelism, CancellationToken ct)
     {
         // Layout validation — hard-fail on the legacy flat C# layout. Every
         // entry must live under `{space}/…` where `{space}` has no leading
         // slash and no `.dm` segment at position 0.
+        var sourceNoun = sourceKind.Describe();
         foreach (var ze in entries)
         {
             var first = ze.FullName.IndexOf('/');
             if (first <= 0 || ze.FullName.StartsWith(".dm/", StringComparison.Ordinal))
                 return Response.Fail(InternalErrorCode.INVALID_DATA,
-                    $"{sourceKind} '{ze.FullName}' is not under a top-level space directory — "
+                    $"{sourceNoun} '{ze.FullName}' is not under a top-level space directory — "
                     + "legacy flat layout is not supported, re-export with the current release",
                     ErrorTypes.Request);
         }
 
-        // Pre-build a global path → entry dict so the head passes (users)
-        // and InlinePayloadBodyAsync can resolve sibling body files without
-        // depending on a ZipArchive.GetEntry lookup. Same dict shape works
-        // for both zip and folder sources.
-        var allByPath = entries.ToDictionary(e => e.FullName, e => e, StringComparer.Ordinal);
+        // Global path → entry dict used by InlinePayloadBodyAsync to resolve
+        // sibling body files during the user head pass. Only built when an
+        // import actually contains user meta files — most operator imports
+        // don't, and building a 100k-entry dict eagerly for nothing is a
+        // measurable cost on large dumps. Tail passes (Pass 3-5) build their
+        // own per-pass body lookups from a slice of entries, so they don't
+        // need this dict.
+        IReadOnlyDictionary<string, ImportEntryRef> allByPath =
+            entries.Any(IsUserMeta)
+                ? entries.ToDictionary(e => e.FullName, e => e, StringComparer.Ordinal)
+                : new Dictionary<string, ImportEntryRef>(StringComparer.Ordinal);
 
         var results = new ImportStats();
 
@@ -579,23 +614,27 @@ public sealed class ImportExportService(
 
         if (fastUnsafeNoFkCheck && workers > 1 && spaceGroups.Count > 1)
         {
-            // ZipArchive is not thread-safe — workers can't concurrently call
-            // ZipArchiveEntry.Open() on entries from the shared archive
-            // ("local file header is corrupt" otherwise). Pre-read every tail
-            // entry's bytes once on the main thread, hand workers MemoryStream
-            // views over the cached buffers via OpenEntry. Memory cost is
-            // O(source body bytes) — acceptable for a CLI bulk-load tool.
-            // For folder sources File.OpenRead is thread-safe, but prefetching
-            // still works fine (and keeps OpenEntry uniform).
-            var prefetched = new Dictionary<string, byte[]>(tailEntries.Count, StringComparer.Ordinal);
-            foreach (var ze in tailEntries)
+            // Prefetch is for zip sources only. ZipArchive isn't thread-safe
+            // — workers can't concurrently call ZipArchiveEntry.Open() on
+            // entries from the shared archive ("local file header is corrupt"
+            // otherwise), so we pre-read every tail entry's bytes once on the
+            // main thread and hand workers MemoryStream views via OpenEntry.
+            // Filesystem sources skip this entirely: File.OpenRead is
+            // thread-safe and prefetching would needlessly double-buffer
+            // O(body bytes) of memory for a folder import. OpenEntry falls
+            // back to ze.Open() when the prefetch cache is unset.
+            if (sourceKind == ImportSourceKind.Zip)
             {
-                await using var s = ze.Open();
-                using var mem = new MemoryStream();
-                await s.CopyToAsync(mem, ct);
-                prefetched[ze.FullName] = mem.ToArray();
+                var prefetched = new Dictionary<string, byte[]>(tailEntries.Count, StringComparer.Ordinal);
+                foreach (var ze in tailEntries)
+                {
+                    await using var s = ze.Open();
+                    using var mem = new MemoryStream();
+                    await s.CopyToAsync(mem, ct);
+                    prefetched[ze.FullName] = mem.ToArray();
+                }
+                _prefetchedBodies.Value = prefetched;
             }
-            _prefetchedBodies.Value = prefetched;
 
             // Parallel per space. Each worker owns its own
             // BeginFastImportSessionAsync — its own connection, own

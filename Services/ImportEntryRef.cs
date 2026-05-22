@@ -29,3 +29,26 @@ internal sealed class ImportEntryRef
     public static ImportEntryRef FromFile(string relativeName, string absolutePath)
         => new(relativeName, () => File.OpenRead(absolutePath));
 }
+
+// Source kind for an import run. Drives two behaviours that differ
+// between a zip archive and a filesystem folder: the noun used in
+// error messages (Describe), and whether the parallel-tail-passes
+// path needs to prefetch bytes into memory before dispatching workers
+// (zip needs it because ZipArchive isn't thread-safe; folder doesn't).
+internal enum ImportSourceKind
+{
+    Zip,
+    Filesystem,
+}
+
+internal static class ImportSourceKindExtensions
+{
+    // Noun threaded into error messages so the operator sees the wording
+    // matching the source they invoked.
+    public static string Describe(this ImportSourceKind k) => k switch
+    {
+        ImportSourceKind.Zip => "zip entry",
+        ImportSourceKind.Filesystem => "file",
+        _ => "entry",
+    };
+}
