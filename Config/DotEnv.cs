@@ -39,17 +39,25 @@ public static class DotEnv
         if (!string.IsNullOrEmpty(backendEnv) && File.Exists(backendEnv))
             return backendEnv;
 
-        // 2. ./config.env in current working directory
+        // 2. ./config.env in current working directory (dev workflow — the
+        //    binary built under bin/Release/ alongside a repo-root config.env).
         var cwdConfig = Path.Combine(Directory.GetCurrentDirectory(), "config.env");
         if (File.Exists(cwdConfig)) return cwdConfig;
 
-        // 3. ~/.dmart/config.env
+        // 3. ~/.dmart/config.env (per-user install via `dmart init`).
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         if (!string.IsNullOrEmpty(home))
         {
             var homeConfig = Path.Combine(home, ".dmart", "config.env");
             if (File.Exists(homeConfig)) return homeConfig;
         }
+
+        // 4. /etc/dmart/config.env (system-wide RPM/DEB install). Lets the
+        //    operator run `dmart serve` / `dmart import` from any cwd
+        //    instead of being forced to `cd /etc/dmart` first. Skipped on
+        //    non-Unix-like filesystems where /etc isn't conventional.
+        const string SystemConfig = "/etc/dmart/config.env";
+        if (File.Exists(SystemConfig)) return SystemConfig;
 
         return null;
     }
