@@ -300,6 +300,10 @@ public class SearchExpressionParserTests
         var combined = string.Join(" ", parsed.Clauses);
         combined.ShouldContain("payload::jsonb->'body'->>'x' ILIKE @s_0");
         combined.ShouldContain("jsonb_typeof(payload::jsonb->'body'->'x') = 'string'");
+        // pg_trgm prefilter — same pattern bound twice, so the GIN
+        // index on (payload::text) can serve the lookup before the
+        // precise per-path ILIKE prunes false positives.
+        combined.ShouldContain("payload::text ILIKE @s_0");
         combined.ShouldNotContain("payload::jsonb @>");
         parsed.Parameters.Count.ShouldBe(1);
         parsed.Parameters[0].Value.ShouldBe("%delate%");
@@ -312,6 +316,9 @@ public class SearchExpressionParserTests
 
         var combined = string.Join(" ", parsed.Clauses);
         combined.ShouldContain("ILIKE @s_0");
+        // Prefilter applies to prefix too — the trigram GIN can serve
+        // `delate%` lookups just as well as `%delate%`.
+        combined.ShouldContain("payload::text ILIKE @s_0");
         parsed.Parameters.Count.ShouldBe(1);
         parsed.Parameters[0].Value.ShouldBe("delate%");
     }
@@ -323,8 +330,37 @@ public class SearchExpressionParserTests
 
         var combined = string.Join(" ", parsed.Clauses);
         combined.ShouldContain("ILIKE @s_0");
+        // Prefilter applies to suffix too. Suffix patterns (`%delate`)
+        // are typically less selective than contains, but pg_trgm
+        // still helps when the trailing substring is rare.
+        combined.ShouldContain("payload::text ILIKE @s_0");
         parsed.Parameters.Count.ShouldBe(1);
         parsed.Parameters[0].Value.ShouldBe("%delate");
+    }
+
+    [Fact]
+    public void Payload_Wildcard_Negated_Does_Not_Emit_Trgm_Prefilter()
+    {
+        // The negated branch is "exclude rows containing X" — the trigram
+        // index tells us which rows DO contain X (the opposite of what we
+        // want). Adding the prefilter to the negated form would only
+        // exclude rows that match — which is what NOT ILIKE already does
+        // at the per-path level — so prepending the prefilter does no
+        // useful work. Verify it's NOT emitted; planner picks the most
+        // selective access path on its own.
+        var parsed = SearchExpressionParser.Parse("-@payload.body.x:*delate*", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain("NOT ILIKE @s_0");
+        // Exactly one ILIKE clause — the per-path one. If the prefilter
+        // had been emitted there'd be a second `payload::text ILIKE`.
+        // Counting via OccurrenceCount on the full string is the cleanest
+        // way to assert "exactly one." A naive Contains-check passes even
+        // when both fire.
+        var ilikeCount = System.Text.RegularExpressions.Regex
+            .Matches(combined, @"\bILIKE\b").Count;
+        ilikeCount.ShouldBe(1,
+            $"negated wildcard should emit one ILIKE (per-path), got {ilikeCount} in: {combined}");
     }
 
     [Fact]
