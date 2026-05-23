@@ -25,7 +25,7 @@ public static class QueryHelper
     // WHERE CLAUSE BUILDER
     // ====================================================================
 
-    public static string BuildWhereClause(Query q, List<NpgsqlParameter> args)
+    public static string BuildWhereClause(Query q, List<NpgsqlParameter> args, string? tableName = null)
     {
         var sql = new System.Text.StringBuilder("space_name = $1 ");
         args.Add(new() { Value = q.SpaceName });
@@ -90,7 +90,7 @@ public static class QueryHelper
 
         // RediSearch-style search: @field:value syntax → SQL WHERE clauses.
         if (!string.IsNullOrEmpty(q.Search))
-            AppendSearchClauses(sql, q.Search, args);
+            AppendSearchClauses(sql, q.Search, args, tableName);
 
         if (q.FromDate is not null)
         {
@@ -115,10 +115,10 @@ public static class QueryHelper
     // so we ask the parser for that style.
 
     private static void AppendSearchClauses(
-        System.Text.StringBuilder sql, string search, List<NpgsqlParameter> args)
+        System.Text.StringBuilder sql, string search, List<NpgsqlParameter> args, string? tableName = null)
     {
         var parsed = SearchExpressionParser.Parse(
-            search, args.Count, PlaceholderStyle.Positional);
+            search, args.Count, PlaceholderStyle.Positional, tableName);
 
         // Always append params (parser may bind even when clauses end up empty —
         // e.g. an all-negative group; the SDK side does the same).
@@ -366,7 +366,7 @@ public static class QueryHelper
         List<string>? queryPolicies = null)
     {
         var args = new List<NpgsqlParameter>();
-        var where = BuildWhereClause(q, args);
+        var where = BuildWhereClause(q, args, tableName);
         var sql = new System.Text.StringBuilder($"{selectAllColumns} WHERE {where} ");
 
         // Apply ACL filtering if user info provided.
@@ -396,7 +396,7 @@ public static class QueryHelper
         string? userShortname = null, List<string>? queryPolicies = null)
     {
         var args = new List<NpgsqlParameter>();
-        var where = BuildWhereClause(q, args);
+        var where = BuildWhereClause(q, args, tableName);
         var sqlBuilder = new System.Text.StringBuilder($"SELECT COUNT(*) FROM {tableName} WHERE {where} ");
         // Parity with RunQueryAsync: apply owner/ACL/query_policies predicate
         // so COUNT(*) is scoped to rows the actor can actually see. Skipped
@@ -426,7 +426,7 @@ public static class QueryHelper
             return new();
 
         var args = new List<NpgsqlParameter>();
-        var where = BuildWhereClause(q, args);
+        var where = BuildWhereClause(q, args, tableName);
 
         var groupBy = q.AggregationData.GroupBy ?? new();
         var reducers = q.AggregationData.Reducers ?? new();

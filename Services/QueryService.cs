@@ -520,7 +520,7 @@ public sealed class QueryService(
 
         // SQL: unnest tags jsonb array, group by tag, count.
         var args = new List<NpgsqlParameter>();
-        var where = QueryHelper.BuildWhereClause(q, args);
+        var where = QueryHelper.BuildWhereClause(q, args, "entries");
         var sql = new System.Text.StringBuilder($"""
             SELECT tag, COUNT(*) AS cnt
             FROM entries, jsonb_array_elements_text(tags) AS tag

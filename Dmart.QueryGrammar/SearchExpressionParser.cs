@@ -109,13 +109,28 @@ public static class SearchExpressionParser
     /// Placeholder style — see <see cref="PlaceholderStyle"/>. Defaults to
     /// <see cref="PlaceholderStyle.Named"/> for the SDK's historical behaviour.
     /// </param>
-    public static Parsed Parse(string expression, int startingParamIndex, PlaceholderStyle style = PlaceholderStyle.Named)
+    /// <param name="targetTable">
+    /// Name of the SQL table the resulting WHERE clause will be appended to,
+    /// when known. Used today to gate the user-meta join: <c>@email</c> and
+    /// <c>@msisdn</c> normally resolve via
+    /// <c>owner_shortname IN (SELECT shortname FROM users WHERE col = $v)</c>
+    /// — correct against <c>entries</c>/<c>attachments</c> but broken against
+    /// <c>users</c> itself (no <c>owner_shortname</c> column there). When
+    /// <paramref name="targetTable"/> is <c>"users"</c>, those fields fall
+    /// through to the scalar-column path instead. Defaults to <c>null</c>
+    /// for back-compat with SDK callers that don't carry table context.
+    /// </param>
+    public static Parsed Parse(
+        string expression,
+        int startingParamIndex,
+        PlaceholderStyle style = PlaceholderStyle.Named,
+        string? targetTable = null)
     {
         var clauses = new List<string>();
         var pars = new List<NpgsqlParameter>();
         if (string.IsNullOrWhiteSpace(expression)) return new Parsed(clauses, pars);
 
-        var ctx = new ParamCtx(startingParamIndex, style);
+        var ctx = new ParamCtx(startingParamIndex, style, targetTable);
 
         var groups = ParseSearchExpression(expression);
         var allGroupSql = new List<string>();
@@ -155,7 +170,13 @@ public static class SearchExpressionParser
         private int _next;
         private readonly PlaceholderStyle _style;
         public List<NpgsqlParameter> Parameters { get; } = new();
-        public ParamCtx(int start, PlaceholderStyle style) { _next = start; _style = style; }
+        public string? TargetTable { get; }
+        public ParamCtx(int start, PlaceholderStyle style, string? targetTable = null)
+        {
+            _next = start;
+            _style = style;
+            TargetTable = targetTable;
+        }
 
         // Bind a value, return the placeholder text to splice into SQL.
         // For Named: emits @s_<n> and tags the NpgsqlParameter with that name.
@@ -423,8 +444,12 @@ public static class SearchExpressionParser
             return $"{field} {nullCheck}";
         }
 
-        // Extension: user-meta fields live on `users`. Resolve via owner.
-        if (UserMetaColumns.Contains(field))
+        // Extension: user-meta fields live on `users`. Resolve via owner —
+        // but only when the query is NOT itself against the users table.
+        // When the caller IS querying users directly, email/msisdn are
+        // real columns and the join would reference a non-existent
+        // owner_shortname column.
+        if (UserMetaColumns.Contains(field) && ctx.TargetTable != "users")
             return BuildUserMetaSql(field, data, ctx);
 
         // Payload JSONB paths
@@ -597,14 +622,24 @@ public static class SearchExpressionParser
                     ? $"jsonb_typeof({elementJsonb}) = 'number' AND ({elementJsonb})::float BETWEEN CAST({p1} AS float) AND CAST({p2} AS float)"
                     : $"e::float BETWEEN CAST({p1} AS float) AND CAST({p2} AS float)";
                 var exists = $"EXISTS (SELECT 1 FROM {iterator} WHERE {between})";
-                return data.Negative ? $"({typeofGuard} AND NOT {exists})" : $"({typeofGuard} AND {exists})";
+                // Negation: absent/null fields are intentionally included so
+                // `-@items[].price:[100 200]` also matches rows that don't
+                // carry the field at all. Under 3VL a bare `NOT EXISTS` over
+                // a NULL array would still be NULL → row dropped; the
+                // IS NULL OR jsonb null disjunct restores the expected
+                // "field doesn't exist counts as out-of-range" semantics.
+                return data.Negative
+                    ? $"({arrayExpr} IS NULL OR jsonb_typeof({arrayExpr}) = 'null' OR ({typeofGuard} AND NOT {exists}))"
+                    : $"({typeofGuard} AND {exists})";
             }
             if (string.Compare(v1, v2, StringComparison.Ordinal) > 0) (v1, v2) = (v2, v1);
             var sp1 = ctx.Add(v1);
             var sp2 = ctx.Add(v2);
             var between2 = $"{elementText} BETWEEN {sp1} AND {sp2}";
             var exists2 = $"EXISTS (SELECT 1 FROM {iterator} WHERE {between2})";
-            return data.Negative ? $"({typeofGuard} AND NOT {exists2})" : $"({typeofGuard} AND {exists2})";
+            return data.Negative
+                ? $"({arrayExpr} IS NULL OR jsonb_typeof({arrayExpr}) = 'null' OR ({typeofGuard} AND NOT {exists2}))"
+                : $"({typeofGuard} AND {exists2})";
         }
 
         var compOp = data.ComparisonOperator;
@@ -648,7 +683,9 @@ public static class SearchExpressionParser
             }
 
             var exists = $"EXISTS (SELECT 1 FROM {iterator} WHERE {predicate})";
-            conditions.Add(data.Negative ? $"({typeofGuard} AND NOT {exists})" : $"({typeofGuard} AND {exists})");
+            conditions.Add(data.Negative
+                ? $"({arrayExpr} IS NULL OR jsonb_typeof({arrayExpr}) = 'null' OR ({typeofGuard} AND NOT {exists}))"
+                : $"({typeofGuard} AND {exists})");
         }
         return JoinConditions(conditions, data.Operation, data.Negative);
     }
@@ -791,19 +828,29 @@ public static class SearchExpressionParser
             }
             else if (data.Negative || compOp == "!")
             {
+                // Negation: field absent, NOT in array, or != as string/number.
+                // Absent/null fields are intentionally included — under 3VL,
+                // a bare `NOT (typeof='string' AND ...)` would drop missing
+                // rows (the inner AND is NULL → NOT NULL is NULL → WHERE
+                // skips). The absent-cond disjunct restores the expected
+                // "field doesn't exist counts as not equal" semantics.
                 var pVal = ctx.Add(value);
                 var pJsonArr = ctx.Add(ToJsonArray(value), NpgsqlDbType.Jsonb);
-                var arrayCond = $"(jsonb_typeof(payload::jsonb->{arrowPath}) = 'array' AND NOT (payload::jsonb->{arrowPath} @> {pJsonArr}))";
+                var absentCond = $"(payload::jsonb->{arrowPath} IS NULL OR jsonb_typeof(payload::jsonb->{arrowPath}) = 'null')";
+                // CAST(... AS jsonb) is redundant alongside the typed param
+                // but kept verbatim from the server's pre-extraction emit
+                // so logged SQL stays byte-identical (see BuildJsonbArraySql).
+                var arrayCond = $"(jsonb_typeof(payload::jsonb->{arrowPath}) = 'array' AND NOT (payload::jsonb->{arrowPath} @> CAST({pJsonArr} AS jsonb)))";
                 var stringCond = $"(jsonb_typeof(payload::jsonb->{arrowPath}) = 'string' AND {textExtract} != {pVal})";
                 if (isNum)
                 {
                     var pNum = ctx.Add(double.Parse(value, CultureInfo.InvariantCulture));
                     var numCond = $"(jsonb_typeof(payload::jsonb->{arrowPath}) = 'number' AND ({textExtract})::float != CAST({pNum} AS float))";
-                    conditions.Add($"({arrayCond} OR {stringCond} OR {numCond})");
+                    conditions.Add($"({absentCond} OR {arrayCond} OR {stringCond} OR {numCond})");
                 }
                 else
                 {
-                    conditions.Add($"({arrayCond} OR {stringCond})");
+                    conditions.Add($"({absentCond} OR {arrayCond} OR {stringCond})");
                 }
             }
             else
@@ -837,16 +884,21 @@ public static class SearchExpressionParser
         {
             var pVal = ctx.Add(value);
             var pJson = ctx.Add(ToJsonArray(value), NpgsqlDbType.Jsonb);
+            // CAST(... AS jsonb) is functionally redundant — the param is
+            // already typed Jsonb — but kept verbatim from the server's
+            // pre-extraction emit so logged SQL stays byte-identical and
+            // tests that inspect emitted text (e.g. Spec_Roles_Array_Search)
+            // continue to assert against a stable shape.
             if (data.Negative)
             {
                 conditions.Add(
-                    $"((jsonb_typeof({column}) = 'array' AND NOT ({column} @> {pJson})) OR " +
+                    $"((jsonb_typeof({column}) = 'array' AND NOT ({column} @> CAST({pJson} AS jsonb))) OR " +
                     $"(jsonb_typeof({column}) = 'object' AND NOT ({column}::text ILIKE '%' || {pVal} || '%')))");
             }
             else
             {
                 conditions.Add(
-                    $"((jsonb_typeof({column}) = 'array' AND {column} @> {pJson}) OR " +
+                    $"((jsonb_typeof({column}) = 'array' AND {column} @> CAST({pJson} AS jsonb)) OR " +
                     $"(jsonb_typeof({column}) = 'object' AND {column}::text ILIKE '%' || {pVal} || '%'))");
             }
         }
