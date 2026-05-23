@@ -486,6 +486,20 @@ switch (subcommand)
                 return;
             }
         }
+        // --space=NAME --subpath=PATH together turn on "remap mode" — the
+        // source folder is treated as content to drop INTO the named
+        // existing space at the given parent subpath, instead of being a
+        // full space dump where {space}/ sits at the top. Both flags
+        // required together, fs source only.
+        var targetSpace = serverArgs.FirstOrDefault(a => a.StartsWith("--space=", StringComparison.Ordinal))?
+            ["--space=".Length..];
+        var targetSubpath = serverArgs.FirstOrDefault(a => a.StartsWith("--subpath=", StringComparison.Ordinal))?
+            ["--subpath=".Length..];
+        if ((targetSpace is null) != (targetSubpath is null))
+        {
+            Bail("--space and --subpath must be provided together (or neither)");
+            return;
+        }
         // --type={zip|fs} selects the source kind. Default is auto-detected
         // from the target: a regular file ⇒ zip, a directory ⇒ fs. When
         // explicitly set and the user's choice disagrees with the target's
@@ -507,7 +521,7 @@ switch (subcommand)
         }
         if (string.IsNullOrEmpty(targetPath))
         {
-            Bail("Usage: dmart import [-r|--replace] [--fast] [--fast-parallelism=N] [--batch-size=N] [--type=zip|fs] <path>");
+            Bail("Usage: dmart import [-r|--replace] [--fast] [--fast-parallelism=N] [--batch-size=N] [--type=zip|fs] [--space=NAME --subpath=PATH] <path>");
             return;
         }
 
@@ -553,7 +567,8 @@ switch (subcommand)
             return;
         }
 
-        Console.WriteLine($"Importing from {targetPath} (type={effectiveType}, replace={replace}, fast={fast}, parallelism={parallelism}, batch-size={batchSize})");
+        var remapSuffix = targetSpace is not null ? $", into-space={targetSpace}, into-subpath={targetSubpath}" : "";
+        Console.WriteLine($"Importing from {targetPath} (type={effectiveType}, replace={replace}, fast={fast}, parallelism={parallelism}, batch-size={batchSize}{remapSuffix})");
 
         var (s, dbInst) = CliBootstrap.BuildOrExit(dotenvPath, dotenvValues);
         var importService = CliBootstrap.BuildImportExportService(s, dbInst);
@@ -568,10 +583,16 @@ switch (subcommand)
         if (effectiveType == "fs")
         {
             resp = await importService.ImportFolderAsync(targetPath, actor: null,
-                preserveExisting: !replace, fastUnsafeNoFkCheck: fast, fastParallelism: parallelism, batchSize: batchSize);
+                preserveExisting: !replace, fastUnsafeNoFkCheck: fast, fastParallelism: parallelism,
+                batchSize: batchSize, targetSpace: targetSpace, targetSubpath: targetSubpath);
         }
         else
         {
+            if (targetSpace is not null || targetSubpath is not null)
+            {
+                Bail("--space / --subpath remap mode requires --type=fs (zip remap is not supported)");
+                return;
+            }
             await using var zipStream = File.OpenRead(targetPath);
             resp = await importService.ImportZipAsync(zipStream, actor: null,
                 preserveExisting: !replace, fastUnsafeNoFkCheck: fast, fastParallelism: parallelism, batchSize: batchSize);
