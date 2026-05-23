@@ -302,10 +302,14 @@ switch (subcommand)
         if (rows > 0)
         {
             Console.WriteLine($"Password updated for {username} (account unlocked: is_active=true, attempt_count=0)");
-            // Only update ~/.dmart/cli.ini when its existing shortname matches
-            // the user whose password we just reset — avoids clobbering a
-            // CLI operator's own credentials when resetting someone else.
-            CliCredentials.UpdateCliIni(username, password, s);
+            // Deliberately NOT auto-rewriting ~/.dmart/cli.ini. Storing the
+            // plaintext password in a file every time it rotates is a
+            // footgun (cleartext on disk, file-perms drift on each write).
+            // Operator updates cli.ini manually if they want persistent
+            // CLI auth, or sets DMART_PASSWORD per shell session.
+            Console.WriteLine(
+                "Note: ~/.dmart/cli.ini was not modified. Update it manually if you " +
+                "need persistent CLI auth, or set DMART_PASSWORD in your shell.");
         }
         else
         {
@@ -691,11 +695,13 @@ switch (subcommand)
         else
             Console.WriteLine($"  {configJsonPath} already exists");
 
-        // 3. cli.ini — dmart-cli configuration
+        // 3. cli.ini — dmart-cli configuration. Written via CliIniWriter
+        // so the file lands with 0600 perms on Unix; the password is on
+        // disk in cleartext, so the file is only readable by the owner.
         var cliIniPath = Path.Combine(dmartHome, "cli.ini");
         if (!File.Exists(cliIniPath))
         {
-            File.WriteAllText(cliIniPath, """
+            CliIniWriter.WriteSecure(cliIniPath, """
                 # dmart-cli configuration
                 url=http://localhost:5099
                 shortname=dmart
@@ -705,7 +711,7 @@ switch (subcommand)
                 pagination=50
 
                 """.Replace("                ", ""));
-            Console.WriteLine($"  Created {cliIniPath}");
+            Console.WriteLine($"  Created {cliIniPath} (perms 0600)");
         }
         else
             Console.WriteLine($"  {cliIniPath} already exists");

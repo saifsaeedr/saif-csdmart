@@ -19,6 +19,30 @@ public sealed class CliSettings
         var iniPath = Environment.GetEnvironmentVariable("DMART_CLI_CONFIG")
             ?? FindIniFile();
 
+        // Refuse to read cli.ini if its perms are group- or world-accessible.
+        // The file holds the dmart password in cleartext; loose perms mean
+        // any user on a multi-user host can read it. Matches ssh's behavior
+        // with overly-permissive private keys. Skipped on Windows where the
+        // security model is ACLs, not Unix mode bits. The env-var fallback
+        // below (DMART_URL/SHORTNAME/PASSWORD) still works after rejection,
+        // so the operator has a per-invocation escape hatch while they fix
+        // the perms.
+        if (iniPath is not null && File.Exists(iniPath) && !OperatingSystem.IsWindows())
+        {
+            var mode = File.GetUnixFileMode(iniPath);
+            const UnixFileMode groupOrOther =
+                UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
+                UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute;
+            if ((mode & groupOrOther) != 0)
+            {
+                Console.Error.WriteLine(
+                    $"refusing to read {iniPath}: perms must be 0600 " +
+                    $"(current: {Convert.ToString((int)mode, 8)}). " +
+                    $"Run: chmod 600 {iniPath}");
+                iniPath = null;
+            }
+        }
+
         if (iniPath is not null && File.Exists(iniPath))
         {
             foreach (var line in File.ReadAllLines(iniPath))
