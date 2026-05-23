@@ -304,6 +304,215 @@ public class QueryJoinTests : IClassFixture<DmartFactory>
         }
     }
 
+    // ── Narrowing optimization fallback ───────────────────────────────────
+    // When a base-record value contains a parser metachar (`|`, `*`, `:`,
+    // etc.) the narrowing path can't safely synthesize `@right:v1|v2` and
+    // bails to fetching the right side with just the user's search,
+    // matching client-side. The fallback must still produce correct join
+    // output — if a regression breaks it, the visible symptom is the
+    // unsafe base record matching nothing instead of nothing-or-real-match.
+    [FactIfPg]
+    public async Task Join_With_Unsafe_Base_Value_Falls_Back_To_Client_Side_Match()
+    {
+        var (query, entries, spaces) = Resolve();
+        var spaceName = $"jt_{Guid.NewGuid():N}".Substring(0, 12);
+
+        try
+        {
+            await spaces.UpsertAsync(new Space
+            {
+                Uuid = Guid.NewGuid().ToString(),
+                Shortname = spaceName,
+                SpaceName = spaceName,
+                Subpath = "/",
+                OwnerShortname = "dmart",
+                IsActive = true,
+                Languages = new() { Language.En },
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            });
+
+            await SeedEntryAsync(entries, spaceName, "/orders", "safe_order", ResourceType.Content,
+                new() { ["customer"] = JsonDocument.Parse("\"customer_a\"").RootElement });
+            // `|` in the value forces HasSearchMetachar to bail; without
+            // the fallback, the join would throw or silently un-join.
+            await SeedEntryAsync(entries, spaceName, "/orders", "unsafe_order", ResourceType.Content,
+                new() { ["customer"] = JsonDocument.Parse("\"cust|escape\"").RootElement });
+            await SeedEntryAsync(entries, spaceName, "/customers", "customer_a", ResourceType.Content,
+                new() { ["email"] = JsonDocument.Parse("\"a@example.com\"").RootElement });
+
+            var subQueryJson = JsonSerializer.SerializeToElement(new Dictionary<string, object>
+            {
+                ["type"] = "subpath",
+                ["space_name"] = spaceName,
+                ["subpath"] = "customers",
+                ["limit"] = 100,
+                ["retrieve_json_payload"] = true,
+            });
+
+            var resp = await query.ExecuteAsync(new Query
+            {
+                Type = QueryType.Subpath,
+                SpaceName = spaceName,
+                Subpath = "orders",
+                Limit = 100,
+                RetrieveJsonPayload = true,
+                Join = new()
+                {
+                    new JoinQuery
+                    {
+                        JoinOn = "payload.body.customer:shortname",
+                        Alias = "customer",
+                        Query = subQueryJson,
+                    },
+                },
+            }, "dmart");
+
+            resp.Status.ShouldBe(Status.Success);
+            resp.Records.ShouldNotBeNull();
+            resp.Records!.Count.ShouldBe(2);
+            AssertMatchCount(resp.Records, "safe_order", expected: 1);
+            AssertMatchCount(resp.Records, "unsafe_order", expected: 0);
+        }
+        finally
+        {
+            try { await spaces.DeleteAsync(spaceName); } catch { }
+        }
+    }
+
+    // ── Right/Outer boundary cases ────────────────────────────────────────
+    // Right with zero matched base must still surface every right record —
+    // the join's whole purpose for that input shape is "what rights does
+    // nobody reference?" If the appended-rights path is gated on having any
+    // matched base, this is the test that catches it.
+    [FactIfPg]
+    public async Task Right_Join_With_No_Matched_Base_Returns_Only_Unmatched_Rights()
+    {
+        var (query, entries, spaces) = Resolve();
+        var spaceName = $"jt_{Guid.NewGuid():N}".Substring(0, 12);
+
+        try
+        {
+            await spaces.UpsertAsync(new Space
+            {
+                Uuid = Guid.NewGuid().ToString(),
+                Shortname = spaceName,
+                SpaceName = spaceName,
+                Subpath = "/",
+                OwnerShortname = "dmart",
+                IsActive = true,
+                Languages = new() { Language.En },
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            });
+
+            await SeedEntryAsync(entries, spaceName, "/orders", "ghost_order", ResourceType.Content,
+                new() { ["customer"] = JsonDocument.Parse("\"nonexistent_customer\"").RootElement });
+            await SeedEntryAsync(entries, spaceName, "/customers", "customer_x", ResourceType.Content,
+                new() { ["email"] = JsonDocument.Parse("\"x@example.com\"").RootElement });
+            await SeedEntryAsync(entries, spaceName, "/customers", "customer_y", ResourceType.Content,
+                new() { ["email"] = JsonDocument.Parse("\"y@example.com\"").RootElement });
+
+            var resp = await ExecuteJoinViaWire(query, spaceName, "right");
+
+            resp.Status.ShouldBe(Status.Success);
+            resp.Records.ShouldNotBeNull();
+            var keys = resp.Records!.Select(r => $"{r.Subpath}/{r.Shortname}").ToHashSet();
+            keys.ShouldContain("/customers/customer_x");
+            keys.ShouldContain("/customers/customer_y");
+            keys.ShouldNotContain("/orders/ghost_order");
+            keys.Count.ShouldBe(2);
+        }
+        finally
+        {
+            try { await spaces.DeleteAsync(spaceName); } catch { }
+        }
+    }
+
+    // Outer with an empty right side: nothing to append, but every base
+    // record must still survive with an empty matched-list under the alias.
+    // Asserts the "kept-base" branch keeps mutating attributes["join"] even
+    // when the right-side fetch returned zero rows.
+    [FactIfPg]
+    public async Task Outer_Join_With_Empty_Right_Keeps_All_Base_With_Empty_Matches()
+    {
+        var (query, entries, spaces) = Resolve();
+        var spaceName = $"jt_{Guid.NewGuid():N}".Substring(0, 12);
+
+        try
+        {
+            await spaces.UpsertAsync(new Space
+            {
+                Uuid = Guid.NewGuid().ToString(),
+                Shortname = spaceName,
+                SpaceName = spaceName,
+                Subpath = "/",
+                OwnerShortname = "dmart",
+                IsActive = true,
+                Languages = new() { Language.En },
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            });
+
+            // Orders only — no customers seeded, so the sub-query returns
+            // an empty right set.
+            await SeedEntryAsync(entries, spaceName, "/orders", "order_a", ResourceType.Content,
+                new() { ["customer"] = JsonDocument.Parse("\"customer_a\"").RootElement });
+            await SeedEntryAsync(entries, spaceName, "/orders", "order_b", ResourceType.Content,
+                new() { ["customer"] = JsonDocument.Parse("\"customer_b\"").RootElement });
+
+            var resp = await ExecuteJoinViaWire(query, spaceName, "outer");
+
+            resp.Status.ShouldBe(Status.Success);
+            resp.Records.ShouldNotBeNull();
+            var keys = resp.Records!.Select(r => $"{r.Subpath}/{r.Shortname}").ToHashSet();
+            keys.ShouldContain("/orders/order_a");
+            keys.ShouldContain("/orders/order_b");
+            keys.Count.ShouldBe(2);
+            AssertMatchCount(resp.Records, "order_a", expected: 0);
+            AssertMatchCount(resp.Records, "order_b", expected: 0);
+        }
+        finally
+        {
+            try { await spaces.DeleteAsync(spaceName); } catch { }
+        }
+    }
+
+    // Round-trip a join request through the same JSON deserializer the HTTP
+    // layer uses, so the JoinType wire-string also gets exercised.
+    private static async Task<Response> ExecuteJoinViaWire(QueryService query, string spaceName, string joinType)
+    {
+        var subQueryJson = JsonSerializer.SerializeToElement(new Dictionary<string, object>
+        {
+            ["type"] = "subpath",
+            ["space_name"] = spaceName,
+            ["subpath"] = "customers",
+            ["limit"] = 100,
+            ["retrieve_json_payload"] = true,
+        });
+        var queryDict = new Dictionary<string, object>
+        {
+            ["type"] = "subpath",
+            ["space_name"] = spaceName,
+            ["subpath"] = "orders",
+            ["limit"] = 100,
+            ["retrieve_json_payload"] = true,
+            ["join"] = new[]
+            {
+                new Dictionary<string, object>
+                {
+                    ["join_on"] = "payload.body.customer:shortname",
+                    ["alias"] = "customer",
+                    ["query"] = subQueryJson,
+                    ["type"] = joinType,
+                },
+            },
+        };
+        var wireJson = JsonSerializer.Serialize(queryDict);
+        var deserialized = JsonSerializer.Deserialize(wireJson, Dmart.Models.Json.DmartJsonContext.Default.Query)!;
+        return await query.ExecuteAsync(deserialized, "dmart");
+    }
+
     private static void AssertMatchCount(List<Record> records, string shortname, int expected)
     {
         var rec = records.FirstOrDefault(r => r.Shortname == shortname);

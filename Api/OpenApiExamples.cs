@@ -122,6 +122,25 @@ internal static class OpenApiExamples
             }
             """)!,
 
+        // /managed/query → join — example of the inner JoinQuery element.
+        // Surfaces the optional `type` field (left/right/inner/outer) so
+        // a developer reading the schema knows it's there; otherwise the
+        // source-gen-derived schema shows the enum without an example.
+        [typeof(JoinQuery)] = JsonNode.Parse("""
+            {
+              "join_on": "payload.body.customer:shortname",
+              "alias": "customer",
+              "type": "left",
+              "query": {
+                "type": "subpath",
+                "space_name": "management",
+                "subpath": "/customers",
+                "limit": 100,
+                "retrieve_json_payload": true
+              }
+            }
+            """)!,
+
         // /managed/request — the canonical CRUD envelope. This sample
         // creates a single content entry; swap request_type to update /
         // replace / delete / move and adjust the record block accordingly.

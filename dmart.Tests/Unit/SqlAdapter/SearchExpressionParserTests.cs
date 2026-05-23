@@ -395,6 +395,28 @@ public class SearchExpressionParserTests
     }
 
     [Fact]
+    public void Payload_Wildcard_Mixed_Alternation_Plain_And_Wildcard_Coexist()
+    {
+        // `@k:foo|*bar*|baz` — only the middle alternate is a wildcard.
+        // The per-value loop should emit JSONB containment for `foo` and
+        // `baz` and ILIKE for `*bar*`, OR'd together. If a regression
+        // makes wildcard handling all-or-nothing at the alternation level
+        // (e.g. one wildcard forces every alternate to ILIKE, or vice
+        // versa), this catches it. Each containment value contributes two
+        // params (string + array containment JSON); the ILIKE adds one
+        // more, so the wildcard parameter lives somewhere in the middle
+        // of the list rather than at a fixed index.
+        var parsed = SearchExpressionParser.Parse("@payload.body.x:foo|*bar*|baz", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain("ILIKE");
+        combined.ShouldContain("@>");
+        combined.ShouldContain(" OR ");
+        parsed.Parameters.Any(p => Equals(p.Value, "%bar%")).ShouldBeTrue(
+            "expected an ILIKE-pattern parameter for the *bar* alternate");
+    }
+
+    [Fact]
     public void Payload_Wildcard_With_Deep_Path_Targets_Correct_Field()
     {
         var parsed = SearchExpressionParser.Parse("@payload.body.address.city:*ville*", 0);

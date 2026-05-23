@@ -1232,13 +1232,23 @@ public sealed class QueryService(
     // ApplyClientJoinsAsync to decide when the value-narrowing optimization
     // is unsafe and we should fall back to fetching the right side with the
     // user's search alone.
+    //
+    // This is intentionally a strict superset of the parser's current token
+    // set — `{ } \ '` aren't tokens today but would be plausible additions
+    // (range syntax, escape, quoting), and `< > = !` are comparison-operator
+    // prefixes that would change a value's parse if it happened to start
+    // with one. Keep this in sync with SearchExpressionParser: when a new
+    // token is added there, add it here too or the narrowing optimization
+    // reopens a corpus-controlled injection into the synthesized clause.
     private static bool HasSearchMetachar(string s)
     {
         foreach (var c in s)
         {
             if (c == '|' || c == ':' || c == '*' || c == '('
-                || c == ')' || c == '[' || c == ']' || c == '"'
-                || c == '@' || char.IsWhiteSpace(c))
+                || c == ')' || c == '[' || c == ']' || c == '{'
+                || c == '}' || c == '"' || c == '\'' || c == '\\'
+                || c == '@' || c == '<' || c == '>' || c == '='
+                || c == '!' || char.IsWhiteSpace(c))
                 return true;
         }
         return false;
