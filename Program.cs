@@ -425,16 +425,26 @@ switch (subcommand)
 
     case "import":
     {
-        var zipPath = serverArgs.FirstOrDefault(a => !a.StartsWith('-'));
+        // Local helper: write the error to stderr, set the process exit
+        // code to 1, and return — callers do `Bail("..."); return;` to
+        // collapse the four-line "WriteLine + ExitCode + return" pattern
+        // into two lines per error site.
+        static void Bail(string msg)
+        {
+            Console.Error.WriteLine(msg);
+            Environment.ExitCode = 1;
+        }
+
+        var targetPath = serverArgs.FirstOrDefault(a => !a.StartsWith('-'));
         // -r / --replace flips the default patch behavior: existing rows
-        // get their non-key columns rewritten from the zip's meta. Without
+        // get their non-key columns rewritten from the source's meta. Without
         // -r the import is idempotent — pre-existing rows are skipped and
         // the operator sees them counted as `skipped` in the summary.
         var replace = serverArgs.Any(a => a is "-r" or "--replace");
         // --fast bypasses FK constraints AND user-defined triggers for the
         // entire import by setting session_replication_role='replica' on a
         // single shared session. Trades safety for speed; only safe when
-        // the zip is internally consistent (typical for operator-trusted
+        // the source is internally consistent (typical for operator-trusted
         // CLI imports). Hard-fails if the DB role lacks the privilege.
         var fast = serverArgs.Any(a => a is "--fast");
         // --fast-parallelism=N splits Pass 3-5 (entries/attachments/history)
@@ -448,48 +458,120 @@ switch (subcommand)
         {
             if (!int.TryParse(parallelArg["--fast-parallelism=".Length..], out parallelism) || parallelism < 1 || parallelism > 16)
             {
-                Console.Error.WriteLine("--fast-parallelism must be an integer in [1, 16]");
-                Environment.ExitCode = 1;
+                Bail("--fast-parallelism must be an integer in [1, 16]");
                 return;
             }
             if (!fast)
             {
-                Console.Error.WriteLine("--fast-parallelism requires --fast (it has no effect on the slow path)");
-                Environment.ExitCode = 1;
+                Bail("--fast-parallelism requires --fast (it has no effect on the slow path)");
                 return;
             }
         }
-        Console.WriteLine($"Importing from {zipPath} (replace={replace}, fast={fast}, parallelism={parallelism})");
-        if (string.IsNullOrEmpty(zipPath))
+        // --batch-size=N caps the in-memory bulk-COPY accumulator. Lower
+        // it for fat payloads (e.g. base64-encoded blobs in payload.body)
+        // where 10k rows × payload would exceed the host RAM budget; raise
+        // it for tiny payloads where the COPY round-trip overhead matters.
+        // Only meaningful with --fast (slow path doesn't accumulate).
+        var batchSize = Dmart.Services.ImportExportService.DefaultBatchSize;
+        var batchArg = serverArgs.FirstOrDefault(a => a.StartsWith("--batch-size=", StringComparison.Ordinal));
+        if (batchArg is not null)
         {
-            Console.Error.WriteLine("Usage: dmart import [-r|--replace] [--fast] [--fast-parallelism=N] <zip-file>");
-            Environment.ExitCode = 1;
+            if (!int.TryParse(batchArg["--batch-size=".Length..], out batchSize) || batchSize < 1 || batchSize > 1_000_000)
+            {
+                Bail("--batch-size must be an integer in [1, 1000000]");
+                return;
+            }
+        }
+        // --type={zip|fs} selects the source kind. Default is auto-detected
+        // from the target: a regular file ⇒ zip, a directory ⇒ fs. When
+        // explicitly set and the user's choice disagrees with the target's
+        // actual shape, we warn (and prompt for confirmation in interactive
+        // mode) before proceeding — the explicit --type wins after that, so
+        // the impossible case (`--type=zip` on a folder, or vice-versa) is
+        // pre-validated and hard-fails with a clean message rather than a
+        // raw IO exception.
+        string? explicitType = null;
+        var typeArg = serverArgs.FirstOrDefault(a => a.StartsWith("--type=", StringComparison.Ordinal));
+        if (typeArg is not null)
+        {
+            explicitType = typeArg["--type=".Length..];
+            if (explicitType is not "zip" and not "fs")
+            {
+                Bail("--type must be 'zip' or 'fs'");
+                return;
+            }
+        }
+        if (string.IsNullOrEmpty(targetPath))
+        {
+            Bail("Usage: dmart import [-r|--replace] [--fast] [--fast-parallelism=N] [--batch-size=N] [--type=zip|fs] <path>");
             return;
         }
-        if (!File.Exists(zipPath))
+
+        var targetIsFile = File.Exists(targetPath);
+        var targetIsDir = Directory.Exists(targetPath);
+        if (!targetIsFile && !targetIsDir)
         {
-            Console.Error.WriteLine($"File not found: {zipPath}");
-            Environment.ExitCode = 1;
+            Bail($"Path not found: {targetPath}");
             return;
         }
+        var detectedType = targetIsDir ? "fs" : "zip";
+        var effectiveType = explicitType ?? detectedType;
+
+        if (explicitType is not null && explicitType != detectedType)
+        {
+            if (!Console.IsInputRedirected)
+            {
+                Console.Write($"Warning: --type={explicitType} but target appears to be {detectedType}. Continue with --type={explicitType}? [y/N] ");
+                var line = Console.ReadLine();
+                if (!string.Equals(line?.Trim(), "y", StringComparison.OrdinalIgnoreCase))
+                {
+                    Bail("Aborted.");
+                    return;
+                }
+            }
+            else
+            {
+                Console.Error.WriteLine($"Warning: --type={explicitType} but target appears to be {detectedType}. Proceeding with --type={explicitType}.");
+            }
+        }
+
+        // Pre-validate the chosen type against the target shape so we emit a
+        // clean error instead of letting File.OpenRead(dir) / EnumerateFiles(file)
+        // throw a raw IO exception further down.
+        if (effectiveType == "zip" && !targetIsFile)
+        {
+            Bail($"Error: --type=zip requires a regular file, but '{targetPath}' is not a regular file.");
+            return;
+        }
+        if (effectiveType == "fs" && !targetIsDir)
+        {
+            Bail($"Error: --type=fs requires a directory, but '{targetPath}' is not a directory.");
+            return;
+        }
+
+        Console.WriteLine($"Importing from {targetPath} (type={effectiveType}, replace={replace}, fast={fast}, parallelism={parallelism}, batch-size={batchSize})");
 
         var (s, dbInst) = CliBootstrap.BuildOrExit(dotenvPath, dotenvValues);
         var importService = CliBootstrap.BuildImportExportService(s, dbInst);
 
-        await using var zipStream = File.OpenRead(zipPath);
         // The actor argument is accepted for API stability but unused — every
         // imported record's owner comes from its meta's owner_shortname, with
         // a literal "dmart" backstop when missing (set inside the service).
         // CLI default: preserveExisting=true (skip rows that already exist).
         // With -r/--replace the caller opts back into upsert-everything,
         // matching the HTTP /managed/import handler.
-        // actor: null mirrors the export call site above. ImportZipAsync's
-        // actor parameter is documented as accepted-for-API-stability-but-
-        // unused (each imported record's owner comes from its meta), so
-        // the value doesn't matter functionally — but keeping both CLI sites
-        // on `null` makes the intent ("CLI runs unfiltered, server-side")
-        // visually consistent.
-        var resp = await importService.ImportZipAsync(zipStream, actor: null, preserveExisting: !replace, fastUnsafeNoFkCheck: fast, fastParallelism: parallelism);
+        Response resp;
+        if (effectiveType == "fs")
+        {
+            resp = await importService.ImportFolderAsync(targetPath, actor: null,
+                preserveExisting: !replace, fastUnsafeNoFkCheck: fast, fastParallelism: parallelism, batchSize: batchSize);
+        }
+        else
+        {
+            await using var zipStream = File.OpenRead(targetPath);
+            resp = await importService.ImportZipAsync(zipStream, actor: null,
+                preserveExisting: !replace, fastUnsafeNoFkCheck: fast, fastParallelism: parallelism, batchSize: batchSize);
+        }
 
         if (resp.Status != Status.Success)
         {
@@ -515,22 +597,29 @@ switch (subcommand)
         var totalInserted = entries_inserted + attachments_inserted + spaces_inserted
                           + users_inserted + roles_inserted + permissions_inserted + histories_inserted;
 
-        Console.WriteLine($"Imported {totalInserted} rows from {zipPath} (skipped {skipped} existing, {failed_count} failed)");
+        Console.WriteLine($"Imported {totalInserted} rows from {targetPath} (skipped {skipped} existing, {failed_count} failed)");
         Console.WriteLine($"  entries={entries_inserted} attachments={attachments_inserted} spaces={spaces_inserted}"
             + $" users={users_inserted} roles={roles_inserted} permissions={permissions_inserted}"
             + $" histories={histories_inserted}");
 
         // When any entries failed, dump the per-record details next to the
-        // source zip as JSON Lines. One {"path":..., "kind":..., "error":...}
+        // source as JSON Lines. One {"path":..., "kind":..., "error":...}
         // record per failure so it pipes cleanly through `jq` /
-        // `grep -E '"kind":"entry"'` for triage.
+        // `grep -E '"kind":"entry"'` for triage. For zip the log lands beside
+        // the file; for fs it lands beside the source folder (uses the
+        // folder's parent dir and the folder's name as the basename).
         if (failed_count > 0
             && resp.Attributes?.GetValueOrDefault("failed") is List<Dictionary<string, object>> failedList)
         {
             var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", System.Globalization.CultureInfo.InvariantCulture);
+            var baseName = effectiveType == "fs"
+                ? Path.GetFileName(targetPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+                : Path.GetFileNameWithoutExtension(targetPath);
+            var baseDir = effectiveType == "fs"
+                ? (Path.GetDirectoryName(targetPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)) ?? ".")
+                : (Path.GetDirectoryName(targetPath) ?? ".");
             var logPath = Path.GetFullPath(
-                Path.Combine(Path.GetDirectoryName(zipPath) ?? ".",
-                    $"{Path.GetFileNameWithoutExtension(zipPath)}.import-failures-{stamp}.jsonl"));
+                Path.Combine(baseDir, $"{baseName}.import-failures-{stamp}.jsonl"));
             await using var sw = new StreamWriter(logPath, append: false);
             foreach (var f in failedList)
                 await sw.WriteLineAsync(System.Text.Json.JsonSerializer.Serialize(f,
