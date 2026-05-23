@@ -252,8 +252,8 @@ public class QueryJoinTests : IClassFixture<DmartFactory>
                 {
                     // Left (default): both orders present; matched_order has
                     // customer_a under alias, unmatched_order has empty list.
-                    shortnames.ShouldContain("/orders/matched_order");
-                    shortnames.ShouldContain("/orders/unmatched_order");
+                    shortnames.ShouldContain("orders/matched_order");
+                    shortnames.ShouldContain("orders/unmatched_order");
                     shortnames.Count.ShouldBe(2);
                     AssertMatchCount(resp.Records, "matched_order", expected: 1);
                     AssertMatchCount(resp.Records, "unmatched_order", expected: 0);
@@ -262,8 +262,8 @@ public class QueryJoinTests : IClassFixture<DmartFactory>
                 case "inner":
                 {
                     // Inner: unmatched_order is filtered out.
-                    shortnames.ShouldContain("/orders/matched_order");
-                    shortnames.ShouldNotContain("/orders/unmatched_order");
+                    shortnames.ShouldContain("orders/matched_order");
+                    shortnames.ShouldNotContain("orders/unmatched_order");
                     shortnames.Count.ShouldBe(1);
                     AssertMatchCount(resp.Records, "matched_order", expected: 1);
                     break;
@@ -274,11 +274,11 @@ public class QueryJoinTests : IClassFixture<DmartFactory>
                     // and customer_b / customer_c (never referenced)
                     // appended. customer_a should NOT appear standalone —
                     // it's already under matched_order's alias.
-                    shortnames.ShouldContain("/orders/matched_order");
-                    shortnames.ShouldNotContain("/orders/unmatched_order");
-                    shortnames.ShouldContain("/customers/customer_b");
-                    shortnames.ShouldContain("/customers/customer_c");
-                    shortnames.ShouldNotContain("/customers/customer_a");
+                    shortnames.ShouldContain("orders/matched_order");
+                    shortnames.ShouldNotContain("orders/unmatched_order");
+                    shortnames.ShouldContain("customers/customer_b");
+                    shortnames.ShouldContain("customers/customer_c");
+                    shortnames.ShouldNotContain("customers/customer_a");
                     shortnames.Count.ShouldBe(3);
                     AssertMatchCount(resp.Records, "matched_order", expected: 1);
                     break;
@@ -286,11 +286,11 @@ public class QueryJoinTests : IClassFixture<DmartFactory>
                 case "outer":
                 {
                     // Outer: both orders kept + appended unmatched rights.
-                    shortnames.ShouldContain("/orders/matched_order");
-                    shortnames.ShouldContain("/orders/unmatched_order");
-                    shortnames.ShouldContain("/customers/customer_b");
-                    shortnames.ShouldContain("/customers/customer_c");
-                    shortnames.ShouldNotContain("/customers/customer_a");
+                    shortnames.ShouldContain("orders/matched_order");
+                    shortnames.ShouldContain("orders/unmatched_order");
+                    shortnames.ShouldContain("customers/customer_b");
+                    shortnames.ShouldContain("customers/customer_c");
+                    shortnames.ShouldNotContain("customers/customer_a");
                     shortnames.Count.ShouldBe(4);
                     AssertMatchCount(resp.Records, "matched_order", expected: 1);
                     AssertMatchCount(resp.Records, "unmatched_order", expected: 0);
@@ -435,9 +435,9 @@ public class QueryJoinTests : IClassFixture<DmartFactory>
             resp.Status.ShouldBe(Status.Success);
             resp.Records.ShouldNotBeNull();
             var keys = resp.Records!.Select(r => $"{r.Subpath}/{r.Shortname}").ToHashSet();
-            keys.ShouldContain("/customers/customer_x");
-            keys.ShouldContain("/customers/customer_y");
-            keys.ShouldNotContain("/orders/ghost_order");
+            keys.ShouldContain("customers/customer_x");
+            keys.ShouldContain("customers/customer_y");
+            keys.ShouldNotContain("orders/ghost_order");
             keys.Count.ShouldBe(2);
         }
         finally
@@ -483,8 +483,8 @@ public class QueryJoinTests : IClassFixture<DmartFactory>
             resp.Status.ShouldBe(Status.Success);
             resp.Records.ShouldNotBeNull();
             var keys = resp.Records!.Select(r => $"{r.Subpath}/{r.Shortname}").ToHashSet();
-            keys.ShouldContain("/orders/order_a");
-            keys.ShouldContain("/orders/order_b");
+            keys.ShouldContain("orders/order_a");
+            keys.ShouldContain("orders/order_b");
             keys.Count.ShouldBe(2);
             AssertMatchCount(resp.Records, "order_a", expected: 0);
             AssertMatchCount(resp.Records, "order_b", expected: 0);

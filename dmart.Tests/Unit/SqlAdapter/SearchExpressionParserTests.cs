@@ -298,15 +298,16 @@ public class SearchExpressionParserTests
         var parsed = SearchExpressionParser.Parse("@payload.body.x:*delate*", 0);
 
         var combined = string.Join(" ", parsed.Clauses);
+        // Per-path filter uses the user's wildcard shape.
         combined.ShouldContain("payload::jsonb->'body'->>'x' ILIKE @s_0");
         combined.ShouldContain("jsonb_typeof(payload::jsonb->'body'->'x') = 'string'");
-        // pg_trgm prefilter — same pattern bound twice, so the GIN
-        // index on (payload::text) can serve the lookup before the
-        // precise per-path ILIKE prunes false positives.
-        combined.ShouldContain("payload::text ILIKE @s_0");
+        // pg_trgm prefilter is a separate param so it can be
+        // contains-form regardless of the per-path pattern.
+        combined.ShouldContain("payload::text ILIKE @s_1");
         combined.ShouldNotContain("payload::jsonb @>");
-        parsed.Parameters.Count.ShouldBe(1);
-        parsed.Parameters[0].Value.ShouldBe("%delate%");
+        parsed.Parameters.Count.ShouldBe(2);
+        parsed.Parameters[0].Value.ShouldBe("%delate%");  // per-path
+        parsed.Parameters[1].Value.ShouldBe("%delate%");  // prefilter (same here)
     }
 
     [Fact]
@@ -316,11 +317,14 @@ public class SearchExpressionParserTests
 
         var combined = string.Join(" ", parsed.Clauses);
         combined.ShouldContain("ILIKE @s_0");
-        // Prefilter applies to prefix too — the trigram GIN can serve
-        // `delate%` lookups just as well as `%delate%`.
-        combined.ShouldContain("payload::text ILIKE @s_0");
-        parsed.Parameters.Count.ShouldBe(1);
-        parsed.Parameters[0].Value.ShouldBe("delate%");
+        combined.ShouldContain("payload::text ILIKE @s_1");
+        // Prefilter is contains-form even though per-path is prefix-form.
+        // Without this, `payload::text ILIKE 'delate%'` would require
+        // the payload to START with "delate" — but it starts with `{`,
+        // so nothing matches.
+        parsed.Parameters.Count.ShouldBe(2);
+        parsed.Parameters[0].Value.ShouldBe("delate%");   // per-path (prefix)
+        parsed.Parameters[1].Value.ShouldBe("%delate%");  // prefilter (contains)
     }
 
     [Fact]
@@ -330,12 +334,12 @@ public class SearchExpressionParserTests
 
         var combined = string.Join(" ", parsed.Clauses);
         combined.ShouldContain("ILIKE @s_0");
-        // Prefilter applies to suffix too. Suffix patterns (`%delate`)
-        // are typically less selective than contains, but pg_trgm
-        // still helps when the trailing substring is rare.
-        combined.ShouldContain("payload::text ILIKE @s_0");
-        parsed.Parameters.Count.ShouldBe(1);
-        parsed.Parameters[0].Value.ShouldBe("%delate");
+        combined.ShouldContain("payload::text ILIKE @s_1");
+        // Same reasoning — prefilter contains-form so the GIN serves
+        // the lookup regardless of the per-path wildcard position.
+        parsed.Parameters.Count.ShouldBe(2);
+        parsed.Parameters[0].Value.ShouldBe("%delate");   // per-path (suffix)
+        parsed.Parameters[1].Value.ShouldBe("%delate%");  // prefilter (contains)
     }
 
     [Fact]
@@ -422,12 +426,17 @@ public class SearchExpressionParserTests
 
         var combined = string.Join(" ", parsed.Clauses);
         // Both alternates produce ILIKE patterns joined by " OR ".
+        // Each positive wildcard binds two params: per-path + prefilter.
         combined.ShouldContain("ILIKE @s_0");
         combined.ShouldContain("ILIKE @s_1");
+        combined.ShouldContain("ILIKE @s_2");
+        combined.ShouldContain("ILIKE @s_3");
         combined.ShouldContain(" OR ");
-        parsed.Parameters.Count.ShouldBe(2);
-        parsed.Parameters[0].Value.ShouldBe("%foo%");
-        parsed.Parameters[1].Value.ShouldBe("bar%");
+        parsed.Parameters.Count.ShouldBe(4);
+        parsed.Parameters[0].Value.ShouldBe("%foo%");   // *foo* per-path
+        parsed.Parameters[1].Value.ShouldBe("%foo%");   // *foo* prefilter
+        parsed.Parameters[2].Value.ShouldBe("bar%");    // bar* per-path
+        parsed.Parameters[3].Value.ShouldBe("%bar%");   // bar* prefilter
     }
 
     [Fact]

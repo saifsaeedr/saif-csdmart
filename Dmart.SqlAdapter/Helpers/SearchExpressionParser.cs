@@ -689,17 +689,17 @@ public static class SearchExpressionParser
                 // Patterns shorter than 3 chars (`*ab*`, `*x*`) can't be
                 // serviced by a trigram index — PG's planner falls back
                 // to seq scan automatically in that case.
-                var escaped = value
+                // Per-path pattern: preserves the user's wildcard position
+                // (prefix `foo*` → `foo%`, suffix `*foo` → `%foo`,
+                // contains `*foo*` → `%foo%`).
+                var perPathPattern = value
                     .Replace("\\", "\\\\")
                     .Replace("%", "\\%")
-                    .Replace("_", "\\_");
-                var p = ctx.Add(escaped.Replace('*', '%'));
+                    .Replace("_", "\\_")
+                    .Replace('*', '%');
+                var pPath = ctx.Add(perPathPattern);
+
                 var pathExpr = $"payload::jsonb->{arrowPath}";
-                // Trigram prefilter — same pattern as the per-path filter
-                // below, but targeting the full payload text so the GIN
-                // index can serve it. AND'd into both the positive and
-                // negative branches.
-                var trgmPrefilter = $"payload::text ILIKE {p}";
                 if (data.Negative)
                 {
                     // A direct `NOT (typeof='string' AND ILIKE pattern)` is
@@ -717,12 +717,26 @@ public static class SearchExpressionParser
                     // precise per-path negated check; planner will pick
                     // the most selective path.
                     conditions.Add(
-                        $"({pathExpr} IS NULL OR jsonb_typeof({pathExpr}) IS DISTINCT FROM 'string' OR {textExtract} NOT ILIKE {p})");
+                        $"({pathExpr} IS NULL OR jsonb_typeof({pathExpr}) IS DISTINCT FROM 'string' OR {textExtract} NOT ILIKE {pPath})");
                 }
                 else
                 {
+                    // Trigram prefilter: contains-form regardless of the
+                    // per-path wildcard position. Without this, a prefix
+                    // pattern (`foo*`) would prefilter for "payload text
+                    // starts with foo", which never matches because the
+                    // serialized payload starts with `{`. Strip user `*`
+                    // markers, escape metachars, convert remaining mid-
+                    // pattern `*` to `%`, wrap in `%...%`.
+                    var core = value.Trim('*');
+                    var corePattern = "%" + core
+                        .Replace("\\", "\\\\")
+                        .Replace("%", "\\%")
+                        .Replace("_", "\\_")
+                        .Replace('*', '%') + "%";
+                    var pPre = ctx.Add(corePattern);
                     conditions.Add(
-                        $"({trgmPrefilter} AND jsonb_typeof({pathExpr}) = 'string' AND {textExtract} ILIKE {p})");
+                        $"(payload::text ILIKE {pPre} AND jsonb_typeof({pathExpr}) = 'string' AND {textExtract} ILIKE {pPath})");
                 }
                 continue;
             }

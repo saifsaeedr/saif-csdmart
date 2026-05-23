@@ -694,6 +694,29 @@ public static class QueryHelper
         var conditions = new List<string>();
         var compOp = data.ComparisonOperator;
 
+        // Null check: `@path:null` matches when the field is missing OR its
+        // JSON value is null. Negated form (`-@path:null`) requires the
+        // field to exist with a non-null value. Only fires for a lone
+        // `null` token (case-insensitive), not when null is one of several
+        // alternation values or part of a literal like `nullified`.
+        //
+        // Mirrors the equivalent block in
+        // Dmart.SqlAdapter/Helpers/SearchExpressionParser.cs (the SDK
+        // parser). The two implementations stay in sync by convention
+        // until the parser unification (Option C) lands — until then,
+        // any grammar change here MUST also land there. See
+        // MetacharDriftTests for the contract-test pattern that catches
+        // these.
+        if (!data.IsRange && compOp is null
+            && data.Values.Count == 1
+            && data.Values[0].Equals("null", StringComparison.OrdinalIgnoreCase))
+        {
+            var pathExpr = $"payload::jsonb->{arrowPath}";
+            return data.Negative
+                ? $"({pathExpr} IS NOT NULL AND jsonb_typeof({pathExpr}) != 'null')"
+                : $"({pathExpr} IS NULL OR jsonb_typeof({pathExpr}) = 'null')";
+        }
+
         if (data.ValueType == "boolean")
         {
             foreach (var v in data.Values)
@@ -712,6 +735,76 @@ public static class QueryHelper
         foreach (var value in data.Values)
         {
             bool isNum = NumericRegex.IsMatch(value);
+
+            // Wildcard: `*` in value → ILIKE on the textually-extracted
+            // value, with a pg_trgm-accelerated `payload::text ILIKE`
+            // prefilter (see idx_entries_payload_trgm in SqlSchema.cs).
+            // Supports prefix (`foo*`), suffix (`*foo`), contains
+            // (`*foo*`). A lone `*` with Values.Count == 1 is captured
+            // by the existence check higher up the parser; a lone `*`
+            // inside an alternation (e.g. `@k:vip|*`) falls through to
+            // JSONB containment as the literal string "*", matching
+            // the existing alternation contract.
+            //
+            // Mirrors the equivalent block in
+            // Dmart.SqlAdapter/Helpers/SearchExpressionParser.cs (the
+            // SDK parser). Must stay in sync until parser unification
+            // lands.
+            if (compOp is null && value.Length > 1 && value.Contains('*'))
+            {
+                // Per-path pattern: escape PG's ILIKE metachars (\ % _)
+                // BEFORE swapping `*` → `%`, so user-supplied literal
+                // `%`/`_`/`\` don't act as wildcards or escape sequences.
+                // This pattern preserves the user's wildcard position:
+                // prefix (`foo*` → `foo%`), suffix (`*foo` → `%foo`),
+                // contains (`*foo*` → `%foo%`).
+                var perPathPattern = value
+                    .Replace("\\", "\\\\")
+                    .Replace("%", "\\%")
+                    .Replace("_", "\\_")
+                    .Replace('*', '%');
+                args.Add(new() { Value = perPathPattern });
+                var pPath = args.Count;
+
+                var pathExpr = $"payload::jsonb->{arrowPath}";
+                if (data.Negative)
+                {
+                    // 3VL: `NOT (typeof='string' AND ILIKE)` is wrong
+                    // when the field is missing — both inner operands
+                    // are NULL, NOT-NULL is NULL, WHERE drops the row.
+                    // Spell out the three passing cases.
+                    //
+                    // Negated form skips the trigram prefilter — the
+                    // index tells us which rows DO match, opposite of
+                    // what NOT wants. Planner picks the most selective
+                    // access path on its own.
+                    conditions.Add(
+                        $"({pathExpr} IS NULL OR jsonb_typeof({pathExpr}) IS DISTINCT FROM 'string' OR {textExtract} NOT ILIKE ${pPath})");
+                }
+                else
+                {
+                    // Trigram prefilter pattern: strip the user's leading/
+                    // trailing `*` markers, escape literal metachars,
+                    // convert any remaining mid-pattern `*` to `%`, then
+                    // wrap in `%...%`. The trigram GIN's `payload::text
+                    // ILIKE` lookup needs contains-form regardless of
+                    // whether the per-path pattern is prefix/suffix/
+                    // contains — without this, `foo*` would prefilter
+                    // for "payload text starts with foo", which never
+                    // matches because the payload text starts with `{`.
+                    var core = value.Trim('*');
+                    var corePattern = "%" + core
+                        .Replace("\\", "\\\\")
+                        .Replace("%", "\\%")
+                        .Replace("_", "\\_")
+                        .Replace('*', '%') + "%";
+                    args.Add(new() { Value = corePattern });
+                    var pPre = args.Count;
+                    conditions.Add(
+                        $"(payload::text ILIKE ${pPre} AND jsonb_typeof({pathExpr}) = 'string' AND {textExtract} ILIKE ${pPath})");
+                }
+                continue;
+            }
 
             // Numeric comparison operator
             if (isNum && compOp is not null)

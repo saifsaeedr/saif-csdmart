@@ -55,7 +55,18 @@ public sealed class SchemaInitializer(Db db, ILogger<SchemaInitializer> log) : I
                     {
                         try
                         {
+                            // CA2100: the strings in SqlSchema.ConcurrentIndexes
+                            // are hardcoded literals (no user input concatenated
+                            // in), but because the analyzer sees them only as
+                            // array elements rather than const literals it
+                            // can't prove the lack of injection statically.
+                            // Same reasoning applies to the NpgsqlCommand call
+                            // for SqlSchema.CreateAll above — that one happens
+                            // to use a `public const string` which the analyzer
+                            // recognizes; this one uses a static readonly array.
+#pragma warning disable CA2100
                             await using var icmd = new NpgsqlCommand(sql, conn);
+#pragma warning restore CA2100
                             icmd.CommandTimeout = 0;
                             await icmd.ExecuteNonQueryAsync(ct);
                             log.LogInformation("concurrent index ready: {Sql}", sql);
