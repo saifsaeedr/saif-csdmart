@@ -1,5 +1,6 @@
 <Solution>
   <Project Path="Dmart.Models/Dmart.Models.csproj" />
+  <Project Path="Dmart.QueryGrammar/Dmart.QueryGrammar.csproj" />
   <Project Path="dmart.csproj" />
   <Project Path="dmart.Client/dmart.Client.csproj" />
   <Project Path="dmart.Tests/dmart.Tests.csproj" />

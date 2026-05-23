@@ -6,6 +6,7 @@ using Dmart.Models.Api;
 using Dmart.Models.Core;
 using Dmart.Models.Enums;
 using Dmart.Models.Json;
+using Dmart.QueryGrammar;
 using Microsoft.Extensions.Options;
 using Npgsql;
 using NpgsqlTypes;
@@ -846,7 +847,7 @@ public sealed class QueryService(
                         {
                             if (v is null) continue;
                             var formatted = FormatValue(v);
-                            if (HasSearchMetachar(formatted)) { pairHasUnsafe = true; break; }
+                            if (!SearchExpressionParser.IsSafeForAlternationValue(formatted)) { pairHasUnsafe = true; break; }
                             leftValues.Add(formatted);
                         }
                         if (pairHasUnsafe) break;
@@ -1248,35 +1249,6 @@ public sealed class QueryService(
         bool b => b ? "True" : "False",  // Python str(True) == "True"
         _ => Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture) ?? "",
     };
-
-    // Characters with semantic weight in SearchExpressionParser: a value
-    // containing any of them can't be safely interpolated into a synthesized
-    // `@field:v1|v2` clause without changing the parse. Used by
-    // ApplyClientJoinsAsync to decide when the value-narrowing optimization
-    // is unsafe and we should fall back to fetching the right side with the
-    // user's search alone.
-    //
-    // Mirror of SearchExpressionParser.IsSafeForAlternationValue in
-    // Dmart.SqlAdapter. We can't share — dmart.csproj excludes
-    // Dmart.SqlAdapter from compilation (the SDK uses reflection-based STJ
-    // and isn't AOT-safe). The duplication is covered by a contract test
-    // in dmart.Tests/Unit/SqlAdapter/MetacharDriftTests.cs which feeds
-    // representative inputs through both and asserts agreement — so a
-    // future parser-grammar change that touches one but not the other
-    // turns red at CI time.
-    private static bool HasSearchMetachar(string s)
-    {
-        foreach (var c in s)
-        {
-            if (c == '|' || c == ':' || c == '*' || c == '('
-                || c == ')' || c == '[' || c == ']' || c == '{'
-                || c == '}' || c == '"' || c == '\'' || c == '\\'
-                || c == '@' || c == '<' || c == '>' || c == '='
-                || c == '!' || char.IsWhiteSpace(c))
-                return true;
-        }
-        return false;
-    }
 
     // ====================================================================
     // FILTER FIELDS VALUES (row-level ACL via search-clause merge)

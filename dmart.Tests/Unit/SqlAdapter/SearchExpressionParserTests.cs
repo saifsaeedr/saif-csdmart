@@ -1,4 +1,4 @@
-using Dmart.SqlAdapter.Helpers;
+using Dmart.QueryGrammar;
 using Shouldly;
 using Xunit;
 

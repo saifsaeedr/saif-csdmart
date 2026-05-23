@@ -108,6 +108,14 @@
     <Compile Remove="dmart.Client/**" />
     <Content Remove="dmart.Client/**" />
     <None Remove="dmart.Client/**" />
+    <!-- Dmart.QueryGrammar is a sibling project containing the shared
+         @field:value parser. Same Compile-glob exclusion pattern as
+         Dmart.Models / dmart.Client so its .cs files don't pull into
+         this assembly. The ProjectReference below pulls in the net10.0
+         build for AOT linkage. -->
+    <Compile Remove="Dmart.QueryGrammar/**" />
+    <Content Remove="Dmart.QueryGrammar/**" />
+    <None Remove="Dmart.QueryGrammar/**" />
     <None Remove="catalog\**" />
     <None Remove="cxb\**" />
   </ItemGroup>
@@ -121,6 +129,12 @@
          The server's own AOT publish still applies to the net10.0 copy
          of Dmart.Models that gets linked into the binary. -->
     <ProjectReference Include="Dmart.Models/Dmart.Models.csproj">
+      <UndefineProperties>PublishAot;StripSymbols</UndefineProperties>
+    </ProjectReference>
+    <!-- Shared parser. Same UndefineProperties trick: the netstandard2.1
+         leg of Dmart.QueryGrammar can't AOT, but the net10.0 leg the
+         server links against can. -->
+    <ProjectReference Include="Dmart.QueryGrammar/Dmart.QueryGrammar.csproj">
       <UndefineProperties>PublishAot;StripSymbols</UndefineProperties>
     </ProjectReference>
   </ItemGroup>

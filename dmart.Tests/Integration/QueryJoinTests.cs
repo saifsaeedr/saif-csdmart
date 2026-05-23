@@ -346,10 +346,11 @@ public class QueryJoinTests : IClassFixture<DmartFactory>
 
             await SeedEntryAsync(entries, spaceName, "/orders", "safe_order", ResourceType.Content,
                 new() { ["customer"] = JsonDocument.Parse("\"customer_a\"").RootElement });
-            // The metachar in the value forces HasSearchMetachar to bail.
-            // Without the client-side fallback the join would throw or
-            // silently un-join. Quoting the JSON literal escapes backslash
-            // so `\\` lands as a single `\` in the value.
+            // The metachar in the value makes
+            // SearchExpressionParser.IsSafeForAlternationValue return false,
+            // forcing the client-side join fallback. Without it the join
+            // would throw or silently un-join. Quoting the JSON literal
+            // escapes backslash so `\\` lands as a single `\` in the value.
             var unsafeValue = $"cust{metachar}escape";
             var unsafeJsonValue = JsonSerializer.Serialize(unsafeValue);
             await SeedEntryAsync(entries, spaceName, "/orders", "unsafe_order", ResourceType.Content,

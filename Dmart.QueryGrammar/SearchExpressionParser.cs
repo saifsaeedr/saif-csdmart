@@ -4,7 +4,7 @@ using System.Text.RegularExpressions;
 using Npgsql;
 using NpgsqlTypes;
 
-namespace Dmart.SqlAdapter.Helpers;
+namespace Dmart.QueryGrammar;
 
 // Port of csdmart/DataAdapters/Sql/QueryHelper.cs — the RediSearch-flavoured
 // `@field:value` parser the dmart HTTP server uses to build SQL WHERE clauses.
@@ -32,6 +32,26 @@ namespace Dmart.SqlAdapter.Helpers;
 // `<col>::text = $v` against entries would error. Anything else falls
 // through to csdmart's exact behaviour, including the `<col>::text` path
 // (which still errors against unknown columns — that's csdmart parity).
+/// <summary>
+/// Controls the placeholder style emitted by <see cref="SearchExpressionParser.Parse(string, int, PlaceholderStyle)"/>.
+/// </summary>
+/// <remarks>
+/// Two callers, two conventions. The SDK (<c>DmartSqlAdapter.QueryAsync</c>) builds
+/// commands with named placeholders so it can coexist with <c>@space</c>/<c>@subpath</c>/etc.;
+/// the server's <c>QueryHelper</c> uses positional <c>$N</c> placeholders against a
+/// flat <c>List&lt;NpgsqlParameter&gt;</c>. Mixing styles in one command works on some
+/// Npgsql versions and breaks on others, so the parser emits whichever style the
+/// caller is already using — no mixing.
+/// </remarks>
+public enum PlaceholderStyle
+{
+    /// <summary>Emit <c>@s_&lt;n&gt;</c> named placeholders; parameters carry that name.</summary>
+    Named,
+
+    /// <summary>Emit <c>$N</c> positional placeholders; parameters are nameless and bound by position.</summary>
+    Positional,
+}
+
 public static class SearchExpressionParser
 {
     public sealed record Parsed(IReadOnlyList<string> Clauses, IReadOnlyList<NpgsqlParameter> Parameters);
@@ -78,23 +98,24 @@ public static class SearchExpressionParser
     /// </summary>
     /// <param name="expression">The search expression — see class docs for grammar.</param>
     /// <param name="startingParamIndex">
-    /// Numeric suffix the parser appends to its placeholder names. Emitted
-    /// parameters are named <c>@s_&lt;n&gt;</c> where <c>n</c> starts at this
-    /// value and increments per bind. The CALLER is responsible for ensuring
-    /// no name collision with their own parameters; today's caller
-    /// (<c>DmartSqlAdapter.QueryAsync</c>) uses
-    /// <c>@space</c> / <c>@subpath</c> / <c>@subpath_prefix</c> /
-    /// <c>@rt&lt;i&gt;</c> / <c>@sn&lt;i&gt;</c> / <c>@schema&lt;i&gt;</c> /
-    /// <c>@tags</c> / <c>@from</c> / <c>@to</c> / <c>@limit</c> /
-    /// <c>@offset</c> — all collision-free with the <c>@s_*</c> namespace.
+    /// Numeric suffix used in emitted placeholders. With
+    /// <see cref="PlaceholderStyle.Named"/> the parser emits <c>@s_&lt;n&gt;</c>
+    /// where <c>n</c> starts here; with <see cref="PlaceholderStyle.Positional"/>
+    /// it emits <c>$N</c> where <c>N = startingParamIndex + 1</c> (Npgsql is
+    /// 1-based). Caller is responsible for ensuring no name/position collision
+    /// with their own parameters.
     /// </param>
-    public static Parsed Parse(string expression, int startingParamIndex)
+    /// <param name="style">
+    /// Placeholder style — see <see cref="PlaceholderStyle"/>. Defaults to
+    /// <see cref="PlaceholderStyle.Named"/> for the SDK's historical behaviour.
+    /// </param>
+    public static Parsed Parse(string expression, int startingParamIndex, PlaceholderStyle style = PlaceholderStyle.Named)
     {
         var clauses = new List<string>();
         var pars = new List<NpgsqlParameter>();
         if (string.IsNullOrWhiteSpace(expression)) return new Parsed(clauses, pars);
 
-        var ctx = new ParamCtx(startingParamIndex);
+        var ctx = new ParamCtx(startingParamIndex, style);
 
         var groups = ParseSearchExpression(expression);
         var allGroupSql = new List<string>();
@@ -132,13 +153,29 @@ public static class SearchExpressionParser
     private sealed class ParamCtx
     {
         private int _next;
+        private readonly PlaceholderStyle _style;
         public List<NpgsqlParameter> Parameters { get; } = new();
-        public ParamCtx(int start) { _next = start; }
+        public ParamCtx(int start, PlaceholderStyle style) { _next = start; _style = style; }
 
-        // Bind a value, return the @name to splice into SQL.
+        // Bind a value, return the placeholder text to splice into SQL.
+        // For Named: emits @s_<n> and tags the NpgsqlParameter with that name.
+        // For Positional: emits $<n+1> (Npgsql is 1-based) and leaves the
+        // parameter nameless so Npgsql binds by position.
         public string Add(object? value, NpgsqlDbType? dbType = null)
         {
-            var name = "@s_" + _next.ToString(CultureInfo.InvariantCulture);
+            string placeholder;
+            string? paramName;
+            if (_style == PlaceholderStyle.Named)
+            {
+                placeholder = "@s_" + _next.ToString(CultureInfo.InvariantCulture);
+                paramName = placeholder;
+            }
+            else
+            {
+                // Positional: Npgsql $N is 1-based; _next is 0-based, so add 1.
+                placeholder = "$" + (_next + 1).ToString(CultureInfo.InvariantCulture);
+                paramName = null;
+            }
             _next++;
             NpgsqlParameter p;
             if (dbType.HasValue)
@@ -146,14 +183,18 @@ public static class SearchExpressionParser
                 // Set the type BEFORE Value so Npgsql doesn't pre-infer text
                 // and then refuse the cast. Critical for jsonb (containment
                 // params for `payload @> $literal`) and boolean.
-                p = new NpgsqlParameter(name, dbType.Value) { Value = value ?? DBNull.Value };
+                p = paramName is null
+                    ? new NpgsqlParameter { NpgsqlDbType = dbType.Value, Value = value ?? DBNull.Value }
+                    : new NpgsqlParameter(paramName, dbType.Value) { Value = value ?? DBNull.Value };
             }
             else
             {
-                p = new NpgsqlParameter(name, value ?? DBNull.Value);
+                p = paramName is null
+                    ? new NpgsqlParameter { Value = value ?? DBNull.Value }
+                    : new NpgsqlParameter(paramName, value ?? DBNull.Value);
             }
             Parameters.Add(p);
-            return name;
+            return placeholder;
         }
     }
 
