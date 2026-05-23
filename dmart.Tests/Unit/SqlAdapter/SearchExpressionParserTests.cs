@@ -328,17 +328,55 @@ public class SearchExpressionParserTests
     }
 
     [Fact]
-    public void Payload_Wildcard_Negated_Wraps_Match_In_NOT()
+    public void Payload_Wildcard_Negated_Allows_Missing_Or_NonString_Fields()
     {
         // -@k:*foo* should let rows pass when the field is missing,
-        // non-string, or a string that doesn't contain "foo". The simplest
-        // representation: NOT (typeof='string' AND ILIKE pattern).
+        // non-string, or a string that doesn't contain "foo". A direct
+        // `NOT (typeof='string' AND ILIKE pattern)` is wrong: when the
+        // field is absent both inner operands are NULL, NOT-NULL is NULL,
+        // and WHERE drops the row. We spell out the three passing cases
+        // (IS NULL, non-string, NOT ILIKE) so all of them evaluate cleanly
+        // to TRUE under three-valued logic.
         var parsed = SearchExpressionParser.Parse("-@payload.body.x:*delate*", 0);
 
         var combined = string.Join(" ", parsed.Clauses);
-        combined.ShouldContain("NOT");
-        combined.ShouldContain("ILIKE @s_0");
+        combined.ShouldContain("payload::jsonb->'body'->'x' IS NULL");
+        combined.ShouldContain("IS DISTINCT FROM 'string'");
+        combined.ShouldContain("NOT ILIKE @s_0");
         parsed.Parameters[0].Value.ShouldBe("%delate%");
+    }
+
+    [Fact]
+    public void Payload_Wildcard_Escapes_Literal_Percent_Underscore_Backslash()
+    {
+        // PG's default LIKE metachars (%, _, \) must be escaped BEFORE we
+        // swap `*` → `%`, otherwise user-supplied literals act as wildcards
+        // or escape sequences. Worst-case prior behavior: `code:100%off*`
+        // matched every record with a string `code` field because `%` was
+        // an unescaped wildcard.
+        var parsed = SearchExpressionParser.Parse("@payload.body.code:100%off_v\\*", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain("ILIKE @s_0");
+        // `\` → `\\`, `%` → `\%`, `_` → `\_`, `*` → `%`.
+        parsed.Parameters[0].Value.ShouldBe(@"100\%off\_v\\%");
+    }
+
+    [Fact]
+    public void Payload_Wildcard_Lone_Star_In_Alternation_Falls_Through_To_Containment()
+    {
+        // `@k:vip|*` previously hit the wildcard branch on the `*` value
+        // and emitted `ILIKE '%'` — matching every string-typed row. With
+        // the `value.Length > 1` guard the lone `*` falls through to the
+        // normal containment path for the literal string "*", consistent
+        // with the rest of the alternation grammar.
+        var parsed = SearchExpressionParser.Parse("@payload.body.x:vip|*", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        // `vip` builds a containment literal; `*` likewise (as the literal
+        // single-char string) — neither emits ILIKE.
+        combined.ShouldNotContain("ILIKE");
+        combined.ShouldContain("@>");
     }
 
     [Fact]

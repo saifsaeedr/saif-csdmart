@@ -618,15 +618,40 @@ public static class SearchExpressionParser
 
             // Wildcard: `*` in value → ILIKE pattern on the textually-extracted
             // value, guarded by `jsonb_typeof = 'string'`. Supports prefix
-            // (`foo*`), suffix (`*foo`), and contains (`*foo*`). Negative form
-            // wraps the entire match in NOT so missing/non-string fields pass.
-            // We DON'T enter this branch for a lone `*` (existence check is
-            // handled upstream) or for ranges/comparison ops.
-            if (compOp is null && value.Contains('*'))
+            // (`foo*`), suffix (`*foo`), and contains (`*foo*`). A lone `*`
+            // value with `Values.Count == 1` is captured by the existence
+            // check at line 333; a lone `*` inside an alternation (e.g.
+            // `@k:vip|*`) falls through to JSONB containment as the literal
+            // string "*", matching the existing alternation contract.
+            if (compOp is null && value.Length > 1 && value.Contains('*'))
             {
-                var p = ctx.Add(value.Replace('*', '%'));
-                var match = $"(jsonb_typeof(payload::jsonb->{arrowPath}) = 'string' AND {textExtract} ILIKE {p})";
-                conditions.Add(data.Negative ? $"(NOT {match})" : match);
+                // Escape PG's default LIKE metachars (\ % _) BEFORE swapping
+                // `*` → `%`, so user-supplied literal `%`/`_`/`\` don't act
+                // as wildcards or escape sequences. PG's default LIKE escape
+                // is `\`, so `\\` / `\%` / `\_` round-trip cleanly without
+                // needing an explicit ESCAPE clause.
+                var escaped = value
+                    .Replace("\\", "\\\\")
+                    .Replace("%", "\\%")
+                    .Replace("_", "\\_");
+                var p = ctx.Add(escaped.Replace('*', '%'));
+                var pathExpr = $"payload::jsonb->{arrowPath}";
+                if (data.Negative)
+                {
+                    // A direct `NOT (typeof='string' AND ILIKE pattern)` is
+                    // wrong: when the field is missing, `jsonb_typeof(NULL)`
+                    // and `textExtract` both yield SQL NULL, the inner AND
+                    // becomes NULL, and `NOT NULL` is NULL — which WHERE
+                    // drops. Spell out the three disjoint passing cases so
+                    // missing / non-string / non-matching all evaluate to
+                    // TRUE under three-valued logic.
+                    conditions.Add(
+                        $"({pathExpr} IS NULL OR jsonb_typeof({pathExpr}) IS DISTINCT FROM 'string' OR {textExtract} NOT ILIKE {p})");
+                }
+                else
+                {
+                    conditions.Add($"(jsonb_typeof({pathExpr}) = 'string' AND {textExtract} ILIKE {p})");
+                }
                 continue;
             }
 

@@ -108,7 +108,24 @@ public sealed class QueryService(
                     // the client asked for a filter and we couldn't honor it, so
                     // returning un-filtered data would be misleading.
                     return jqFail;
-                response = response with { Records = joined };
+                // After Inner/Right/Outer joins the response cardinality
+                // differs from `returned` (which the per-type query set
+                // before the join ran). Resync it so consumers iterating
+                // Records match the attribute. `total` keeps its meaning
+                // as the base-table count.
+                Dictionary<string, object>? newAttrs = null;
+                if (response.Attributes is not null && response.Attributes.ContainsKey("returned"))
+                {
+                    newAttrs = new Dictionary<string, object>(response.Attributes, StringComparer.Ordinal)
+                    {
+                        ["returned"] = joined.Count,
+                    };
+                }
+                response = response with
+                {
+                    Records = joined,
+                    Attributes = newAttrs ?? response.Attributes,
+                };
             }
             catch (Exception ex)
             {
@@ -790,31 +807,98 @@ public sealed class QueryService(
             if (subQuery is null) continue;
             int? userLimit = subQuery.Limit > 0 ? subQuery.Limit : null;
 
-            // Build per-pair search terms ("@right:val1|val2|...") from the
-            // base records' left-path values.
+            // Right/Outer joins MUST surface right records the base set never
+            // references, so we can't narrow the sub-query by left-side
+            // values. Left/Inner can use a narrowing search as an
+            // optimization — but only when every base value is parser-safe
+            // (no `|`, `:`, `*`, `[`, `(`, `)`, `"`, `@`, whitespace); a
+            // tenant-controlled value carrying any of those would corrupt
+            // the synthesized `@field:v1|v2` expression. When narrowing is
+            // unsafe, we fall back to pulling with the user's search alone
+            // and matching client-side (bounded by the 1000-row cap below).
+            var joinType = joinItem.Type ?? JoinType.Left;
+            var isRightOrOuter = joinType is JoinType.Right or JoinType.Outer;
+
+            // Build narrowing terms for Left/Inner. For Right/Outer we leave
+            // searchTerms empty so the sub-query returns the full right side.
             var searchTerms = new List<string>();
-            var possibleMatch = true;
-            foreach (var (lPath, lArr, rPath, _) in parsedJoins)
+            var hasLeftValues = false;
+            var canNarrow = !isRightOrOuter;
+            if (canNarrow)
             {
-                var leftValues = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var (lPath, lArr, rPath, _) in parsedJoins)
+                {
+                    var leftValues = new HashSet<string>(StringComparer.Ordinal);
+                    var pairHasUnsafe = false;
+                    foreach (var br in baseRecords)
+                    {
+                        foreach (var v in GetValuesFromRecord(br, lPath, lArr))
+                        {
+                            if (v is null) continue;
+                            var formatted = FormatValue(v);
+                            if (HasSearchMetachar(formatted)) { pairHasUnsafe = true; break; }
+                            leftValues.Add(formatted);
+                        }
+                        if (pairHasUnsafe) break;
+                    }
+                    if (pairHasUnsafe || leftValues.Count == 0)
+                    {
+                        canNarrow = false;
+                        searchTerms.Clear();
+                        if (leftValues.Count > 0) hasLeftValues = true;
+                        break;
+                    }
+                    hasLeftValues = true;
+                    searchTerms.Add($"@{rPath}:{string.Join('|', leftValues)}");
+                }
+            }
+            // Probe for any left value when we couldn't narrow (Right/Outer,
+            // or Left/Inner fell back). Used below to decide whether a
+            // user-search-less Left/Inner pull is worth doing at all.
+            if (!hasLeftValues && (isRightOrOuter || !canNarrow))
+            {
                 foreach (var br in baseRecords)
                 {
-                    foreach (var v in GetValuesFromRecord(br, lPath, lArr))
+                    if (hasLeftValues) break;
+                    foreach (var (lPath, lArr, _, _) in parsedJoins)
                     {
-                        if (v is not null) leftValues.Add(FormatValue(v));
+                        var found = false;
+                        foreach (var v in GetValuesFromRecord(br, lPath, lArr))
+                            if (v is not null) { found = true; break; }
+                        if (found) { hasLeftValues = true; break; }
                     }
                 }
-                if (leftValues.Count == 0) { possibleMatch = false; break; }
-                searchTerms.Add($"@{rPath}:{string.Join('|', leftValues)}");
             }
 
+            // Fetch the sub-query unless there's nothing to match and no
+            // unmatched-rights to surface either — i.e. Left/Inner with no
+            // base values and no user filter is a no-op.
+            var shouldFetch = isRightOrOuter
+                || (canNarrow && searchTerms.Count > 0)
+                || hasLeftValues
+                || !string.IsNullOrEmpty(subQuery.Search);
+
             List<Record> rightRecords = new();
-            if (possibleMatch)
+            if (shouldFetch)
             {
-                var injectedSearch = string.Join(' ', searchTerms);
-                var combinedSearch = string.IsNullOrEmpty(subQuery.Search)
-                    ? injectedSearch
-                    : $"{subQuery.Search} {injectedSearch}";
+                string? combinedSearch;
+                if (canNarrow && searchTerms.Count > 0)
+                {
+                    var injectedSearch = string.Join(' ', searchTerms);
+                    // Concatenating with a user-supplied Search only AND's
+                    // when the user search has no top-level parens — paren'd
+                    // groups OR with the injected term (see ParseSearchExpression).
+                    // Callers using paren'd sub-query filters need to express
+                    // their own narrowing.
+                    combinedSearch = string.IsNullOrEmpty(subQuery.Search)
+                        ? injectedSearch
+                        : $"{subQuery.Search} {injectedSearch}";
+                }
+                else
+                {
+                    combinedSearch = string.IsNullOrEmpty(subQuery.Search) ? null : subQuery.Search;
+                }
+
                 // Python caps sub-query at 1000 so a single join pull can't
                 // blow up memory when the base set is wide. Sub-query's
                 // jq_filter applies to the join's matched_list below (wrapped
@@ -951,13 +1035,13 @@ public sealed class QueryService(
             // alias so downstream consumers see a consistent shape; you can
             // tell them apart from "unmatched left" by comparing the record's
             // own Subpath/Shortname against the sub-query's subpath.
-            var keepBase = joinItem.Type is JoinType.Inner or JoinType.Right;
-            var appendUnmatchedRights = joinItem.Type is JoinType.Right or JoinType.Outer;
+            var dropUnmatchedBase = joinType is JoinType.Inner or JoinType.Right;
+            var appendUnmatchedRights = joinType is JoinType.Right or JoinType.Outer;
 
             var survivors = new List<Record>(baseRecords.Count);
             for (var i = 0; i < baseRecords.Count; i++)
             {
-                if (keepBase && matchedByBase[i].Count == 0) continue;
+                if (dropUnmatchedBase && matchedByBase[i].Count == 0) continue;
                 var attrs = baseRecords[i].Attributes!;
                 var joinDict = (Dictionary<string, object>)attrs["join"];
                 joinDict[joinItem.Alias] = joinPayloads[i] ?? (object)matchedByBase[i];
@@ -979,8 +1063,18 @@ public sealed class QueryService(
                     var rec = rr;
                     if (rec.Attributes is null)
                         rec = rec with { Attributes = new Dictionary<string, object>() };
-                    if (!rec.Attributes!.ContainsKey("join"))
+                    // A sub-query record may already carry `Attributes["join"]`
+                    // (e.g. a stored entry whose body itself had a `join` key
+                    // mapped through as a JsonElement). A blind cast to
+                    // Dictionary<string, object> would throw InvalidCastException,
+                    // which ExecuteAsync's outer catch (line 113) would swallow
+                    // into a silent un-joined 200. Rebuild whenever the existing
+                    // value isn't the dict shape we need.
+                    if (!rec.Attributes!.TryGetValue("join", out var existingJoin)
+                        || existingJoin is not Dictionary<string, object>)
+                    {
                         rec.Attributes["join"] = new Dictionary<string, object>();
+                    }
                     ((Dictionary<string, object>)rec.Attributes["join"])[joinItem.Alias] = new List<Record>();
                     survivors.Add(rec);
                 }
@@ -1131,6 +1225,24 @@ public sealed class QueryService(
         bool b => b ? "True" : "False",  // Python str(True) == "True"
         _ => Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture) ?? "",
     };
+
+    // Characters with semantic weight in SearchExpressionParser: a value
+    // containing any of them can't be safely interpolated into a synthesized
+    // `@field:v1|v2` clause without changing the parse. Used by
+    // ApplyClientJoinsAsync to decide when the value-narrowing optimization
+    // is unsafe and we should fall back to fetching the right side with the
+    // user's search alone.
+    private static bool HasSearchMetachar(string s)
+    {
+        foreach (var c in s)
+        {
+            if (c == '|' || c == ':' || c == '*' || c == '('
+                || c == ')' || c == '[' || c == ']' || c == '"'
+                || c == '@' || char.IsWhiteSpace(c))
+                return true;
+        }
+        return false;
+    }
 
     // ====================================================================
     // FILTER FIELDS VALUES (row-level ACL via search-clause merge)
