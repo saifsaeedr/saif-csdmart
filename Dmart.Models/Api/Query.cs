@@ -55,6 +55,10 @@ public sealed record JoinQuery
     public required string JoinOn { get; init; }
     public required string Alias { get; init; }
     public JsonElement? Query { get; init; }
+    // Left = 0, so a missing `type` in JSON deserializes to Left by default
+    // (System.Text.Json source-gen leaves the property at its zero value
+    // when the key is absent — see RetrieveTotal note above).
+    public JoinType Type { get; init; } = JoinType.Left;
 }
 
 // Mirrors dmart's models/api.py::RedisAggregate.

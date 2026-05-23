@@ -76,6 +76,7 @@ namespace Dmart.Models.Json;
 [JsonSerializable(typeof(RequestType))]
 [JsonSerializable(typeof(QueryType))]
 [JsonSerializable(typeof(SortType))]
+[JsonSerializable(typeof(JoinType))]
 [JsonSerializable(typeof(TaskType))]
 [JsonSerializable(typeof(PublicSubmitResourceType))]
 [JsonSerializable(typeof(ContentType))]

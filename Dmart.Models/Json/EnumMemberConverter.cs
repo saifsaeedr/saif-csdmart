@@ -76,6 +76,7 @@ public sealed class ResourceTypeJsonConverter            : EnumMemberConverterBa
 public sealed class RequestTypeJsonConverter             : EnumMemberConverterBase<RequestType> { }
 public sealed class QueryTypeJsonConverter               : EnumMemberConverterBase<QueryType> { }
 public sealed class SortTypeJsonConverter                : EnumMemberConverterBase<SortType> { }
+public sealed class JoinTypeJsonConverter                : EnumMemberConverterBase<JoinType> { }
 public sealed class TaskTypeJsonConverter                : EnumMemberConverterBase<TaskType> { }
 public sealed class PublicSubmitResourceTypeJsonConverter: EnumMemberConverterBase<PublicSubmitResourceType> { }
 public sealed class ContentTypeJsonConverter             : EnumMemberConverterBase<ContentType> { }
@@ -99,6 +100,7 @@ public static class EnumMemberConverters
         (nameof(RequestType),              RequestTypeJsonConverter.WireValues),
         (nameof(QueryType),                QueryTypeJsonConverter.WireValues),
         (nameof(SortType),                 SortTypeJsonConverter.WireValues),
+        (nameof(JoinType),                 JoinTypeJsonConverter.WireValues),
         (nameof(TaskType),                 TaskTypeJsonConverter.WireValues),
         (nameof(PublicSubmitResourceType), PublicSubmitResourceTypeJsonConverter.WireValues),
         (nameof(ContentType),              ContentTypeJsonConverter.WireValues),

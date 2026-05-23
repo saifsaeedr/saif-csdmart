@@ -941,14 +941,53 @@ public sealed class QueryService(
                 }
             }
 
-            // Assign per-base either the raw matched list (no filter) or the
-            // jq output slice (filter applied).
+            // Decide which base records survive this join and which (if any)
+            // unmatched right records get appended, per JoinQuery.Type:
+            //   left  — keep every base record (default, original behavior)
+            //   inner — drop base records with zero matches
+            //   right — drop unmatched base AND append rights nobody matched
+            //   outer — keep every base AND append rights nobody matched
+            // Appended right records carry an empty matched-list under the
+            // alias so downstream consumers see a consistent shape; you can
+            // tell them apart from "unmatched left" by comparing the record's
+            // own Subpath/Shortname against the sub-query's subpath.
+            var keepBase = joinItem.Type is JoinType.Inner or JoinType.Right;
+            var appendUnmatchedRights = joinItem.Type is JoinType.Right or JoinType.Outer;
+
+            var survivors = new List<Record>(baseRecords.Count);
             for (var i = 0; i < baseRecords.Count; i++)
             {
+                if (keepBase && matchedByBase[i].Count == 0) continue;
                 var attrs = baseRecords[i].Attributes!;
                 var joinDict = (Dictionary<string, object>)attrs["join"];
                 joinDict[joinItem.Alias] = joinPayloads[i] ?? (object)matchedByBase[i];
+                survivors.Add(baseRecords[i]);
             }
+
+            if (appendUnmatchedRights)
+            {
+                var matchedRightUids = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var matched in matchedByBase)
+                    foreach (var rr in matched)
+                        matchedRightUids.Add($"{rr.Subpath}:{rr.Shortname}:{JsonbHelpers.EnumMember(rr.ResourceType)}");
+
+                foreach (var rr in rightRecords)
+                {
+                    var uid = $"{rr.Subpath}:{rr.Shortname}:{JsonbHelpers.EnumMember(rr.ResourceType)}";
+                    if (!matchedRightUids.Add(uid)) continue;
+
+                    var rec = rr;
+                    if (rec.Attributes is null)
+                        rec = rec with { Attributes = new Dictionary<string, object>() };
+                    if (!rec.Attributes!.ContainsKey("join"))
+                        rec.Attributes["join"] = new Dictionary<string, object>();
+                    ((Dictionary<string, object>)rec.Attributes["join"])[joinItem.Alias] = new List<Record>();
+                    survivors.Add(rec);
+                }
+            }
+
+            baseRecords.Clear();
+            baseRecords.AddRange(survivors);
         }
 
         return (baseRecords, null);

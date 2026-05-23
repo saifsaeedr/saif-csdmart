@@ -583,6 +583,21 @@ public static class SearchExpressionParser
         var conditions = new List<string>();
         var compOp = data.ComparisonOperator;
 
+        // Null check: `@path:null` matches when the field is missing OR its
+        // JSON value is null. Negated form (`-@path:null`) requires the
+        // field to exist with a non-null value. Only fires for a lone
+        // `null` token (case-insensitive), not when null is one of several
+        // alternation values or part of a literal like `nullified`.
+        if (!data.IsRange && compOp is null
+            && data.Values.Count == 1
+            && data.Values[0].Equals("null", StringComparison.OrdinalIgnoreCase))
+        {
+            var pathExpr = $"payload::jsonb->{arrowPath}";
+            return data.Negative
+                ? $"({pathExpr} IS NOT NULL AND jsonb_typeof({pathExpr}) != 'null')"
+                : $"({pathExpr} IS NULL OR jsonb_typeof({pathExpr}) = 'null')";
+        }
+
         if (data.ValueType == "boolean")
         {
             foreach (var v in data.Values)
@@ -600,6 +615,20 @@ public static class SearchExpressionParser
         foreach (var value in data.Values)
         {
             bool isNum = NumericRegex.IsMatch(value);
+
+            // Wildcard: `*` in value → ILIKE pattern on the textually-extracted
+            // value, guarded by `jsonb_typeof = 'string'`. Supports prefix
+            // (`foo*`), suffix (`*foo`), and contains (`*foo*`). Negative form
+            // wraps the entire match in NOT so missing/non-string fields pass.
+            // We DON'T enter this branch for a lone `*` (existence check is
+            // handled upstream) or for ranges/comparison ops.
+            if (compOp is null && value.Contains('*'))
+            {
+                var p = ctx.Add(value.Replace('*', '%'));
+                var match = $"(jsonb_typeof(payload::jsonb->{arrowPath}) = 'string' AND {textExtract} ILIKE {p})";
+                conditions.Add(data.Negative ? $"(NOT {match})" : match);
+                continue;
+            }
 
             if (isNum && compOp is not null)
             {

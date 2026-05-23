@@ -196,4 +196,201 @@ public class SearchExpressionParserTests
         var combined = string.Join(" ", parsed.Clauses);
         combined.ShouldContain("owner_shortname IN (SELECT shortname FROM users WHERE email = @s_0)");
     }
+
+    // ── Null search on payload paths ──────────────────────────────────────
+    // `@payload.body.x:null` matches rows where the JSONB path resolves to
+    // SQL NULL (missing key) OR JSON null (`jsonb_typeof = 'null'`). The
+    // string "null" literal is NOT supposed to land in the @> containment
+    // path — both branches share that requirement.
+
+    [Fact]
+    public void Payload_Null_Search_Emits_IsNull_Or_JsonbNull_Typeof()
+    {
+        var parsed = SearchExpressionParser.Parse("@payload.body.x:null", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain("payload::jsonb->'body'->'x' IS NULL");
+        combined.ShouldContain("jsonb_typeof(payload::jsonb->'body'->'x') = 'null'");
+        // No containment / no extracted-text scanning — pure path-nullness check.
+        combined.ShouldNotContain("payload::jsonb @>");
+        combined.ShouldNotContain("ILIKE");
+        parsed.Parameters.Count.ShouldBe(0);
+    }
+
+    [Fact]
+    public void Payload_Null_Search_Negated_Requires_NonNull_And_NotJsonbNull()
+    {
+        var parsed = SearchExpressionParser.Parse("-@payload.body.x:null", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain("payload::jsonb->'body'->'x' IS NOT NULL");
+        combined.ShouldContain("jsonb_typeof(payload::jsonb->'body'->'x') != 'null'");
+        parsed.Parameters.Count.ShouldBe(0);
+    }
+
+    [Theory]
+    [InlineData("NULL")]
+    [InlineData("Null")]
+    [InlineData("NuLl")]
+    public void Payload_Null_Search_Case_Insensitive(string literal)
+    {
+        var parsed = SearchExpressionParser.Parse($"@payload.body.x:{literal}", 0);
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain("IS NULL");
+        combined.ShouldContain("jsonb_typeof");
+        parsed.Parameters.Count.ShouldBe(0);
+    }
+
+    [Fact]
+    public void Payload_String_Nullified_Is_NOT_Treated_As_Null()
+    {
+        // "nullified" is a real string value, not a null sentinel — must
+        // still go through the regular containment path.
+        var parsed = SearchExpressionParser.Parse("@payload.body.x:nullified", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain("payload::jsonb @>");
+        combined.ShouldNotContain("IS NULL");
+        parsed.Parameters.Count.ShouldBeGreaterThan(0);
+    }
+
+    [Fact]
+    public void Payload_Null_Inside_Alternation_Treated_As_Literal()
+    {
+        // `null|other` is two values; we deliberately don't try to be clever
+        // and split the null branch — fall through to the standard containment
+        // path so behavior matches the existing alternation semantics.
+        var parsed = SearchExpressionParser.Parse("@payload.body.x:null|other", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldNotContain("IS NULL");
+        combined.ShouldContain("@>");
+    }
+
+    [Fact]
+    public void Payload_Null_With_Deep_Path_Builds_Full_Arrow_Chain()
+    {
+        var parsed = SearchExpressionParser.Parse("@payload.body.address.city:null", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain("payload::jsonb->'body'->'address'->'city' IS NULL");
+        combined.ShouldContain("jsonb_typeof(payload::jsonb->'body'->'address'->'city') = 'null'");
+    }
+
+    [Fact]
+    public void Payload_Null_With_Single_Segment_Path_Works()
+    {
+        // No nested body — just `payload.field:null`.
+        var parsed = SearchExpressionParser.Parse("@payload.foo:null", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain("payload::jsonb->'foo' IS NULL");
+    }
+
+    // ── Wildcard search on payload paths ──────────────────────────────────
+    // `@payload.body.x:*foo*` / `foo*` / `*foo` need to compile to ILIKE
+    // on the textually-extracted JSONB scalar, NOT to JSON containment
+    // (which is an exact-match operator and would never hit any rows).
+
+    [Fact]
+    public void Payload_Wildcard_Contains_Emits_ILIKE_Pattern_With_Percent_On_Both_Sides()
+    {
+        var parsed = SearchExpressionParser.Parse("@payload.body.x:*delate*", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain("payload::jsonb->'body'->>'x' ILIKE @s_0");
+        combined.ShouldContain("jsonb_typeof(payload::jsonb->'body'->'x') = 'string'");
+        combined.ShouldNotContain("payload::jsonb @>");
+        parsed.Parameters.Count.ShouldBe(1);
+        parsed.Parameters[0].Value.ShouldBe("%delate%");
+    }
+
+    [Fact]
+    public void Payload_Wildcard_Prefix_Emits_Trailing_Percent_Only()
+    {
+        var parsed = SearchExpressionParser.Parse("@payload.body.x:delate*", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain("ILIKE @s_0");
+        parsed.Parameters.Count.ShouldBe(1);
+        parsed.Parameters[0].Value.ShouldBe("delate%");
+    }
+
+    [Fact]
+    public void Payload_Wildcard_Suffix_Emits_Leading_Percent_Only()
+    {
+        var parsed = SearchExpressionParser.Parse("@payload.body.x:*delate", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain("ILIKE @s_0");
+        parsed.Parameters.Count.ShouldBe(1);
+        parsed.Parameters[0].Value.ShouldBe("%delate");
+    }
+
+    [Fact]
+    public void Payload_Wildcard_Negated_Wraps_Match_In_NOT()
+    {
+        // -@k:*foo* should let rows pass when the field is missing,
+        // non-string, or a string that doesn't contain "foo". The simplest
+        // representation: NOT (typeof='string' AND ILIKE pattern).
+        var parsed = SearchExpressionParser.Parse("-@payload.body.x:*delate*", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain("NOT");
+        combined.ShouldContain("ILIKE @s_0");
+        parsed.Parameters[0].Value.ShouldBe("%delate%");
+    }
+
+    [Fact]
+    public void Payload_Wildcard_With_Alternation_Emits_OR_Of_Two_Patterns()
+    {
+        var parsed = SearchExpressionParser.Parse("@payload.body.x:*foo*|bar*", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        // Both alternates produce ILIKE patterns joined by " OR ".
+        combined.ShouldContain("ILIKE @s_0");
+        combined.ShouldContain("ILIKE @s_1");
+        combined.ShouldContain(" OR ");
+        parsed.Parameters.Count.ShouldBe(2);
+        parsed.Parameters[0].Value.ShouldBe("%foo%");
+        parsed.Parameters[1].Value.ShouldBe("bar%");
+    }
+
+    [Fact]
+    public void Payload_Wildcard_With_Deep_Path_Targets_Correct_Field()
+    {
+        var parsed = SearchExpressionParser.Parse("@payload.body.address.city:*ville*", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain("payload::jsonb->'body'->'address'->>'city' ILIKE @s_0");
+        combined.ShouldContain("jsonb_typeof(payload::jsonb->'body'->'address'->'city') = 'string'");
+        parsed.Parameters[0].Value.ShouldBe("%ville%");
+    }
+
+    [Fact]
+    public void Payload_Lone_Star_Is_Still_Existence_Check_Not_Wildcard()
+    {
+        // `@payload.body.x:*` continues to mean "field exists" and stays
+        // on the existing IS NOT NULL branch — the wildcard work didn't
+        // hijack the existence sentinel.
+        var parsed = SearchExpressionParser.Parse("@payload.body.x:*", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain("payload::jsonb->'body'->'x' IS NOT NULL");
+        combined.ShouldNotContain("ILIKE");
+        parsed.Parameters.Count.ShouldBe(0);
+    }
+
+    [Fact]
+    public void Payload_NonWildcard_Still_Uses_Containment_For_Index_Hit()
+    {
+        // Sanity-guard the original fast path: a plain value WITHOUT `*` must
+        // continue to compile to `payload @> jsonb_literal` so the GIN index
+        // can serve it. Adding wildcard support shouldn't regress that.
+        var parsed = SearchExpressionParser.Parse("@payload.body.x:hello", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain("payload::jsonb @>");
+        combined.ShouldNotContain("ILIKE");
+    }
 }
