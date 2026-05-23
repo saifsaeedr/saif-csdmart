@@ -816,6 +816,16 @@ public sealed class QueryService(
             // the synthesized `@field:v1|v2` expression. When narrowing is
             // unsafe, we fall back to pulling with the user's search alone
             // and matching client-side (bounded by the 1000-row cap below).
+            //
+            // Performance note: Right/Outer are O(right-table-size) by
+            // design — the only way to know "which right records nobody
+            // referenced" is to enumerate the right side. The 1000-row cap
+            // bounds the worst case but doesn't make this cheap. Callers
+            // with large right tables (customers, users, etc.) should pair
+            // Right/Outer with a selective `sub_query.search` so the
+            // sub-query returns only the slice of the right side that
+            // matters; otherwise expect a noticeable latency cost
+            // independent of the base set's size.
             var joinType = joinItem.Type ?? JoinType.Left;
             var isRightOrOuter = joinType is JoinType.Right or JoinType.Outer;
 
@@ -1060,23 +1070,36 @@ public sealed class QueryService(
                     var uid = $"{rr.Subpath}:{rr.Shortname}:{JsonbHelpers.EnumMember(rr.ResourceType)}";
                     if (!matchedRightUids.Add(uid)) continue;
 
-                    var rec = rr;
-                    if (rec.Attributes is null)
-                        rec = rec with { Attributes = new Dictionary<string, object>() };
-                    // A sub-query record may already carry `Attributes["join"]`
-                    // (e.g. a stored entry whose body itself had a `join` key
-                    // mapped through as a JsonElement). A blind cast to
-                    // Dictionary<string, object> would throw InvalidCastException,
-                    // which ExecuteAsync's outer catch (line 113) would swallow
-                    // into a silent un-joined 200. Rebuild whenever the existing
-                    // value isn't the dict shape we need.
-                    if (!rec.Attributes!.TryGetValue("join", out var existingJoin)
-                        || existingJoin is not Dictionary<string, object>)
-                    {
-                        rec.Attributes["join"] = new Dictionary<string, object>();
-                    }
-                    ((Dictionary<string, object>)rec.Attributes["join"])[joinItem.Alias] = new List<Record>();
-                    survivors.Add(rec);
+                    // Always clone Attributes before mutating. The sub-query's
+                    // record list (rightRecords) is local to this method today,
+                    // but any future change that caches or shares it (paged
+                    // result-set, retry buffer) would leak the join mutation
+                    // back into the cache. Defensive-copy here is cheap
+                    // (handful of unmatched-right records per join) and
+                    // forecloses that bug class. The existing `["join"]` key,
+                    // if any, is preserved when its value is a usable dict —
+                    // but a non-dict value (e.g. a JsonElement that came in
+                    // verbatim from a stored entry's body) gets replaced
+                    // outright; a blind cast would throw and the outer catch
+                    // at ExecuteAsync:113 would swallow the join into a
+                    // silent un-joined 200.
+                    var attrs = rr.Attributes is null
+                        ? new Dictionary<string, object>(StringComparer.Ordinal)
+                        : new Dictionary<string, object>(rr.Attributes, StringComparer.Ordinal);
+                    var joinDict = attrs.TryGetValue("join", out var existingJoin)
+                                   && existingJoin is Dictionary<string, object> ej
+                        ? new Dictionary<string, object>(ej, StringComparer.Ordinal)
+                        : new Dictionary<string, object>(StringComparer.Ordinal);
+                    joinDict[joinItem.Alias] = new List<Record>();
+                    // Caller-side discriminator: tag this record so consumers
+                    // iterating Records can tell "appended unmatched right"
+                    // apart from "base left" without subpath-string matching
+                    // against the sub-query's subpath. The key is underscore-
+                    // prefixed to make its synthetic origin obvious; consumers
+                    // that don't care can ignore it.
+                    joinDict["_join_origin"] = "right";
+                    attrs["join"] = joinDict;
+                    survivors.Add(rr with { Attributes = attrs });
                 }
             }
 
@@ -1233,13 +1256,14 @@ public sealed class QueryService(
     // is unsafe and we should fall back to fetching the right side with the
     // user's search alone.
     //
-    // This is intentionally a strict superset of the parser's current token
-    // set — `{ } \ '` aren't tokens today but would be plausible additions
-    // (range syntax, escape, quoting), and `< > = !` are comparison-operator
-    // prefixes that would change a value's parse if it happened to start
-    // with one. Keep this in sync with SearchExpressionParser: when a new
-    // token is added there, add it here too or the narrowing optimization
-    // reopens a corpus-controlled injection into the synthesized clause.
+    // Mirror of SearchExpressionParser.IsSafeForAlternationValue in
+    // Dmart.SqlAdapter. We can't share — dmart.csproj excludes
+    // Dmart.SqlAdapter from compilation (the SDK uses reflection-based STJ
+    // and isn't AOT-safe). The duplication is covered by a contract test
+    // in dmart.Tests/Unit/SqlAdapter/MetacharDriftTests.cs which feeds
+    // representative inputs through both and asserts agreement — so a
+    // future parser-grammar change that touches one but not the other
+    // turns red at CI time.
     private static bool HasSearchMetachar(string s)
     {
         foreach (var c in s)

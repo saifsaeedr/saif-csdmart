@@ -305,14 +305,26 @@ public class QueryJoinTests : IClassFixture<DmartFactory>
     }
 
     // ── Narrowing optimization fallback ───────────────────────────────────
-    // When a base-record value contains a parser metachar (`|`, `*`, `:`,
-    // etc.) the narrowing path can't safely synthesize `@right:v1|v2` and
-    // bails to fetching the right side with just the user's search,
-    // matching client-side. The fallback must still produce correct join
-    // output — if a regression breaks it, the visible symptom is the
-    // unsafe base record matching nothing instead of nothing-or-real-match.
-    [FactIfPg]
-    public async Task Join_With_Unsafe_Base_Value_Falls_Back_To_Client_Side_Match()
+    // When a base-record value contains a parser metachar the narrowing
+    // path can't safely synthesize `@right:v1|v2` and bails to fetching the
+    // right side with just the user's search, matching client-side. The
+    // fallback must still produce correct join output — if a regression
+    // breaks it, the visible symptom is the unsafe base record matching
+    // nothing instead of nothing-or-real-match.
+    //
+    // Parameterized across representative metachars so a future tightening
+    // (or loosening) of the parser's grammar shows up here rather than
+    // silently changing whether the narrowing optimization fires.
+    [TheoryIfPg]
+    [InlineData("|")]
+    [InlineData("*")]
+    [InlineData(":")]
+    [InlineData("(")]
+    [InlineData(")")]
+    [InlineData("@")]
+    [InlineData("\\")]
+    [InlineData(" ")]   // whitespace terminates a value token
+    public async Task Join_With_Unsafe_Base_Value_Falls_Back_To_Client_Side_Match(string metachar)
     {
         var (query, entries, spaces) = Resolve();
         var spaceName = $"jt_{Guid.NewGuid():N}".Substring(0, 12);
@@ -334,10 +346,14 @@ public class QueryJoinTests : IClassFixture<DmartFactory>
 
             await SeedEntryAsync(entries, spaceName, "/orders", "safe_order", ResourceType.Content,
                 new() { ["customer"] = JsonDocument.Parse("\"customer_a\"").RootElement });
-            // `|` in the value forces HasSearchMetachar to bail; without
-            // the fallback, the join would throw or silently un-join.
+            // The metachar in the value forces HasSearchMetachar to bail.
+            // Without the client-side fallback the join would throw or
+            // silently un-join. Quoting the JSON literal escapes backslash
+            // so `\\` lands as a single `\` in the value.
+            var unsafeValue = $"cust{metachar}escape";
+            var unsafeJsonValue = JsonSerializer.Serialize(unsafeValue);
             await SeedEntryAsync(entries, spaceName, "/orders", "unsafe_order", ResourceType.Content,
-                new() { ["customer"] = JsonDocument.Parse("\"cust|escape\"").RootElement });
+                new() { ["customer"] = JsonDocument.Parse(unsafeJsonValue).RootElement });
             await SeedEntryAsync(entries, spaceName, "/customers", "customer_a", ResourceType.Content,
                 new() { ["email"] = JsonDocument.Parse("\"a@example.com\"").RootElement });
 
@@ -368,7 +384,8 @@ public class QueryJoinTests : IClassFixture<DmartFactory>
                 },
             }, "dmart");
 
-            resp.Status.ShouldBe(Status.Success);
+            resp.Status.ShouldBe(Status.Success,
+                customMessage: $"join with unsafe metachar '{metachar}' should not error: {resp.Error?.Message}");
             resp.Records.ShouldNotBeNull();
             resp.Records!.Count.ShouldBe(2);
             AssertMatchCount(resp.Records, "safe_order", expected: 1);

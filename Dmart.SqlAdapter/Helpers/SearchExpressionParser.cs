@@ -36,6 +36,40 @@ public static class SearchExpressionParser
 {
     public sealed record Parsed(IReadOnlyList<string> Clauses, IReadOnlyList<NpgsqlParameter> Parameters);
 
+    // ── Grammar-aware safety check (kept beside the parser so the two
+    // can't drift) ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns true if <paramref name="value"/> contains a character that
+    /// the parser would interpret as a metachar — meaning the value cannot
+    /// be safely interpolated into a synthesized search clause (e.g.
+    /// <c>@field:v1|v2</c>) without changing the parse.
+    /// </summary>
+    /// <remarks>
+    /// Owned by the parser so any future grammar change is in one file
+    /// instead of two. Today's metachars: <c>|</c> (alternation),
+    /// <c>:</c> (field separator), <c>*</c> (wildcard/existence),
+    /// <c>(</c>/<c>)</c>/<c>[</c>/<c>]</c> (grouping), <c>"</c>/<c>'</c>
+    /// (string delimiters not currently honored but plausibly added),
+    /// <c>\</c> (escape), <c>@</c> (field marker), <c>&lt;</c>/<c>&gt;</c>/
+    /// <c>=</c>/<c>!</c> (comparison operators), <c>{</c>/<c>}</c> (range
+    /// syntax not currently honored), plus whitespace which terminates
+    /// a value token.
+    /// </remarks>
+    public static bool IsSafeForAlternationValue(string s)
+    {
+        foreach (var c in s)
+        {
+            if (c == '|' || c == ':' || c == '*' || c == '('
+                || c == ')' || c == '[' || c == ']' || c == '{'
+                || c == '}' || c == '"' || c == '\'' || c == '\\'
+                || c == '@' || c == '<' || c == '>' || c == '='
+                || c == '!' || char.IsWhiteSpace(c))
+                return false;
+        }
+        return true;
+    }
+
     // ── Entry point ───────────────────────────────────────────────────────
 
     /// <summary>
@@ -625,11 +659,24 @@ public static class SearchExpressionParser
             // string "*", matching the existing alternation contract.
             if (compOp is null && value.Length > 1 && value.Contains('*'))
             {
-                // Escape PG's default LIKE metachars (\ % _) BEFORE swapping
-                // `*` → `%`, so user-supplied literal `%`/`_`/`\` don't act
-                // as wildcards or escape sequences. PG's default LIKE escape
-                // is `\`, so `\\` / `\%` / `\_` round-trip cleanly without
-                // needing an explicit ESCAPE clause.
+                // Escape PG's ILIKE metachars (\ % _) BEFORE swapping `*` → `%`,
+                // so user-supplied literal `%`/`_`/`\` don't act as wildcards
+                // or escape sequences. ILIKE shares LIKE's metachar set; the
+                // default escape is `\`, so `\\` / `\%` / `\_` round-trip
+                // cleanly without needing an explicit ESCAPE clause.
+                //
+                // Performance note: emitting ILIKE on an extracted JSONB text
+                // value does NOT hit the existing `payload jsonb_path_ops`
+                // GIN index — that operator class only accelerates `@>`
+                // containment. Wildcard searches degrade to a sequential
+                // scan on large tables. A future optimization could either:
+                //   (a) add a `pg_trgm` GIN index on `(payload::text)` and
+                //       AND a `payload::text ILIKE @pattern` prefilter
+                //       before the precise per-path check, or
+                //   (b) switch the existing GIN to `jsonb_ops` and rewrite
+                //       wildcards as `payload @@ '$.path like_regex "..."'`.
+                // Both require a schema migration and are out of scope here;
+                // tracked as follow-up work.
                 var escaped = value
                     .Replace("\\", "\\\\")
                     .Replace("%", "\\%")
