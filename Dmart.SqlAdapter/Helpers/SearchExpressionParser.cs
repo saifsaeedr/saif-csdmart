@@ -36,6 +36,40 @@ public static class SearchExpressionParser
 {
     public sealed record Parsed(IReadOnlyList<string> Clauses, IReadOnlyList<NpgsqlParameter> Parameters);
 
+    // ── Grammar-aware safety check (kept beside the parser so the two
+    // can't drift) ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns true if <paramref name="value"/> contains a character that
+    /// the parser would interpret as a metachar — meaning the value cannot
+    /// be safely interpolated into a synthesized search clause (e.g.
+    /// <c>@field:v1|v2</c>) without changing the parse.
+    /// </summary>
+    /// <remarks>
+    /// Owned by the parser so any future grammar change is in one file
+    /// instead of two. Today's metachars: <c>|</c> (alternation),
+    /// <c>:</c> (field separator), <c>*</c> (wildcard/existence),
+    /// <c>(</c>/<c>)</c>/<c>[</c>/<c>]</c> (grouping), <c>"</c>/<c>'</c>
+    /// (string delimiters not currently honored but plausibly added),
+    /// <c>\</c> (escape), <c>@</c> (field marker), <c>&lt;</c>/<c>&gt;</c>/
+    /// <c>=</c>/<c>!</c> (comparison operators), <c>{</c>/<c>}</c> (range
+    /// syntax not currently honored), plus whitespace which terminates
+    /// a value token.
+    /// </remarks>
+    public static bool IsSafeForAlternationValue(string s)
+    {
+        foreach (var c in s)
+        {
+            if (c == '|' || c == ':' || c == '*' || c == '('
+                || c == ')' || c == '[' || c == ']' || c == '{'
+                || c == '}' || c == '"' || c == '\'' || c == '\\'
+                || c == '@' || c == '<' || c == '>' || c == '='
+                || c == '!' || char.IsWhiteSpace(c))
+                return false;
+        }
+        return true;
+    }
+
     // ── Entry point ───────────────────────────────────────────────────────
 
     /// <summary>
@@ -583,6 +617,21 @@ public static class SearchExpressionParser
         var conditions = new List<string>();
         var compOp = data.ComparisonOperator;
 
+        // Null check: `@path:null` matches when the field is missing OR its
+        // JSON value is null. Negated form (`-@path:null`) requires the
+        // field to exist with a non-null value. Only fires for a lone
+        // `null` token (case-insensitive), not when null is one of several
+        // alternation values or part of a literal like `nullified`.
+        if (!data.IsRange && compOp is null
+            && data.Values.Count == 1
+            && data.Values[0].Equals("null", StringComparison.OrdinalIgnoreCase))
+        {
+            var pathExpr = $"payload::jsonb->{arrowPath}";
+            return data.Negative
+                ? $"({pathExpr} IS NOT NULL AND jsonb_typeof({pathExpr}) != 'null')"
+                : $"({pathExpr} IS NULL OR jsonb_typeof({pathExpr}) = 'null')";
+        }
+
         if (data.ValueType == "boolean")
         {
             foreach (var v in data.Values)
@@ -600,6 +649,97 @@ public static class SearchExpressionParser
         foreach (var value in data.Values)
         {
             bool isNum = NumericRegex.IsMatch(value);
+
+            // Wildcard: `*` in value → ILIKE pattern on the textually-extracted
+            // value, guarded by `jsonb_typeof = 'string'`. Supports prefix
+            // (`foo*`), suffix (`*foo`), and contains (`*foo*`). A lone `*`
+            // value with `Values.Count == 1` is captured by the existence
+            // check at line 333; a lone `*` inside an alternation (e.g.
+            // `@k:vip|*`) falls through to JSONB containment as the literal
+            // string "*", matching the existing alternation contract.
+            if (compOp is null && value.Length > 1 && value.Contains('*'))
+            {
+                // Escape PG's ILIKE metachars (\ % _) BEFORE swapping `*` → `%`,
+                // so user-supplied literal `%`/`_`/`\` don't act as wildcards
+                // or escape sequences. ILIKE shares LIKE's metachar set; the
+                // default escape is `\`, so `\\` / `\%` / `\_` round-trip
+                // cleanly without needing an explicit ESCAPE clause.
+                //
+                // Performance: ILIKE on an extracted JSONB text value can't
+                // use the existing `payload jsonb_path_ops` GIN — that
+                // opclass only accelerates `@>` containment. To rescue
+                // wildcards on large tables we emit a `payload::text ILIKE
+                // @pattern` prefilter AND'd onto the precise per-path
+                // check. SchemaInitializer maintains a `pg_trgm` GIN over
+                // `(payload::text)` (see SqlSchema.ConcurrentIndexes); the
+                // prefilter clause uses that index for sub-second lookups
+                // on 75M-row tables instead of seq-scanning ~750 GB.
+                //
+                // The trigram index is "approximate" — a hit on `*foo*`
+                // can match the literal substring "foo" anywhere in the
+                // serialized JSON, including key names and unrelated
+                // values. The precise per-path ILIKE that AND's onto the
+                // prefilter prunes those false positives so the final row
+                // set is exact. If the trigram index isn't present yet
+                // (fresh install before index build, or operator on an
+                // older PG without pg_trgm), the prefilter is just an
+                // additional ILIKE — the result set is still correct,
+                // just slow. So zero-risk to emit unconditionally.
+                //
+                // Patterns shorter than 3 chars (`*ab*`, `*x*`) can't be
+                // serviced by a trigram index — PG's planner falls back
+                // to seq scan automatically in that case.
+                // Per-path pattern: preserves the user's wildcard position
+                // (prefix `foo*` → `foo%`, suffix `*foo` → `%foo`,
+                // contains `*foo*` → `%foo%`).
+                var perPathPattern = value
+                    .Replace("\\", "\\\\")
+                    .Replace("%", "\\%")
+                    .Replace("_", "\\_")
+                    .Replace('*', '%');
+                var pPath = ctx.Add(perPathPattern);
+
+                var pathExpr = $"payload::jsonb->{arrowPath}";
+                if (data.Negative)
+                {
+                    // A direct `NOT (typeof='string' AND ILIKE pattern)` is
+                    // wrong: when the field is missing, `jsonb_typeof(NULL)`
+                    // and `textExtract` both yield SQL NULL, the inner AND
+                    // becomes NULL, and `NOT NULL` is NULL — which WHERE
+                    // drops. Spell out the three disjoint passing cases so
+                    // missing / non-string / non-matching all evaluate to
+                    // TRUE under three-valued logic.
+                    //
+                    // The trigram index doesn't help the negated form —
+                    // "exclude rows containing X" requires visiting every
+                    // row anyway, since the index tells us which rows DO
+                    // contain X (the opposite of what we want). Keep the
+                    // precise per-path negated check; planner will pick
+                    // the most selective path.
+                    conditions.Add(
+                        $"({pathExpr} IS NULL OR jsonb_typeof({pathExpr}) IS DISTINCT FROM 'string' OR {textExtract} NOT ILIKE {pPath})");
+                }
+                else
+                {
+                    // Trigram prefilter: contains-form regardless of the
+                    // per-path wildcard position. Without this, a prefix
+                    // pattern (`foo*`) would prefilter for "payload text
+                    // starts with foo", which never matches because the
+                    // serialized payload starts with `{`. Strip user `*`
+                    // markers, escape metachars, convert remaining mid-
+                    // pattern `*` to `%`, wrap in `%...%`.
+                    var core = value.Trim('*');
+                    var corePattern = "%" + core
+                        .Replace("\\", "\\\\")
+                        .Replace("%", "\\%")
+                        .Replace("_", "\\_")
+                        .Replace('*', '%') + "%";
+                    var pPre = ctx.Add(corePattern);
+                    conditions.Add(
+                        $"(payload::text ILIKE {pPre} AND jsonb_typeof({pathExpr}) = 'string' AND {textExtract} ILIKE {pPath})");
+                }
+                continue;
+            }
 
             if (isNum && compOp is not null)
             {

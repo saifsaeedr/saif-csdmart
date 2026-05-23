@@ -40,6 +40,54 @@ public sealed class SchemaInitializer(Db db, ILogger<SchemaInitializer> log) : I
                     // current connection's types and clear the pool so every
                     // subsequent connection re-fetches the type map.
                     await conn.ReloadTypesAsync(ct);
+
+                    // Concurrent index builds run as separate commands so
+                    // they're not wrapped in the implicit transaction that
+                    // Postgres applies to multi-statement simple queries.
+                    // CREATE INDEX CONCURRENTLY hard-errors inside any tx.
+                    // IF NOT EXISTS keeps this idempotent — fresh installs
+                    // build the index in milliseconds (empty table); upgrades
+                    // against an existing entries table build it in the
+                    // background without blocking writes. The advisory lock
+                    // serializes concurrent startup attempts, but the build
+                    // itself isn't lock-holding once it's in flight.
+                    foreach (var sql in SqlSchema.ConcurrentIndexes)
+                    {
+                        try
+                        {
+                            // CA2100: the strings in SqlSchema.ConcurrentIndexes
+                            // are hardcoded literals (no user input concatenated
+                            // in), but because the analyzer sees them only as
+                            // array elements rather than const literals it
+                            // can't prove the lack of injection statically.
+                            // Same reasoning applies to the NpgsqlCommand call
+                            // for SqlSchema.CreateAll above — that one happens
+                            // to use a `public const string` which the analyzer
+                            // recognizes; this one uses a static readonly array.
+#pragma warning disable CA2100
+                            await using var icmd = new NpgsqlCommand(sql, conn);
+#pragma warning restore CA2100
+                            icmd.CommandTimeout = 0;
+                            await icmd.ExecuteNonQueryAsync(ct);
+                            log.LogInformation("concurrent index ready: {Sql}", sql);
+                        }
+                        catch (Npgsql.PostgresException ex)
+                        {
+                            // The CONCURRENTLY build can fail (cancelled,
+                            // disk full, etc.) leaving an INVALID index
+                            // that IF NOT EXISTS won't replace. We log
+                            // loudly so the operator knows to manually
+                            // DROP INDEX and restart; the system stays
+                            // functional in the meantime, just without
+                            // the trigram acceleration for wildcard
+                            // searches (they fall back to seq scan).
+                            log.LogWarning(ex,
+                                "concurrent index build failed: {Sql} — wildcard " +
+                                "searches will seq-scan until this is resolved; " +
+                                "manual recovery: DROP INDEX (the invalid one) and " +
+                                "restart dmart", sql);
+                        }
+                    }
                 }
                 finally
                 {

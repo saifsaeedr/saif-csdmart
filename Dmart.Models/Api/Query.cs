@@ -55,6 +55,11 @@ public sealed record JoinQuery
     public required string JoinOn { get; init; }
     public required string Alias { get; init; }
     public JsonElement? Query { get; init; }
+    // Nullable so an explicit `"type": null` from a client that emits all
+    // fields doesn't get rejected with "expected enum string". A missing
+    // key and an explicit null both mean "left join" — QueryService treats
+    // anything that isn't Inner/Right/Outer as left.
+    public JoinType? Type { get; init; }
 }
 
 // Mirrors dmart's models/api.py::RedisAggregate.

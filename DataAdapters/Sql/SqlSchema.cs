@@ -28,6 +28,12 @@ public static class SqlSchema
 
     CREATE EXTENSION IF NOT EXISTS hstore;
     CREATE EXTENSION IF NOT EXISTS pgcrypto;
+    -- pg_trgm: trigram GIN acceleration for `@payload.body.x:*foo*` wildcard
+    -- searches. The matching index is built CONCURRENTLY post-CreateAll
+    -- (see SchemaInitializer + SqlSchema.ConcurrentIndexes) because
+    -- CREATE INDEX CONCURRENTLY cannot run inside the implicit
+    -- transaction that wraps this multi-statement simple-query.
+    CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
     DO $$ BEGIN
         CREATE TYPE language AS ENUM ('ar','en','ku','fr','tr');
@@ -541,4 +547,34 @@ public static class SqlSchema
         END LOOP;
     END $$;
     """;
+
+    // Indexes that MUST be created with CREATE INDEX CONCURRENTLY, kept
+    // out of CreateAll because that string runs as one multi-statement
+    // simple query which Postgres wraps in an implicit transaction —
+    // CONCURRENTLY cannot run inside any transaction block.
+    //
+    // SchemaInitializer iterates this list AFTER CreateAll completes,
+    // running each entry as its own NpgsqlCommand so the implicit-
+    // transaction trap doesn't fire. IF NOT EXISTS is idempotent: on
+    // a fresh install the index builds in milliseconds (empty table);
+    // on an upgrade against an existing 750GB-class entries table it
+    // builds in 2-6 hours without blocking writes.
+    //
+    // Recovery for a partially-built (invalid) index from a previous
+    // interrupted run: connect as superuser and `DROP INDEX
+    // idx_entries_payload_trgm;`, then restart. IF NOT EXISTS prevents
+    // re-builds when the index is already valid; without manual
+    // intervention an invalid index stays invalid (queries don't use
+    // it; system functions correctly but wildcards seq-scan).
+    public static readonly IReadOnlyList<string> ConcurrentIndexes = new[]
+    {
+        // Trigram GIN on the textual JSONB representation. Accelerates
+        // `payload::text ILIKE @pattern` lookups for patterns ≥3 chars.
+        // The wildcard branch in SearchExpressionParser emits this as a
+        // prefilter before the precise per-path ILIKE check, so the
+        // index narrows the candidate set quickly and the per-path
+        // filter removes any false positives (e.g. JSON-key matches).
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_entries_payload_trgm " +
+            "ON entries USING GIN ((payload::text) gin_trgm_ops)",
+    };
 }
