@@ -1,12 +1,12 @@
 namespace Dmart.Config;
 
 // Mirrors dmart/backend/utils/settings.py::get_env_file + pydantic-settings'
-// env_file handling. Python loads key=value pairs from a config.env in the
+// env_file handling. Loads key=value pairs from a config.env in the
 // following priority order:
 //
-//   1. $BACKEND_ENV pointing to a specific file (if it exists)
-//   2. ./config.env in the current working directory
-//   3. ~/.dmart/config.env in the user's home directory
+//   1. $BACKEND_ENV (or $DMART_ENV) pointing to a specific file
+//   2. ~/.dmart/config.env  (per-user install via `dmart init`)
+//   3. /etc/dmart/config.env (system-wide RPM/DEB install)
 //
 // We then translate those entries into IConfiguration keys under the Dmart
 // section so the existing Options<DmartSettings> pipeline picks them up with
@@ -35,16 +35,16 @@ public static class DotEnv
         // 1. Explicit path via env var — only accepted if the file actually
         //    exists. Python's behavior is "fall through" when the path is
         //    missing, and we copy that so a typo doesn't silently disable
-        //    the other fallbacks.
+        //    the other fallbacks. This is the dev workflow's escape hatch:
+        //    set BACKEND_ENV=./config.env to point at a repo-local file
+        //    without needing to drop one in ~/.dmart or /etc/dmart.
         if (!string.IsNullOrEmpty(backendEnv) && File.Exists(backendEnv))
             return backendEnv;
 
-        // 2. ./config.env in current working directory (dev workflow — the
-        //    binary built under bin/Release/ alongside a repo-root config.env).
-        var cwdConfig = Path.Combine(Directory.GetCurrentDirectory(), "config.env");
-        if (File.Exists(cwdConfig)) return cwdConfig;
-
-        // 3. ~/.dmart/config.env (per-user install via `dmart init`).
+        // 2. ~/.dmart/config.env (per-user install via `dmart init`). Wins
+        //    over the system-wide /etc/dmart/config.env so an operator
+        //    with a custom per-user config isn't overridden by whatever
+        //    the RPM/DEB package installed.
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         if (!string.IsNullOrEmpty(home))
         {
@@ -52,10 +52,16 @@ public static class DotEnv
             if (File.Exists(homeConfig)) return homeConfig;
         }
 
-        // 4. /etc/dmart/config.env (system-wide RPM/DEB install). Lets the
+        // 3. /etc/dmart/config.env (system-wide RPM/DEB install). Lets the
         //    operator run `dmart serve` / `dmart import` from any cwd
         //    instead of being forced to `cd /etc/dmart` first. Skipped on
         //    non-Unix-like filesystems where /etc isn't conventional.
+        //
+        // Note: cwd-relative config.env is NOT a lookup step. A stray
+        // `config.env` in whatever directory the operator happens to be
+        // in would silently override the intended config — an easy footgun
+        // we'd rather not ship. Set BACKEND_ENV explicitly for repo-local
+        // dev workflows.
         const string SystemConfig = "/etc/dmart/config.env";
         if (File.Exists(SystemConfig)) return SystemConfig;
 
