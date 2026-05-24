@@ -61,6 +61,13 @@
          contract dmart.Client uses. Keeps both SDKs typing-equivalent so
          consumers can pass the same Entry value into either backend. -->
     <ProjectReference Include="..\Dmart.Models\Dmart.Models.csproj" />
+    <!-- SearchExpressionParser lives in Dmart.QueryGrammar so both the
+         SDK and the AOT-compiled dmart server can share one canonical
+         implementation of the @field:value grammar. Before extraction
+         the SDK and server each had their own copy (~1500 lines + ~870
+         lines respectively); see the v0.9.20-era commit that introduced
+         this for the drift bugs that prompted the split. -->
+    <ProjectReference Include="..\Dmart.QueryGrammar\Dmart.QueryGrammar.csproj" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'net8.0'">

@@ -492,9 +492,10 @@ public sealed partial class DmartSqlAdapter
             // Full port of csdmart's RediSearch-style search expression:
             // selectors (`@field:v`), negation, alternations, ranges,
             // comparisons, payload paths (incl. arrays), and plain-word
-            // free text. See Helpers/SearchExpressionParser.cs for the
-            // grammar and per-shape SQL emission.
-            var parsed = Helpers.SearchExpressionParser.Parse(query.Search, pars.Count);
+            // free text. The parser lives in Dmart.QueryGrammar — the
+            // same canonical implementation the AOT-compiled dmart server
+            // uses, so grammar changes only need to land in one place.
+            var parsed = Dmart.QueryGrammar.SearchExpressionParser.Parse(query.Search, pars.Count);
             foreach (var clause in parsed.Clauses) where.Add(clause);
             foreach (var p in parsed.Parameters) pars.Add(p);
         }

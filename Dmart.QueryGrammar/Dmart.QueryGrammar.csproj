@@ -1,0 +1,48 @@
+<!-- TreatAsLocalProperty lets our internal PublishAot/StripSymbols values
+     win over any global -p:PublishAot=true flowed in from a consumer's
+     `dotnet publish`. Same trick Dmart.Models uses. -->
+<Project Sdk="Microsoft.NET.Sdk" TreatAsLocalProperty="PublishAot;StripSymbols">
+
+  <PropertyGroup>
+    <!-- Match the SDK: Npgsql 10 doesn't ship netstandard2.1. -->
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <PublishAot>false</PublishAot>
+    <StripSymbols>false</StripSymbols>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- The dmart server consumes this library under AOT and the SDK
+         consumes it without. Mark it explicitly trim/AOT-compatible
+         (pure SQL-building code, no reflection, no JSON) so downstream
+         AOT consumers don't see IL2104/IL3053 warnings. -->
+    <IsTrimmable>true</IsTrimmable>
+    <IsAotCompatible>true</IsAotCompatible>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <RootNamespace>Dmart.QueryGrammar</RootNamespace>
+    <AssemblyName>Dmart.QueryGrammar</AssemblyName>
+    <LangVersion>latest</LangVersion>
+
+    <!-- NuGet metadata. This package ships alongside the rest of the
+         dmart libraries so external SDK consumers get the same parser
+         the server uses. -->
+    <IsPackable>true</IsPackable>
+    <PackageId>Dmart.QueryGrammar</PackageId>
+    <Description>Shared search-expression parser ("@field:value" → SQL WHERE clauses) used by both the dmart server and the Dmart.SqlAdapter SDK. Pure SQL-building code, no JSON dependencies, AOT-compatible.</Description>
+    <Authors>Kefah T. Issa; edraj contributors</Authors>
+    <Company>edraj</Company>
+    <Copyright>Copyright (c) edraj contributors</Copyright>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/edraj/csdmart</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/edraj/csdmart.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>dmart;cms;ims;edraj;sql;search;parser;query-grammar</PackageTags>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Npgsql" Version="10.0.2" />
+  </ItemGroup>
+
+</Project>
