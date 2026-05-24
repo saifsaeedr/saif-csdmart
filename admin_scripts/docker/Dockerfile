@@ -25,10 +25,12 @@ WORKDIR /src
 
 # Restore NuGet packages in a cacheable layer of their own — only the
 # project files are needed for restore, so unrelated source changes don't
-# invalidate the cache. dmart.csproj ProjectReferences Dmart.Models, so
-# both csproj files must be present when the restore graph is computed.
+# invalidate the cache. dmart.csproj ProjectReferences Dmart.Models and
+# Dmart.QueryGrammar, so all three csproj files must be present when the
+# restore graph is computed.
 COPY dmart.csproj ./
 COPY Dmart.Models/Dmart.Models.csproj Dmart.Models/
+COPY Dmart.QueryGrammar/Dmart.QueryGrammar.csproj Dmart.QueryGrammar/
 RUN dotnet restore dmart.csproj -r linux-musl-x64
 
 # Bring in the full source and publish. .dockerignore filters out
