@@ -4,6 +4,8 @@ using Dmart.Config;
 using Dmart.Models.Api;
 using Dmart.Models.Json;
 using Dmart.Services;
+using Microsoft.AspNetCore.Http.HttpResults;
+using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Extensions.Options;
 
 namespace Dmart.Api.User.OAuth;
@@ -18,6 +20,11 @@ namespace Dmart.Api.User.OAuth;
 //                                      standard login response (access_token
 //                                      in records[0].attributes + auth_token
 //                                      cookie).
+//                                      Apple is the exception — it uses POST
+//                                      (response_mode=form_post) and 302s the
+//                                      browser to AppleOauthCallback?access_
+//                                      token=<jwt>, with the same jwt also
+//                                      set as the auth_token cookie.
 //   POST /{provider}/mobile-login    — mobile: client already has a provider-
 //                                      issued token (id_token for Google/
 //                                      Apple, access_token for Facebook).
@@ -25,7 +32,8 @@ namespace Dmart.Api.User.OAuth;
 //
 // Every successful login emits the same response shape as /user/login so any
 // SDK that parses password login can handle OAuth too without a second code
-// path.
+// path. The Apple web callback is the one exception: it 302s instead of
+// returning JSON, so the cookie is the only signal of success.
 public static class OAuthHandlers
 {
     public static void Map(RouteGroupBuilder g)
@@ -99,14 +107,28 @@ public static class OAuthHandlers
         .RequireRateLimiting("auth-by-ip");
 
         // ---- Apple ----
-        // Two callback shapes are possible from Apple:
-        //   * id_token in the query/form (response_mode=form_post + id_token
-        //     scope) → validate directly, no exchange needed.
-        //   * code in the query → POST to Apple's token endpoint with a
-        //     freshly-minted ES256 client_assertion. The exchange path
-        //     requires the full set of TeamId/KeyId/P8/Callback settings;
-        //     IsConfigured (id only) covers the id_token branch.
-        g.MapGet("/apple/callback", async (string? code, string? id_token,
+        // Apple's web sign-in posts the result back as
+        // application/x-www-form-urlencoded (response_mode=form_post) — hence
+        // POST, not GET like the other providers. The body carries either:
+        //   * id_token  — validate directly, no exchange needed.
+        //   * code      — POST to Apple's token endpoint with a freshly-minted
+        //                 ES256 client_assertion. Requires the full set of
+        //                 TeamId/KeyId/P8/Callback settings; IsConfigured (id
+        //                 only) covers the id_token branch.
+        // On success we 302 to AppleOauthCallback with `?access_token=<jwt>`
+        // appended; the same JWT is also set as the auth_token httponly cookie.
+        // On any error we fall back to the JSON 401 ProviderError envelope.
+        //
+        // SECURITY NOTE: the access_token in the URL is exposed in browser
+        // history, the `Referer` header on outbound requests from the
+        // landing page, any reverse-proxy / CDN access logs along the
+        // way, and the server's own access log. The httponly cookie that
+        // CompleteLoginAsync writes is the lower-exposure channel; the
+        // URL parameter is only there so a frontend whose origin doesn't
+        // share the cookie scope can pick the token up. Frontends SHOULD
+        // `history.replaceState({}, '', location.pathname)` to scrub the
+        // token from the bar as soon as they've read it.
+        g.MapPost("/apple/callback", async (HttpRequest req,
             AppleProvider provider, OAuthUserResolver resolver,
             UserService users, IOptions<DmartSettings> settings,
             HttpContext http, CancellationToken ct) =>
@@ -114,10 +136,20 @@ public static class OAuthHandlers
             if (!provider.IsConfigured)
                 return ProviderError("apple oauth not configured");
 
+            var redirect = settings.Value.AppleOauthCallback;
+            if (string.IsNullOrEmpty(redirect))
+                return ProviderError("apple oauth not configured — AppleOauthCallback is empty");
+
+            IFormCollection form;
+            try { form = await req.ReadFormAsync(ct); }
+            catch { return ProviderError("apple callback body must be application/x-www-form-urlencoded"); }
+            var code = form["code"].ToString();
+            var idToken = form["id_token"].ToString();
+
             OAuthUserInfo? info;
-            if (!string.IsNullOrEmpty(id_token))
+            if (!string.IsNullOrEmpty(idToken))
             {
-                info = await provider.ValidateIdTokenAsync(id_token, ct);
+                info = await provider.ValidateIdTokenAsync(idToken, ct);
                 if (info is null) return ProviderError("invalid apple id token");
             }
             else if (!string.IsNullOrEmpty(code))
@@ -132,7 +164,31 @@ public static class OAuthHandlers
             {
                 return ProviderError("apple callback needs either `code` or `id_token`");
             }
-            return await CompleteLoginAsync(info, resolver, users, settings, http, ct);
+
+            // CompleteLoginAsync writes the auth_token cookie and returns the
+            // standard /user/login envelope. Pull access_token out of that
+            // envelope so we can also expose it as ?access_token=... — the
+            // frontend can pick it up from the URL even if the cookie's scope
+            // doesn't reach. On error (or any unexpected shape) just forward
+            // the IResult so the caller sees the 401 envelope.
+            //
+            // COUPLED to CompleteLoginAsync's Results.Json envelope shape
+            // (records[0].attributes.access_token). If that helper ever
+            // returns a different IResult type or a different attribute
+            // key, this match falls through to the forward-as-is path and
+            // the frontend's URL pickup silently stops working. Keep the
+            // two sites updated together.
+            var loginResult = await CompleteLoginAsync(info, resolver, users, settings, http, ct);
+            if (loginResult is not JsonHttpResult<Response> json
+                || json.Value is not { Status: Status.Success, Records: { Count: > 0 } records }
+                || !records[0].Attributes!.TryGetValue("access_token", out var accessObj)
+                || accessObj is not string access)
+            {
+                return loginResult;
+            }
+
+            var target = QueryHelpers.AddQueryString(redirect, "access_token", access);
+            return Results.Redirect(target);
         });
 
         g.MapPost("/apple/mobile-login", async (HttpRequest req,

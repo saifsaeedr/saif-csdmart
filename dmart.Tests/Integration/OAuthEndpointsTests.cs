@@ -7,6 +7,7 @@ using Dmart.Models.Core;
 using Dmart.Models.Enums;
 using Dmart.Plugins;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
 using Xunit;
@@ -48,20 +49,135 @@ public sealed class OAuthEndpointsTests : IClassFixture<DmartFactory>
     [TheoryIfPg]
     [InlineData("google")]
     [InlineData("facebook")]
-    [InlineData("apple")]
     public async Task Callback_MissingCode_ReturnsCleanError(string provider)
     {
         using var client = _factory.CreateClient();
 
-        // `?code=` omitted entirely. With providers unconfigured in this
-        // factory, `not configured` is the first error to fire for google/
-        // facebook; apple short-circuits on missing code when id_token is
-        // also missing. Either way, we want a clean 401 with JSON, not a
-        // 500.
+        // `?code=` omitted entirely. Providers are unconfigured in this
+        // factory, so `not configured` is the first error to fire. We want a
+        // clean 401 with JSON, not a 500. (Apple uses POST, not GET, and has
+        // its own test below.)
         var resp = await client.GetAsync($"/user/{provider}/callback");
         resp.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
         var body = await resp.Content.ReadAsStringAsync();
         body.ShouldContain("\"status\":\"failed\"");
+    }
+
+    // Apple's web callback is POST (response_mode=form_post). With
+    // AppleOauthCallback unconfigured the handler can't 302, so it falls back
+    // to the same JSON 401 shape the other providers return.
+    [FactIfPg]
+    public async Task AppleCallback_Post_Unconfigured_ReturnsCleanError()
+    {
+        using var client = _factory.CreateClient();
+
+        var resp = await client.PostAsync(
+            "/user/apple/callback",
+            new FormUrlEncodedContent(Array.Empty<KeyValuePair<string, string>>()));
+        resp.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+        var body = await resp.Content.ReadAsStringAsync();
+        body.ShouldContain("\"status\":\"failed\"");
+    }
+
+    // AppleClientId + AppleOauthCallback are set (so IsConfigured=true and
+    // the handler has a 302 target), but the code-exchange material
+    // (TeamId/KeyId/P8) is missing. POSTing a `code` must hit the
+    // SupportsCodeExchange guard and return a clean 401 — not 500 from
+    // trying to mint an ES256 client_assertion with no key.
+    [FactIfPg]
+    public async Task AppleCallback_Post_CodeWithoutExchangeConfig_ReturnsCleanError()
+    {
+        using var host = _factory.WithWebHostBuilder(b =>
+        {
+            b.ConfigureAppConfiguration((_, cfg) =>
+            {
+                cfg.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Dmart:AppleClientId"] = "com.example.test",
+                    ["Dmart:AppleOauthCallback"] = "https://example.com/post-login",
+                });
+            });
+        });
+        using var client = host.CreateClient();
+
+        var resp = await client.PostAsync(
+            "/user/apple/callback",
+            new FormUrlEncodedContent(new[]
+            {
+                new KeyValuePair<string, string>("code", "irrelevant"),
+            }));
+        resp.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+        var body = await resp.Content.ReadAsStringAsync();
+        body.ShouldContain("\"status\":\"failed\"");
+        body.ShouldContain("code exchange not configured");
+    }
+
+    // The handler reads the body via ReadFormAsync; that throws
+    // InvalidDataException when the content-type isn't form-encoded. The
+    // try/catch must return a clean 401 instead of letting the
+    // unhandled exception 500. AppleClientId + AppleOauthCallback are
+    // set so IsConfigured passes; the catch arm is what's under test.
+    [FactIfPg]
+    public async Task AppleCallback_Post_NonFormContentType_ReturnsCleanError()
+    {
+        using var host = _factory.WithWebHostBuilder(b =>
+        {
+            b.ConfigureAppConfiguration((_, cfg) =>
+            {
+                cfg.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Dmart:AppleClientId"] = "com.example.test",
+                    ["Dmart:AppleOauthCallback"] = "https://example.com/post-login",
+                });
+            });
+        });
+        using var client = host.CreateClient();
+
+        var resp = await client.PostAsync(
+            "/user/apple/callback",
+            new StringContent("{\"code\":\"x\"}", System.Text.Encoding.UTF8, "application/json"));
+        resp.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+        var body = await resp.Content.ReadAsStringAsync();
+        body.ShouldContain("\"status\":\"failed\"");
+        body.ShouldContain("application/x-www-form-urlencoded");
+    }
+
+    // Branch-ordering test: when BOTH id_token and code are in the form,
+    // id_token wins (lighter validation path, no Apple round-trip). With
+    // an obviously bogus id_token and configured provider, the handler
+    // must fail at ValidateIdTokenAsync ("invalid apple id token") —
+    // proving the dispatch picks the id_token branch first. If a future
+    // refactor swaps branch order, this test catches it by failing
+    // with the code-branch error instead.
+    [FactIfPg]
+    public async Task AppleCallback_Post_IdTokenWinsOverCode_AndBadIdTokenRejected()
+    {
+        using var host = _factory.WithWebHostBuilder(b =>
+        {
+            b.ConfigureAppConfiguration((_, cfg) =>
+            {
+                cfg.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Dmart:AppleClientId"] = "com.example.test",
+                    ["Dmart:AppleOauthCallback"] = "https://example.com/post-login",
+                });
+            });
+        });
+        using var client = host.CreateClient();
+
+        var resp = await client.PostAsync(
+            "/user/apple/callback",
+            new FormUrlEncodedContent(new[]
+            {
+                new KeyValuePair<string, string>("id_token", "not.a.jwt"),
+                new KeyValuePair<string, string>("code", "irrelevant"),
+            }));
+        resp.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+        var body = await resp.Content.ReadAsStringAsync();
+        body.ShouldContain("\"status\":\"failed\"");
+        // The id_token error wins; if the code branch fired we'd see
+        // "code exchange" in the message instead.
+        body.ShouldContain("invalid apple id token");
     }
 
     // OAuthUserResolver — unit-level, but requires DB → put it here with the
