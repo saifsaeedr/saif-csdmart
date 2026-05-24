@@ -95,6 +95,17 @@ if [ ! -f /etc/dmart/config.env ]; then
     echo "Edit it with your database credentials and JWT secret, then run:"
     echo "  systemctl enable --now dmart"
 fi
+
+# Re-create runtime directories if missing. The %dir entries in %files
+# below already register these for install, but an unclean upgrade or
+# manual cleanup can leave them gone, and the service's StateDirectory=
+# is a belt — this is the suspenders. Idempotent: install -d is a no-op
+# when the directory exists with the right perms.
+install -d -m 0755 -o dmart -g dmart /var/lib/dmart
+install -d -m 0755 -o dmart -g dmart /var/lib/dmart/spaces
+install -d -m 0755 -o dmart -g dmart /var/lib/dmart/custom_plugins
+install -d -m 0755 -o dmart -g dmart /var/lib/dmart/logs
+
 # Reload systemd
 systemctl daemon-reload >/dev/null 2>&1 || true
 
@@ -107,10 +118,23 @@ fi
 
 %postun
 systemctl daemon-reload >/dev/null 2>&1 || true
-# Remove user only on full uninstall
+# Deliberately do NOT delete the dmart user/group on uninstall. System
+# users own files that the package never tracks — /etc/dmart/*,
+# /var/lib/dmart/*, operator-managed plugins under /usr/lib/dmart/. If
+# we userdel here, a subsequent reinstall allocates a fresh UID
+# (useradd -r picks the next free system UID, almost never the old
+# one), and every one of those orphaned files becomes unreadable to
+# the new dmart user. Surfaces as "/etc/dmart/config.env: permission
+# denied" the first time the service starts after reinstall.
+#
+# Operator who truly wants the user gone can `userdel dmart;
+# groupdel dmart` explicitly — but only after auditing what still
+# references the UID.
 if [ "$1" = "0" ]; then
-    userdel dmart >/dev/null 2>&1 || true
-    groupdel dmart >/dev/null 2>&1 || true
+    echo "Note: dmart system user/group preserved on uninstall to keep file"
+    echo "      ownership intact for any reinstall. Run 'userdel dmart' manually"
+    echo "      if you want them gone — but check /etc/dmart and /var/lib/dmart"
+    echo "      for leftover files first."
 fi
 
 %files

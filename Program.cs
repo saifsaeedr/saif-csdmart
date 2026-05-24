@@ -1365,6 +1365,24 @@ builder.Services.AddOpenApi(options =>
     // the global default is raised to Warning.
     builder.Logging.AddFilter("Dmart.Startup", LogLevel.Information);
 
+    // Under systemd, when an on-disk LOG_FILE is configured, keep journald
+    // quiet for per-request API logs. Operators set LOG_FILE precisely so
+    // they can grep the .ljson.log; mirroring every "HTTP GET /foo → 200"
+    // line to journald just blasts the system journal and risks rate-limit
+    // dropping legitimately interesting lines. Apply the suppression at
+    // the Console provider only — the FileLoggerProvider (registered
+    // below) keeps receiving everything, so /var/lib/dmart/logs/*.ljson.log
+    // remains the complete record. Startup banner ("Dmart.Startup",
+    // "Microsoft.Hosting.Lifetime") and Warning+ from any source still
+    // hit journald.
+    if (isSystemd && !string.IsNullOrEmpty(logFile))
+    {
+        builder.Logging.AddFilter<Microsoft.Extensions.Logging.Console.ConsoleLoggerProvider>(
+            "Dmart.RequestLog", LogLevel.None);
+        builder.Logging.AddFilter<Microsoft.Extensions.Logging.Console.ConsoleLoggerProvider>(
+            "Microsoft.AspNetCore", LogLevel.Warning);
+    }
+
     if (string.Equals(logFormat, "json", StringComparison.OrdinalIgnoreCase))
     {
         // Register the custom formatter directly in DI rather than via the

@@ -1,12 +1,24 @@
 #!/bin/sh
-# Stop and disable the service before tearing down the user. delgroup
-# safely no-ops if the group is gone (e.g. on a second uninstall after
-# the user already removed it manually). Deliberately leaves
+# Stop and disable the service on uninstall. Deliberately leaves
 # /etc/dmart/config.env and /var/lib/dmart in place — destroying
 # operator data on package removal is the wrong default for a CMS.
+#
+# ALSO deliberately leaves the dmart system user/group in place. The
+# dmart user owns files the package doesn't track (/etc/dmart/*,
+# /var/lib/dmart/*, operator plugins under /usr/lib/dmart/*). A
+# reinstall-after-uninstall allocates a fresh UID (adduser -S picks
+# the next free system UID, almost never the old one), and every one
+# of those orphaned files becomes unreadable to the new dmart user —
+# symptoms include "/etc/dmart/config.env: permission denied" at
+# service start.
+#
+# Operator who truly wants the user gone can `deluser dmart;
+# delgroup dmart` after auditing files owned by the old UID.
 rc-service dmart stop 2>/dev/null || true
 rc-update del dmart 2>/dev/null || true
 
-deluser dmart 2>/dev/null || true
-delgroup dmart 2>/dev/null || true
+echo "Note: dmart system user/group preserved on uninstall to keep file" >&2
+echo "      ownership intact for any reinstall. Run 'deluser dmart' manually" >&2
+echo "      if you want them gone — but check /etc/dmart and /var/lib/dmart" >&2
+echo "      for leftover files first." >&2
 exit 0

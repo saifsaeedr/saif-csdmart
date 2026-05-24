@@ -1,8 +1,19 @@
 #!/bin/sh
-# Run after removal. On `purge`, additionally tear down the system user
-# and group. Deliberately leaves /etc/dmart and /var/lib/dmart in place —
-# destroying operator data on package removal is the wrong default for a
-# CMS. An operator who truly wants a clean slate runs `rm -rf` explicitly.
+# Run after removal. Deliberately leaves /etc/dmart and /var/lib/dmart
+# in place — destroying operator data on package removal is the wrong
+# default for a CMS.
+#
+# ALSO deliberately leaves the dmart system user/group in place, even
+# on `purge`. The dmart user owns files the package doesn't track
+# (/etc/dmart/*, /var/lib/dmart/*, operator plugins under
+# /usr/lib/dmart/*). A reinstall-after-purge allocates a fresh UID
+# (adduser --system picks the next free system UID, almost never the
+# old one), and every one of those orphaned files becomes unreadable
+# to the new dmart user — symptoms include "/etc/dmart/config.env:
+# permission denied" at service start.
+#
+# An operator who truly wants the user gone can `deluser dmart;
+# delgroup dmart` after auditing files owned by the old UID.
 set -e
 
 case "$1" in
@@ -14,12 +25,10 @@ case "$1" in
 esac
 
 if [ "$1" = purge ]; then
-    if getent passwd dmart >/dev/null; then
-        deluser dmart >/dev/null 2>&1 || true
-    fi
-    if getent group dmart >/dev/null; then
-        delgroup dmart >/dev/null 2>&1 || true
-    fi
+    echo "Note: dmart system user/group preserved on purge to keep file" >&2
+    echo "      ownership intact for any reinstall. Run 'deluser dmart' manually" >&2
+    echo "      if you want them gone — but check /etc/dmart and /var/lib/dmart" >&2
+    echo "      for leftover files first." >&2
 fi
 
 exit 0
