@@ -127,7 +127,11 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
                 owner_group_shortname = EXCLUDED.owner_group_shortname,
                 payload = EXCLUDED.payload,
                 last_checksum_history = EXCLUDED.last_checksum_history,
-                password = EXCLUDED.password,
+                -- Preserve the stored hash when the caller passes Password=null.
+                -- Same protection UpsertWithPriorCoreAsync gets — a partial
+                -- update flow that loads-then-saves without explicitly carrying
+                -- the password forward would otherwise silently wipe credentials.
+                password = COALESCE(EXCLUDED.password, users.password),
                 roles = EXCLUDED.roles,
                 groups = EXCLUDED.groups,
                 acl = EXCLUDED.acl,
@@ -285,7 +289,7 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
                 owner_group_shortname = EXCLUDED.owner_group_shortname,
                 payload = COALESCE(EXCLUDED.payload, users.payload),
                 last_checksum_history = EXCLUDED.last_checksum_history,
-                password = EXCLUDED.password,
+                password = COALESCE(EXCLUDED.password, users.password),
                 roles = EXCLUDED.roles,
                 groups = EXCLUDED.groups,
                 acl = EXCLUDED.acl,
