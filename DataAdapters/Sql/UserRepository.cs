@@ -87,7 +87,9 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
                 attempt < MaxAttempts &&
                 (ex.SqlState == "40P01" || ex.SqlState == "40001"))
             {
+#pragma warning disable CA5394 // Backoff jitter — randomness here is timing, not security.
                 await Task.Delay(Random.Shared.Next(5, 25), ct);
+#pragma warning restore CA5394
             }
         }
     }
@@ -234,7 +236,9 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
                 // 40P01 = deadlock_detected, 40001 = serialization_failure.
                 // Both are transient by design — back off briefly so the
                 // colliding transaction has time to finish, then retry.
+#pragma warning disable CA5394 // Backoff jitter — randomness here is timing, not security.
                 await Task.Delay(Random.Shared.Next(5, 25), ct);
+#pragma warning restore CA5394
             }
         }
     }
