@@ -17,6 +17,7 @@ namespace Dmart.Tests.Integration;
 // Asserts Python-exact (type, code) for four error conditions that the C# port
 // previously silently failed on: USER_ISNT_VERIFIED, INVALID_PASSWORD_RULES,
 // INVALID_ROUTE, and CANNT_DELETE.
+[Collection(SharedAdminStateCollection.Name)]
 public sealed class ErrorCodeParityTests : IClassFixture<DmartFactory>
 {
     private readonly DmartFactory _factory;

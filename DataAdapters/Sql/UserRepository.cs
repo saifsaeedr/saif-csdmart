@@ -71,8 +71,27 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
 
     public async Task UpsertAsync(User u, CancellationToken ct = default)
     {
-        await using var conn = await db.OpenAsync(ct);
-        await UpsertAsync(u, conn, ct);
+        // Same deadlock-retry posture as UpsertWithPriorAsync (see the
+        // comment there). Concurrent users-table writes can trip the PG
+        // deadlock detector; retry is the standard remediation.
+        const int MaxAttempts = 3;
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await using var conn = await db.OpenAsync(ct);
+                await UpsertAsync(u, conn, ct);
+                return;
+            }
+            catch (PostgresException ex) when (
+                attempt < MaxAttempts &&
+                (ex.SqlState == "40P01" || ex.SqlState == "40001"))
+            {
+#pragma warning disable CA5394 // Backoff jitter — randomness here is timing, not security.
+                await Task.Delay(Random.Shared.Next(5, 25), ct);
+#pragma warning restore CA5394
+            }
+        }
     }
 
     public async Task UpsertAsync(User u, NpgsqlConnection conn, CancellationToken ct = default)
@@ -189,10 +208,43 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
     // same pattern (SELECT FOR UPDATE, INSERT ON CONFLICT, RETURNING
     // xmax = 0) and the same residual race for concurrent inserts of a
     // brand-new shortname.
+    //
+    // Wraps the actual SQL work in a small deadlock-retry. Concurrent
+    // UPSERTs on the users table can trip Postgres' deadlock detector
+    // (SQLState 40P01) — common when several plugin hooks fire at once,
+    // or when the integration test suite runs many test classes in
+    // parallel against the same DB. PG explicitly designs these errors
+    // to be retried by the application: the detector aborts one of the
+    // colliding transactions to break the cycle, and the loser is
+    // expected to back off briefly and try again. Bounded to 3 attempts
+    // with a tiny randomised backoff to break symmetry.
     public async Task<(User? prior, bool inserted)> UpsertWithPriorAsync(User u, CancellationToken ct = default)
     {
         u = u with { QueryPolicies = Utils.QueryPolicies.Generate(u) };
 
+        const int MaxAttempts = 3;
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return await UpsertWithPriorCoreAsync(u, ct);
+            }
+            catch (PostgresException ex) when (
+                attempt < MaxAttempts &&
+                (ex.SqlState == "40P01" || ex.SqlState == "40001"))
+            {
+                // 40P01 = deadlock_detected, 40001 = serialization_failure.
+                // Both are transient by design — back off briefly so the
+                // colliding transaction has time to finish, then retry.
+#pragma warning disable CA5394 // Backoff jitter — randomness here is timing, not security.
+                await Task.Delay(Random.Shared.Next(5, 25), ct);
+#pragma warning restore CA5394
+            }
+        }
+    }
+
+    private async Task<(User? prior, bool inserted)> UpsertWithPriorCoreAsync(User u, CancellationToken ct)
+    {
         await using var conn = await db.OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(ct);
 

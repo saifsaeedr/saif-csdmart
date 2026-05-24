@@ -19,6 +19,7 @@ namespace Dmart.Tests.Integration;
 // via SpaceRepository, and asserts each round-tripped. Without these
 // assertions, a future refactor that drops a field from the update path
 // would silently lose it — the way it used to.
+[Collection(SharedAdminStateCollection.Name)]
 public sealed class SpaceUpdateCoverageTests : IClassFixture<DmartFactory>
 {
     private readonly DmartFactory _factory;

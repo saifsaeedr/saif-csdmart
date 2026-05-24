@@ -97,7 +97,14 @@ public sealed class AdminBootstrap(
                 //     leaked JWT secret could mint dmart tokens forever.
                 //   * IsActive=false would lock out admin recovery.
                 //   * super_admin role missing would silently strip privileges.
-                // Fix all three idempotently every startup so corrupted state
+                //   * Password drift — operator rotated AdminPassword in
+                //     config.env (or `DMART_TEST_PWD` for CI) but a prior
+                //     run had stored the old hash. The repair path used
+                //     to skip the password so the new override silently
+                //     didn't take effect, manifesting as 401s on every
+                //     subsequent login. Verify the configured password
+                //     against the stored hash and re-hash if they differ.
+                // Fix all four idempotently every startup so corrupted state
                 // never persists across restarts.
                 var repairs = new List<string>();
                 var repaired = existing;
@@ -115,6 +122,13 @@ public sealed class AdminBootstrap(
                 {
                     repaired = repaired with { Roles = new(existing.Roles) { "super_admin" } };
                     repairs.Add("super_admin role re-attached");
+                }
+                if (!string.IsNullOrEmpty(s.AdminPassword)
+                    && (string.IsNullOrEmpty(existing.Password)
+                        || !hasher.Verify(s.AdminPassword, existing.Password)))
+                {
+                    repaired = repaired with { Password = hasher.Hash(s.AdminPassword) };
+                    repairs.Add("password re-hashed from config");
                 }
                 if (repairs.Count > 0)
                 {

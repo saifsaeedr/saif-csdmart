@@ -197,6 +197,42 @@ public class SearchExpressionParserTests
         combined.ShouldContain("owner_shortname IN (SELECT shortname FROM users WHERE email = @s_0)");
     }
 
+    [Fact]
+    public void User_Meta_Column_Email_Skips_Join_When_TargetTable_Is_Users()
+    {
+        // When the query is itself against `users`, joining through
+        // owner_shortname → users would reference a column that doesn't
+        // exist on the target table (users has shortname, not
+        // owner_shortname). The parser must fall through to the scalar
+        // column path instead.
+        var parsed = SearchExpressionParser.Parse(
+            "@email:alice@example.com",
+            startingParamIndex: 0,
+            style: PlaceholderStyle.Named,
+            targetTable: "users");
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldNotContain("owner_shortname");
+        combined.ShouldNotContain("SELECT shortname FROM users");
+        // The scalar-column path emits `email::text = @s_0` (or similar).
+        combined.ShouldContain("email");
+        combined.ShouldContain("@s_0");
+    }
+
+    [Fact]
+    public void User_Meta_Column_Msisdn_Skips_Join_When_TargetTable_Is_Users()
+    {
+        var parsed = SearchExpressionParser.Parse(
+            "@msisdn:0096170123456",
+            startingParamIndex: 0,
+            style: PlaceholderStyle.Named,
+            targetTable: "users");
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldNotContain("owner_shortname");
+        combined.ShouldContain("msisdn");
+    }
+
     // ── Null search on payload paths ──────────────────────────────────────
     // `@payload.body.x:null` matches rows where the JSONB path resolves to
     // SQL NULL (missing key) OR JSON null (`jsonb_typeof = 'null'`). The

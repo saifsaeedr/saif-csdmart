@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using Dmart.DataAdapters.Sql;
 using Dmart.Models.Api;
@@ -6,6 +7,7 @@ using Dmart.Models.Enums;
 using Dmart.Plugins.Native;
 using Dmart.Services;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Shouldly;
 using Xunit;
 
@@ -31,6 +33,40 @@ public sealed class PluginCallbackHistoryTests : IClassFixture<DmartFactory>
 {
     private readonly DmartFactory _factory;
     public PluginCallbackHistoryTests(DmartFactory factory) => _factory = factory;
+
+    // EmitUpdateUser / EmitSaveEntry swallow exceptions and return 3 on
+    // failure. Without a logger, the actual exception message is lost —
+    // when the call returns 3 the test fails with just "should be 0 but
+    // was 3" and the operator has nothing to debug. This captures buffer
+    // so a flake leaves a real breadcrumb.
+    private sealed class CapturingLogger : ILogger
+    {
+        public StringBuilder Buffer { get; } = new();
+        IDisposable? ILogger.BeginScope<TState>(TState state) => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel level, EventId id, TState state,
+            Exception? ex, Func<TState, Exception?, string> formatter)
+        {
+            Buffer.Append('[').Append(level).Append("] ")
+                  .Append(formatter(state, ex));
+            if (ex is not null) Buffer.Append(" :: ").Append(ex);
+            Buffer.AppendLine();
+        }
+    }
+
+    // Wraps EmitUpdateUser/EmitSaveEntry so non-zero returns include the
+    // captured log in the assertion message — turns a silent "was 3"
+    // into "was 3 — log: [Error] update_user failed for cbu_xxx :: <ex>".
+    private static void ShouldReturnZero(string opName, Func<ILogger, int> call)
+    {
+        var log = new CapturingLogger();
+        var rc = call(log);
+        if (rc != 0)
+        {
+            throw new Shouldly.ShouldAssertException(
+                $"{opName} should be 0 but was {rc}. Captured log:\n{log.Buffer}");
+        }
+    }
 
     [FactIfPg]
     public async Task SaveEntry_Update_Writes_History_With_Diff_And_Plugin_Marker()
@@ -73,7 +109,7 @@ public sealed class PluginCallbackHistoryTests : IClassFixture<DmartFactory>
         {
             // Mutate state — should produce exactly one history row.
             var mutated = original with { State = "confirmed", UpdatedAt = DateTime.UtcNow };
-            NativePluginCallbacks.EmitSaveEntry(mutated, logger: null).ShouldBe(0);
+            ShouldReturnZero("EmitSaveEntry", log => NativePluginCallbacks.EmitSaveEntry(mutated, log));
 
             var resp = await qsvc.ExecuteAsync(new Query
             {
@@ -147,7 +183,7 @@ public sealed class PluginCallbackHistoryTests : IClassFixture<DmartFactory>
         try
         {
             // Re-save the same entry — diff is empty, no history row expected.
-            NativePluginCallbacks.EmitSaveEntry(original, logger: null).ShouldBe(0);
+            ShouldReturnZero("EmitSaveEntry", log => NativePluginCallbacks.EmitSaveEntry(original, log));
 
             var resp = await qsvc.ExecuteAsync(new Query
             {
@@ -205,7 +241,7 @@ public sealed class PluginCallbackHistoryTests : IClassFixture<DmartFactory>
         {
             // First time — no prior row exists. Should insert and skip
             // history (Python parity: create writes no history row).
-            NativePluginCallbacks.EmitSaveEntry(fresh, logger: null).ShouldBe(0);
+            ShouldReturnZero("EmitSaveEntry", log => NativePluginCallbacks.EmitSaveEntry(fresh, log));
 
             var resp = await qsvc.ExecuteAsync(new Query
             {
@@ -264,7 +300,7 @@ public sealed class PluginCallbackHistoryTests : IClassFixture<DmartFactory>
                 Language = Language.Ar,
                 UpdatedAt = DateTime.UtcNow,
             };
-            NativePluginCallbacks.EmitUpdateUser(mutated, logger: null).ShouldBe(0);
+            ShouldReturnZero("EmitUpdateUser", log => NativePluginCallbacks.EmitUpdateUser(mutated, log));
 
             var resp = await qsvc.ExecuteAsync(new Query
             {
@@ -325,7 +361,7 @@ public sealed class PluginCallbackHistoryTests : IClassFixture<DmartFactory>
         try
         {
             // Re-save the same user — diff is empty, no history row expected.
-            NativePluginCallbacks.EmitUpdateUser(original, logger: null).ShouldBe(0);
+            ShouldReturnZero("EmitUpdateUser", log => NativePluginCallbacks.EmitUpdateUser(original, log));
 
             var resp = await qsvc.ExecuteAsync(new Query
             {
@@ -374,7 +410,7 @@ public sealed class PluginCallbackHistoryTests : IClassFixture<DmartFactory>
         PluginInvocationContext.CurrentActor = _factory.AdminShortname;
         try
         {
-            NativePluginCallbacks.EmitUpdateUser(fresh, logger: null).ShouldBe(0);
+            ShouldReturnZero("EmitUpdateUser", log => NativePluginCallbacks.EmitUpdateUser(fresh, log));
 
             var resp = await qsvc.ExecuteAsync(new Query
             {

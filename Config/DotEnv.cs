@@ -25,8 +25,9 @@ namespace Dmart.Config;
 public static class DotEnv
 {
     // Standard Python-compatible lookup order. Returns the first file that
-    // exists or null if none do. Also honors DMART_ENV as an alias of
-    // BACKEND_ENV — some dmart deployments use the former.
+    // exists AND passes the perms guard (Unix only — see AcceptablePerms),
+    // or null if none do. Also honors DMART_ENV as an alias of BACKEND_ENV
+    // — some dmart deployments use the former.
     public static string? FindConfigFile()
     {
         var backendEnv = Environment.GetEnvironmentVariable("BACKEND_ENV")
@@ -38,7 +39,8 @@ public static class DotEnv
         //    the other fallbacks. This is the dev workflow's escape hatch:
         //    set BACKEND_ENV=./config.env to point at a repo-local file
         //    without needing to drop one in ~/.dmart or /etc/dmart.
-        if (!string.IsNullOrEmpty(backendEnv) && File.Exists(backendEnv))
+        if (!string.IsNullOrEmpty(backendEnv) && File.Exists(backendEnv)
+            && AcceptablePerms(backendEnv))
             return backendEnv;
 
         // 2. ~/.dmart/config.env (per-user install via `dmart init`). Wins
@@ -49,7 +51,7 @@ public static class DotEnv
         if (!string.IsNullOrEmpty(home))
         {
             var homeConfig = Path.Combine(home, ".dmart", "config.env");
-            if (File.Exists(homeConfig)) return homeConfig;
+            if (File.Exists(homeConfig) && AcceptablePerms(homeConfig)) return homeConfig;
         }
 
         // 3. /etc/dmart/config.env (system-wide RPM/DEB install). Lets the
@@ -63,9 +65,55 @@ public static class DotEnv
         // we'd rather not ship. Set BACKEND_ENV explicitly for repo-local
         // dev workflows.
         const string SystemConfig = "/etc/dmart/config.env";
-        if (File.Exists(SystemConfig)) return SystemConfig;
+        if (File.Exists(SystemConfig) && AcceptablePerms(SystemConfig)) return SystemConfig;
 
         return null;
+    }
+
+    // config.env carries JWT_SECRET, DATABASE_PASSWORD, ADMIN_PASSWORD —
+    // any of those leaking to a non-admin local user is a complete-takeover
+    // class of issue. Two-tier guard:
+    //
+    //   * world-writable (OtherWrite) → REFUSE. An attacker on the host
+    //     could swap the file out from under dmart and steal traffic on
+    //     the next restart. No safe fallback; we must not boot from this.
+    //
+    //   * world-readable (OtherRead) → WARN but continue. Strictly unsafe
+    //     in multi-tenant hosts, but flipping this to a hard-refuse would
+    //     break every existing operator the moment they upgrade — and a
+    //     single-tenant host with 0644 config.env is the common dev/CI
+    //     setup. Each boot prints the recommended chmod so the operator
+    //     can tighten it without rolling back the upgrade.
+    //
+    // Group bits are tolerated unconditionally — the canonical
+    // /etc/dmart/config.env deployment is owned root:dmart with 0640 perms
+    // so the service user can read without exposing the file to "other".
+    // No-op on Windows (security model is ACL-based).
+    private static bool AcceptablePerms(string path)
+    {
+        if (OperatingSystem.IsWindows()) return true;
+        UnixFileMode mode;
+        try { mode = File.GetUnixFileMode(path); }
+        catch { return true; }  // unknown FS / not readable — let the read attempt fail naturally
+
+        if ((mode & UnixFileMode.OtherWrite) != 0)
+        {
+            Console.Error.WriteLine(
+                $"refusing to read {path}: world-writable perms are catastrophic for a file " +
+                $"that contains JWT_SECRET / ADMIN_PASSWORD / DATABASE_PASSWORD " +
+                $"(current mode: 0{Convert.ToString((int)mode, 8)}). " +
+                $"Run: chmod o-w {path}");
+            return false;
+        }
+        if ((mode & UnixFileMode.OtherRead) != 0)
+        {
+            // Warn once per boot. We deliberately don't refuse — that would
+            // break every operator on upgrade — but make the breadcrumb loud.
+            Console.Error.WriteLine(
+                $"warning: {path} is world-readable (mode 0{Convert.ToString((int)mode, 8)}) — " +
+                $"contains secrets, recommend `chmod o-rwx {path}` to tighten.");
+        }
+        return true;
     }
 
     // Parses a dotenv file at the given path and returns the raw KEY → value

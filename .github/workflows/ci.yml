@@ -53,13 +53,15 @@ jobs:
           grep -q '^DATABASE_PASSWORD' config.env || echo 'DATABASE_PASSWORD="dmart"' >> config.env
           grep -q '^DATABASE_NAME' config.env || echo 'DATABASE_NAME="dmart"' >> config.env
           # Pre-amble: kick any sessions still attached to the dmart DB.
-          # PostgreSQL refuses to drop a database with open connections, and
-          # a prior CI run's `dmart serve` may not have fully released its
-          # pool before SIGTERM landed — those orphan backends block dropdb
-          # below and force the test phase to reuse stale schema + stale
-          # admin password from the prior run. `|| true` keeps a cold-PG
-          # / missing-DB case from blocking; only dropdb is required to
-          # succeed.
+          # The dmart server's IHostApplicationLifetime.ApplicationStopped
+          # hook now calls NpgsqlConnection.ClearAllPools(), so a graceful
+          # SIGTERM shouldn't leave orphan backends — but a hard kill
+          # (OOM, runner abort, panic before the lifetime fires) still
+          # can, and PG refuses to drop a database with open connections.
+          # This kept here as a defensive belt: harmless when there's
+          # nothing to terminate, life-saving when the previous run died
+          # ungracefully. `|| true` keeps a cold-PG / missing-DB case
+          # from blocking; only dropdb is required to succeed.
           psql -w -h 127.0.0.1 -U dmart -d postgres -c \
             "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
              WHERE datname='dmart' AND pid <> pg_backend_pid();" \
