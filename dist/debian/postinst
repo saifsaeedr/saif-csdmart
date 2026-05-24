@@ -38,11 +38,19 @@ Edit it with your database credentials and JWT secret, then:
 EOF
         fi
 
-        # Ensure runtime dirs are owned by the dmart user. Dpkg sets
-        # owner/group from the .deb's tar entries (root:root), so we
-        # chown after the fact — matches the RPM %post pattern.
-        chown dmart:dmart /var/lib/dmart /var/lib/dmart/spaces \
-            /var/lib/dmart/custom_plugins 2>/dev/null || true
+        # Re-create runtime directories if missing, then ensure they're
+        # owned by the dmart user. Belt + suspenders: the .deb's tar
+        # entries SHOULD ship these, and the systemd unit's
+        # StateDirectory= will recreate them at service start — but an
+        # unclean upgrade or manual cleanup between install and first
+        # start can still leave the dmart user staring at ENOENT. install
+        # -d is idempotent (no-op when the directory exists with the
+        # right perms) so this also acts as a self-heal on `dpkg
+        # --reconfigure dmart`.
+        install -d -m 0755 -o dmart -g dmart /var/lib/dmart
+        install -d -m 0755 -o dmart -g dmart /var/lib/dmart/spaces
+        install -d -m 0755 -o dmart -g dmart /var/lib/dmart/custom_plugins
+        install -d -m 0755 -o dmart -g dmart /var/lib/dmart/logs
 
         # Reload systemd if it's there (containers / minimal images
         # might not have it; don't fail the install on its absence).
