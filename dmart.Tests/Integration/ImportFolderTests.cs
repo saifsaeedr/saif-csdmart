@@ -264,6 +264,101 @@ public class ImportFolderTests : IClassFixture<DmartFactory>
         }
     }
 
+    [FactIfPg]
+    public async Task Folder_Import_Remap_Drops_Content_Under_Target_Space_And_Subpath()
+    {
+        // Remap mode: source folder contains content (no meta.space.json
+        // at the top); --space and --subpath together drop it under an
+        // existing space's subpath. Verifies the prefix-prepend path
+        // through the layout validator and the DB.
+        var sp = _factory.Services;
+        _factory.CreateClient();
+        var io = sp.GetRequiredService<ImportExportService>();
+        var entryRepo = sp.GetRequiredService<EntryRepository>();
+        var spaceRepo = sp.GetRequiredService<SpaceRepository>();
+
+        var spaceName = "iexremap_" + Guid.NewGuid().ToString("N")[..6];
+        await spaceRepo.UpsertAsync(new Space
+        {
+            Uuid = Guid.NewGuid().ToString(), Shortname = spaceName, SpaceName = spaceName,
+            Subpath = "/", OwnerShortname = "dmart", IsActive = true,
+            Languages = new() { Language.En },
+            CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        });
+
+        // Stage a partial export: just a single content entry's meta and
+        // its externalized JSON payload body. The source has NO
+        // meta.space.json at the root — that's the contract for remap mode.
+        var src = Path.Combine(Path.GetTempPath(), $"dmart-remap-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(src, ".dm", "gizmo"));
+        try
+        {
+            var contentMeta = $$"""
+                {
+                  "uuid": "{{Guid.NewGuid()}}",
+                  "shortname": "gizmo",
+                  "is_active": true,
+                  "owner_shortname": "dmart",
+                  "created_at": "2026-01-01T00:00:00Z",
+                  "updated_at": "2026-01-01T00:00:00Z",
+                  "payload": {
+                    "content_type": "json",
+                    "schema_shortname": null,
+                    "body": "gizmo.json"
+                  }
+                }
+                """;
+            await File.WriteAllTextAsync(Path.Combine(src, ".dm", "gizmo", "meta.content.json"), contentMeta);
+            await File.WriteAllTextAsync(Path.Combine(src, "gizmo.json"), """{"sku": "REMAPPED"}""");
+
+            var resp = await io.ImportFolderAsync(src, actor: null,
+                preserveExisting: false, fastUnsafeNoFkCheck: false, fastParallelism: 1,
+                batchSize: ImportExportService.DefaultBatchSize,
+                targetSpace: spaceName, targetSubpath: "/products");
+            resp.Status.ShouldBe(Status.Success,
+                customMessage: $"unexpected error: {resp.Error?.Message}");
+
+            // Verify the entry landed under {spaceName}:/products with the
+            // remapped subpath (not at the source's top level).
+            var gizmo = await entryRepo.GetAsync(spaceName, "/products", "gizmo", ResourceType.Content);
+            gizmo.ShouldNotBeNull("entry missing — remap should have placed it at /products/gizmo");
+            gizmo!.Payload!.Body!.Value.GetProperty("sku").GetString().ShouldBe("REMAPPED");
+        }
+        finally
+        {
+            try { await entryRepo.DeleteAsync(spaceName, "/products", "gizmo", ResourceType.Content); } catch { }
+            try { await spaceRepo.DeleteAsync(spaceName); } catch { }
+            try { Directory.Delete(src, recursive: true); } catch { }
+        }
+    }
+
+    [FactIfPg]
+    public async Task Folder_Import_Remap_Hard_Fails_On_Missing_Target_Space()
+    {
+        // Pre-flight check: the target space must already exist. If the
+        // operator typos the space name, fail before touching anything.
+        var sp = _factory.Services;
+        _factory.CreateClient();
+        var io = sp.GetRequiredService<ImportExportService>();
+
+        var src = Path.Combine(Path.GetTempPath(), $"dmart-remap-miss-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(src);
+        try
+        {
+            var resp = await io.ImportFolderAsync(src, actor: null,
+                preserveExisting: false, fastUnsafeNoFkCheck: false, fastParallelism: 1,
+                batchSize: ImportExportService.DefaultBatchSize,
+                targetSpace: "no-such-space-" + Guid.NewGuid().ToString("N")[..6],
+                targetSubpath: "/anywhere");
+            resp.Status.ShouldBe(Status.Failed);
+            resp.Error!.Message.ShouldContain("does not exist");
+        }
+        finally
+        {
+            try { Directory.Delete(src, recursive: true); } catch { }
+        }
+    }
+
     [Fact]
     public void Cli_Import_TypeZip_On_Directory_Exits_Nonzero()
     {

@@ -479,7 +479,25 @@ public sealed class ImportExportService(
     /// <see cref="ImportZipAsync"/>; the only difference is that file
     /// bytes are read directly from disk instead of from a zip archive.
     /// </summary>
-    public async Task<Response> ImportFolderAsync(string folderPath, string? actor, bool preserveExisting, bool fastUnsafeNoFkCheck, int fastParallelism, int batchSize = DefaultBatchSize, CancellationToken ct = default)
+    /// <param name="targetSpace">
+    /// Optional remap: when set, the source folder is treated as content
+    /// to import INTO the named space (which must already exist) at
+    /// <paramref name="targetSubpath"/>. The layout expectation flips:
+    /// the source must NOT contain a <c>meta.space.json</c> anywhere
+    /// (that would be ambiguous), and every relative path inside the
+    /// source has <c>{targetSpace}/{targetSubpath}/</c> prepended before
+    /// the layout validator runs. Both <paramref name="targetSpace"/>
+    /// and <paramref name="targetSubpath"/> must be supplied together,
+    /// or both left null for the legacy "source is a full space dump"
+    /// behaviour.
+    /// </param>
+    /// <param name="targetSubpath">
+    /// Optional parent subpath inside the target space (e.g.
+    /// <c>"/products"</c>). Normalized — leading and trailing slashes
+    /// stripped, <c>""</c> or <c>"/"</c> means "directly under the space
+    /// root". Required when <paramref name="targetSpace"/> is set.
+    /// </param>
+    public async Task<Response> ImportFolderAsync(string folderPath, string? actor, bool preserveExisting, bool fastUnsafeNoFkCheck, int fastParallelism, int batchSize = DefaultBatchSize, string? targetSpace = null, string? targetSubpath = null, CancellationToken ct = default)
     {
         _ = actor;
         if (!Directory.Exists(folderPath))
@@ -487,17 +505,53 @@ public sealed class ImportExportService(
                 $"import folder '{folderPath}' does not exist or is not a directory",
                 ErrorTypes.Request);
 
-        // Sanity check the layout: at least one immediate subdirectory
-        // must look like a dmart space (carry .dm/meta.space.json). Cheap
-        // to compute, catches typos that point the import at the wrong
-        // directory before we burn a fast-import session on nothing.
-        var hasSpace = Directory.EnumerateDirectories(folderPath)
-            .Any(d => File.Exists(Path.Combine(d, ".dm", "meta.space.json")));
-        if (!hasSpace)
-            return Response.Fail(InternalErrorCode.INVALID_DATA,
-                $"target folder '{folderPath}' does not look like a dmart space dump "
-                + "(no */.dm/meta.space.json found)",
-                ErrorTypes.Request);
+        // Validate the remap-mode parameter pair. Both must be set, or
+        // both null — partial usage is almost certainly an operator
+        // mistake (e.g. typo on one of the two flag names).
+        var remapMode = !string.IsNullOrEmpty(targetSpace) || !string.IsNullOrEmpty(targetSubpath);
+        string? normalizedSubpath = null;
+        if (remapMode)
+        {
+            if (string.IsNullOrEmpty(targetSpace))
+                return Response.Fail(InternalErrorCode.INVALID_DATA,
+                    "targetSubpath set without targetSpace — both are required together",
+                    ErrorTypes.Request);
+            if (targetSubpath is null)
+                return Response.Fail(InternalErrorCode.INVALID_DATA,
+                    "targetSpace set without targetSubpath — pass '/' for the space root",
+                    ErrorTypes.Request);
+
+            // Normalize the subpath: strip leading and trailing slashes so
+            // "/products", "products", "/products/", "products/" all mean
+            // the same thing. The space root is represented as empty.
+            normalizedSubpath = targetSubpath.Trim().Trim('/');
+
+            // Pre-flight: target space must already exist in the DB. Remap
+            // mode is "drop content into an existing space" — never
+            // "create a new space from a source that doesn't have its
+            // own space meta." Catches the operator typo early.
+            if (await spaces.GetAsync(targetSpace, ct) is null)
+                return Response.Fail(InternalErrorCode.INVALID_DATA,
+                    $"target space '{targetSpace}' does not exist — create it first " +
+                    "or invoke without --space to import a full space dump",
+                    ErrorTypes.Request);
+        }
+        else
+        {
+            // Legacy "full space dump" sanity check: at least one immediate
+            // subdirectory must look like a dmart space (carry
+            // .dm/meta.space.json). Cheap to compute, catches typos that
+            // point the import at the wrong directory before we burn a
+            // fast-import session on nothing.
+            var hasSpace = Directory.EnumerateDirectories(folderPath)
+                .Any(d => File.Exists(Path.Combine(d, ".dm", "meta.space.json")));
+            if (!hasSpace)
+                return Response.Fail(InternalErrorCode.INVALID_DATA,
+                    $"target folder '{folderPath}' does not look like a dmart space dump "
+                    + "(no */.dm/meta.space.json found) — pass --space and --subpath "
+                    + "to import this folder as content into an existing space",
+                    ErrorTypes.Request);
+        }
 
         // Skip dot-prefixed segments (e.g. `.git/`, `.DS_Store`, vim swap
         // `.foo.swp`, editor backup state) EXCEPT `.dm/` which is
@@ -524,12 +578,36 @@ public sealed class ImportExportService(
             IgnoreInaccessible = true,
         };
 
+        // Remap prefix: empty string when remap mode is off; otherwise
+        // "{space}/" or "{space}/{subpath}/" so every entry's relative
+        // path becomes a valid `{space}/...` after concatenation.
+        var prefix = remapMode
+            ? (string.IsNullOrEmpty(normalizedSubpath)
+                ? $"{targetSpace}/"
+                : $"{targetSpace}/{normalizedSubpath}/")
+            : "";
+
         var entries = new List<ImportEntryRef>();
         foreach (var abs in Directory.EnumerateFiles(folderPath, "*", enumOpts))
         {
             var rel = Path.GetRelativePath(folderPath, abs).Replace(Path.DirectorySeparatorChar, '/');
             if (ShouldSkip(rel)) continue;
-            entries.Add(ImportEntryRef.FromFile(rel, abs));
+
+            // Remap mode: reject any source-level space meta. The operator
+            // said "import into {targetSpace}", so a meta.space.json in
+            // the source is ambiguous — either they meant a full-dump
+            // import (in which case --space is wrong) or they have a
+            // misplaced meta.space.json in their tree (operator error).
+            // Either way, fail loudly instead of silently overwriting
+            // the target space's own meta.
+            if (remapMode && rel.EndsWith("/.dm/meta.space.json", StringComparison.Ordinal))
+                return Response.Fail(InternalErrorCode.INVALID_DATA,
+                    $"remap mode (--space/--subpath) found a space meta in the source at '{rel}' — " +
+                    "remap is for content-only imports into an existing space, " +
+                    "remove the meta.space.json or invoke without --space",
+                    ErrorTypes.Request);
+
+            entries.Add(ImportEntryRef.FromFile(prefix + rel, abs));
         }
         return await ImportFromEntriesAsync(entries, ImportSourceKind.Filesystem,
             preserveExisting, fastUnsafeNoFkCheck, fastParallelism, batchSize, ct);
