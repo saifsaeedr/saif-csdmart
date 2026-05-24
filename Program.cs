@@ -1580,6 +1580,34 @@ Dmart.Plugins.Native.NativePluginCallbacks.Services = app.Services;
 Dmart.Plugins.Native.NativePluginLoader.WireSubprocessShutdown(
     app.Services.GetRequiredService<IHostApplicationLifetime>());
 
+// Drain the Npgsql connection pool on graceful shutdown so SIGTERM doesn't
+// leave orphan backends attached to the dmart DB. Without this the next
+// `dropdb` (CI rerun, local dev iteration) is blocked by stale sessions
+// until they time out — the CI workflow currently `pg_terminate_backend`s
+// them defensively pre-test, but the workaround masks a real gap in our
+// shutdown handling. ClearAllPools closes idle connections immediately;
+// in-flight ones get closed when their using-blocks dispose, which the
+// ApplicationStopping → ApplicationStopped lifecycle already serialises
+// behind.
+{
+    var lifetime = app.Services.GetRequiredService<IHostApplicationLifetime>();
+    var poolLog = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Dmart.Shutdown");
+    lifetime.ApplicationStopped.Register(() =>
+    {
+        try
+        {
+            Npgsql.NpgsqlConnection.ClearAllPools();
+            poolLog.LogInformation("npgsql pools cleared on shutdown");
+        }
+        catch (Exception ex)
+        {
+            // Best-effort — never let a shutdown-time pool error escape into
+            // the host's exit code.
+            poolLog.LogWarning(ex, "npgsql pool clear on shutdown threw (ignored)");
+        }
+    });
+}
+
 // Log the baked-in build version as the first line of the startup banner.
 // Uses the Dmart.Startup category (pinned to Information by the AddFilter
 // above) so it always survives, and is captured by the JSONL sink (LOG_FILE)

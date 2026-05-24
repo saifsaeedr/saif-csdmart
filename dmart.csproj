@@ -131,9 +131,10 @@
     <ProjectReference Include="Dmart.Models/Dmart.Models.csproj">
       <UndefineProperties>PublishAot;StripSymbols</UndefineProperties>
     </ProjectReference>
-    <!-- Shared parser. Same UndefineProperties trick: the netstandard2.1
-         leg of Dmart.QueryGrammar can't AOT, but the net10.0 leg the
-         server links against can. -->
+    <!-- Shared parser. Same UndefineProperties trick as Dmart.Models so
+         the multi-target build (net8.0;net10.0) doesn't try to AOT-publish
+         both TFMs when consumed; only the net10.0 leg links into the AOT
+         server binary, while the net8.0 leg ships to SDK consumers. -->
     <ProjectReference Include="Dmart.QueryGrammar/Dmart.QueryGrammar.csproj">
       <UndefineProperties>PublishAot;StripSymbols</UndefineProperties>
     </ProjectReference>

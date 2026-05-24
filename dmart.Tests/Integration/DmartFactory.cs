@@ -133,7 +133,7 @@ public sealed class DmartFactory : WebApplicationFactory<Program>, IAsyncLifetim
     async Task IAsyncLifetime.InitializeAsync()
     {
         if (!HasPg) return;
-        await ResetBootstrapAdminStateAsync(Services, AdminShortname);
+        await ResetBootstrapAdminStateAsync(Services, AdminShortname, AdminPassword);
     }
 
     Task IAsyncLifetime.DisposeAsync()
@@ -144,14 +144,39 @@ public sealed class DmartFactory : WebApplicationFactory<Program>, IAsyncLifetim
 
     public static async Task ResetBootstrapAdminStateAsync(
         IServiceProvider services,
-        string adminShortname = "dmart")
+        string adminShortname = "dmart",
+        string? adminPassword = null)
     {
         var db = services.GetRequiredService<Db>();
         await using var conn = await db.OpenAsync();
-        await using var cmd = new Npgsql.NpgsqlCommand(
-            "UPDATE users SET is_active = true, attempt_count = 0 WHERE shortname = $1", conn);
-        cmd.Parameters.Add(new() { Value = adminShortname });
-        await cmd.ExecuteNonQueryAsync();
+
+        // Reset transient lockout state (attempt_count + is_active) every
+        // factory boot. Multiple test classes' factories race on the same
+        // admin row, and a wrong-password test elsewhere can leave
+        // attempt_count high enough to block subsequent logins.
+        await using (var resetCmd = new Npgsql.NpgsqlCommand(
+            "UPDATE users SET is_active = true, attempt_count = 0 WHERE shortname = $1", conn))
+        {
+            resetCmd.Parameters.Add(new() { Value = adminShortname });
+            await resetCmd.ExecuteNonQueryAsync();
+        }
+
+        // Resync the password hash to match the factory's AdminPassword
+        // when supplied. Without this, a different test class that booted
+        // its factory with a different DMART_TEST_PWD could have stored
+        // the wrong hash; this factory's login would then get 401 even
+        // though AdminBootstrap thinks it created the user. Using the same
+        // PasswordHasher the server uses keeps the algorithm in sync.
+        if (!string.IsNullOrEmpty(adminPassword))
+        {
+            var hasher = services.GetRequiredService<Dmart.Auth.PasswordHasher>();
+            var hashed = hasher.Hash(adminPassword);
+            await using var pwdCmd = new Npgsql.NpgsqlCommand(
+                "UPDATE users SET password = $2 WHERE shortname = $1", conn);
+            pwdCmd.Parameters.Add(new() { Value = adminShortname });
+            pwdCmd.Parameters.Add(new() { Value = hashed });
+            await pwdCmd.ExecuteNonQueryAsync();
+        }
     }
 
     // Per-test user with a fresh JWT + matching `sessions` row. Use this from
