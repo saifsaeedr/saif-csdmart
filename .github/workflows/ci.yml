@@ -98,8 +98,12 @@ jobs:
           # config.env already populated in the "Copy host config" step.
           cp config.env "$BUILD_DIR/"
           # Start server from the build output directory (apphost
-          # finds its DLL + deps next to itself).
-          (cd "$BUILD_DIR" && ./dmart serve) &
+          # finds its DLL + deps next to itself). BACKEND_ENV points at
+          # the copied-in config.env explicitly — the cwd lookup that
+          # used to find it was removed in the DotEnv hardening, so
+          # without this flag the server starts with empty config and
+          # the smoke tests collapse on missing BASE_URL etc.
+          (cd "$BUILD_DIR" && BACKEND_ENV=./config.env ./dmart serve) &
           SERVER_PID=$!
           # Wait for server to come up — try both common ports
           sleep 3
