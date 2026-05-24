@@ -14,6 +14,7 @@ namespace Dmart.Tests.Integration;
 // spec surface + auth gating + Python-parity permission enforcement.
 // Uses real HTTP against a WebApplicationFactory host; authenticates with
 // the bootstrap admin JWT via the existing /user/login flow.
+[Collection(SharedAdminStateCollection.Name)]
 public sealed class McpEndpointTests : IClassFixture<DmartFactory>
 {
     private readonly DmartFactory _factory;

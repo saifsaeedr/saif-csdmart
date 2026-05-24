@@ -100,8 +100,28 @@ public sealed class EntryRepository(Db db)
 
     public async Task UpsertAsync(Entry e, CancellationToken ct = default)
     {
-        await using var conn = await db.OpenAsync(ct);
-        await UpsertAsync(e, conn, ct);
+        // Deadlock-retry posture matches UserRepository — concurrent writes
+        // to entries (typical when several plugins or imports run in
+        // parallel) can trip Postgres' deadlock detector (SQLState 40P01)
+        // or serialization failure (40001). Both are transient by design
+        // and PG explicitly designs the application to retry. Bounded to
+        // 3 attempts with a tiny randomised backoff to break symmetry.
+        const int MaxAttempts = 3;
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await using var conn = await db.OpenAsync(ct);
+                await UpsertAsync(e, conn, ct);
+                return;
+            }
+            catch (PostgresException ex) when (
+                attempt < MaxAttempts &&
+                (ex.SqlState == "40P01" || ex.SqlState == "40001"))
+            {
+                await Task.Delay(Random.Shared.Next(5, 25), ct);
+            }
+        }
     }
 
     public async Task UpsertAsync(Entry e, NpgsqlConnection conn, CancellationToken ct = default)
@@ -212,6 +232,24 @@ public sealed class EntryRepository(Db db)
     {
         e = e with { QueryPolicies = Utils.QueryPolicies.Generate(e) };
 
+        const int MaxAttempts = 3;
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return await UpsertWithPriorCoreAsync(e, ct);
+            }
+            catch (PostgresException ex) when (
+                attempt < MaxAttempts &&
+                (ex.SqlState == "40P01" || ex.SqlState == "40001"))
+            {
+                await Task.Delay(Random.Shared.Next(5, 25), ct);
+            }
+        }
+    }
+
+    private async Task<(Entry? prior, bool inserted)> UpsertWithPriorCoreAsync(Entry e, CancellationToken ct)
+    {
         await using var conn = await db.OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(ct);
 

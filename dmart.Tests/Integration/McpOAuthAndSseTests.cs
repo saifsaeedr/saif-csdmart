@@ -18,6 +18,7 @@ namespace Dmart.Tests.Integration;
 // (discovery / dynamic client registration / authorize / token with PKCE),
 // the SSE server→client stream, and the elicitation/create confirmation
 // flow that the delete tool drives when the client opts in.
+[Collection(SharedAdminStateCollection.Name)]
 public sealed class McpOAuthAndSseTests : IClassFixture<DmartFactory>
 {
     private readonly DmartFactory _factory;

@@ -18,6 +18,7 @@ namespace Dmart.Tests.Integration;
 // Integration tests covering all the features added in the Python parity
 // implementation. Each test hits the live DB through the DmartFactory's
 // in-process host — no mocks, no fakes.
+[Collection(SharedAdminStateCollection.Name)]
 public class FullParityTests : IClassFixture<DmartFactory>
 {
     private readonly DmartFactory _factory;

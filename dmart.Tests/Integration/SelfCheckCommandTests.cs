@@ -14,6 +14,7 @@ namespace Dmart.Tests.Integration;
 // pass them through SelfCheckOptions directly rather than going through
 // the config.env-driven ParseArgs path (which would require a real config.env
 // on disk — irrelevant for the smoke's correctness).
+[Collection(SharedAdminStateCollection.Name)]
 public sealed class SelfCheckCommandTests : IClassFixture<DmartFactory>
 {
     private readonly DmartFactory _factory;
