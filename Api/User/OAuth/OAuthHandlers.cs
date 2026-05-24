@@ -118,6 +118,16 @@ public static class OAuthHandlers
         // On success we 302 to AppleOauthCallback with `?access_token=<jwt>`
         // appended; the same JWT is also set as the auth_token httponly cookie.
         // On any error we fall back to the JSON 401 ProviderError envelope.
+        //
+        // SECURITY NOTE: the access_token in the URL is exposed in browser
+        // history, the `Referer` header on outbound requests from the
+        // landing page, any reverse-proxy / CDN access logs along the
+        // way, and the server's own access log. The httponly cookie that
+        // CompleteLoginAsync writes is the lower-exposure channel; the
+        // URL parameter is only there so a frontend whose origin doesn't
+        // share the cookie scope can pick the token up. Frontends SHOULD
+        // `history.replaceState({}, '', location.pathname)` to scrub the
+        // token from the bar as soon as they've read it.
         g.MapPost("/apple/callback", async (HttpRequest req,
             AppleProvider provider, OAuthUserResolver resolver,
             UserService users, IOptions<DmartSettings> settings,
@@ -161,6 +171,13 @@ public static class OAuthHandlers
             // frontend can pick it up from the URL even if the cookie's scope
             // doesn't reach. On error (or any unexpected shape) just forward
             // the IResult so the caller sees the 401 envelope.
+            //
+            // COUPLED to CompleteLoginAsync's Results.Json envelope shape
+            // (records[0].attributes.access_token). If that helper ever
+            // returns a different IResult type or a different attribute
+            // key, this match falls through to the forward-as-is path and
+            // the frontend's URL pickup silently stops working. Keep the
+            // two sites updated together.
             var loginResult = await CompleteLoginAsync(info, resolver, users, settings, http, ct);
             if (loginResult is not JsonHttpResult<Response> json
                 || json.Value is not { Status: Status.Success, Records: { Count: > 0 } records }

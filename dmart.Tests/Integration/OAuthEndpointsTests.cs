@@ -112,6 +112,74 @@ public sealed class OAuthEndpointsTests : IClassFixture<DmartFactory>
         body.ShouldContain("code exchange not configured");
     }
 
+    // The handler reads the body via ReadFormAsync; that throws
+    // InvalidDataException when the content-type isn't form-encoded. The
+    // try/catch must return a clean 401 instead of letting the
+    // unhandled exception 500. AppleClientId + AppleOauthCallback are
+    // set so IsConfigured passes; the catch arm is what's under test.
+    [FactIfPg]
+    public async Task AppleCallback_Post_NonFormContentType_ReturnsCleanError()
+    {
+        using var host = _factory.WithWebHostBuilder(b =>
+        {
+            b.ConfigureAppConfiguration((_, cfg) =>
+            {
+                cfg.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Dmart:AppleClientId"] = "com.example.test",
+                    ["Dmart:AppleOauthCallback"] = "https://example.com/post-login",
+                });
+            });
+        });
+        using var client = host.CreateClient();
+
+        var resp = await client.PostAsync(
+            "/user/apple/callback",
+            new StringContent("{\"code\":\"x\"}", System.Text.Encoding.UTF8, "application/json"));
+        resp.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+        var body = await resp.Content.ReadAsStringAsync();
+        body.ShouldContain("\"status\":\"failed\"");
+        body.ShouldContain("application/x-www-form-urlencoded");
+    }
+
+    // Branch-ordering test: when BOTH id_token and code are in the form,
+    // id_token wins (lighter validation path, no Apple round-trip). With
+    // an obviously bogus id_token and configured provider, the handler
+    // must fail at ValidateIdTokenAsync ("invalid apple id token") —
+    // proving the dispatch picks the id_token branch first. If a future
+    // refactor swaps branch order, this test catches it by failing
+    // with the code-branch error instead.
+    [FactIfPg]
+    public async Task AppleCallback_Post_IdTokenWinsOverCode_AndBadIdTokenRejected()
+    {
+        using var host = _factory.WithWebHostBuilder(b =>
+        {
+            b.ConfigureAppConfiguration((_, cfg) =>
+            {
+                cfg.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Dmart:AppleClientId"] = "com.example.test",
+                    ["Dmart:AppleOauthCallback"] = "https://example.com/post-login",
+                });
+            });
+        });
+        using var client = host.CreateClient();
+
+        var resp = await client.PostAsync(
+            "/user/apple/callback",
+            new FormUrlEncodedContent(new[]
+            {
+                new KeyValuePair<string, string>("id_token", "not.a.jwt"),
+                new KeyValuePair<string, string>("code", "irrelevant"),
+            }));
+        resp.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+        var body = await resp.Content.ReadAsStringAsync();
+        body.ShouldContain("\"status\":\"failed\"");
+        // The id_token error wins; if the code branch fired we'd see
+        // "code exchange" in the message instead.
+        body.ShouldContain("invalid apple id token");
+    }
+
     // OAuthUserResolver — unit-level, but requires DB → put it here with the
     // other DB-backed integration tests so it uses the shared factory.
     [FactIfPg]
