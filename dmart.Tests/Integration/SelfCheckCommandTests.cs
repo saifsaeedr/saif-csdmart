@@ -1,4 +1,5 @@
 using Dmart.Cli;
+using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
 using Spectre.Console;
 using Xunit;
@@ -44,7 +45,8 @@ public sealed class SelfCheckCommandTests : IClassFixture<DmartFactory>
             Space: "management",
             Subpath: "/reports",
             Keep: false,
-            Verbose: false);
+            Verbose: false,
+            JwtBootstrap: false);
 
         // Record Spectre output so the assertion failure carries the
         // failing step's name — much more useful than a bare "exit code 1".
@@ -76,7 +78,8 @@ public sealed class SelfCheckCommandTests : IClassFixture<DmartFactory>
             Space: "management",
             Subpath: "/reports",
             Keep: false,
-            Verbose: false);
+            Verbose: false,
+            JwtBootstrap: false);
 
         var console = AnsiConsole.Create(new AnsiConsoleSettings
         {
@@ -110,7 +113,8 @@ public sealed class SelfCheckCommandTests : IClassFixture<DmartFactory>
             Space: "management",
             Subpath: "/reports",
             Keep: false,
-            Verbose: false);
+            Verbose: false,
+            JwtBootstrap: false);
 
         var console = AnsiConsole.Create(new AnsiConsoleSettings
         {
@@ -121,5 +125,63 @@ public sealed class SelfCheckCommandTests : IClassFixture<DmartFactory>
 
         var exitCode = await SelfCheckCommand.RunAsync(http, opts, console);
         exitCode.ShouldBe(1);
+    }
+
+    // --jwt-bootstrap mode: caller mints a JWT itself and threads it into
+    // RunAsync via preMintedToken. Selfcheck skips /user/login entirely
+    // and goes straight to step 2 with Authorization: Bearer <token>.
+    // Important: even with a stale ADMIN_PASSWORD (or none at all) the
+    // smoke completes successfully. This pins the design where the
+    // jwt-bootstrap path is decoupled from the password.
+    [FactIfPg]
+    public async Task SelfCheck_JwtBootstrap_Succeeds_WithoutPassword()
+    {
+        var http = _factory.CreateClient(
+            new Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactoryClientOptions { HandleCookies = false });
+
+        // Mint the JWT the same way SelfCheckCommand.JwtBootstrapAsync
+        // would, using the factory's wired-up services. The session row
+        // gets inserted via UserRepository.CreateSessionAsync (which
+        // hashes the raw JWT into the token column) — matching the
+        // server's OnTokenValidated lookup.
+        var settings = _factory.Services.GetRequiredService<
+            Microsoft.Extensions.Options.IOptions<Dmart.Config.DmartSettings>>().Value;
+        var issuer = new Dmart.Auth.JwtIssuer(Microsoft.Extensions.Options.Options.Create(settings));
+        var users = _factory.Services.GetRequiredService<Dmart.DataAdapters.Sql.UserRepository>();
+        var hasher = new Dmart.Auth.SessionTokenHasher(settings);
+        var jwt = issuer.IssueAccess(_factory.AdminShortname,
+            roles: null, userType: Dmart.Models.Enums.UserType.Web);
+        await users.CreateSessionAsync(_factory.AdminShortname, jwt);
+
+        try
+        {
+            var opts = new SelfCheckCommand.SelfCheckOptions(
+                Url: http.BaseAddress!.ToString(),
+                Admin: _factory.AdminShortname,
+                Password: null,  // deliberately omitted — JWT path doesn't need it
+                Space: "management",
+                Subpath: "/reports",
+                Keep: false,
+                Verbose: false,
+                JwtBootstrap: true);
+
+            var output = new StringWriter();
+            var console = AnsiConsole.Create(new AnsiConsoleSettings
+            {
+                Ansi = AnsiSupport.No,
+                ColorSystem = ColorSystemSupport.NoColors,
+                Out = new AnsiConsoleOutput(output),
+            });
+
+            var exitCode = await SelfCheckCommand.RunAsync(http, opts, console, preMintedToken: jwt);
+            exitCode.ShouldBe(0, customMessage: $"selfcheck output:\n{output}");
+            var outputText = output.ToString();
+            outputText.ShouldContain("jwt-bootstrap as " + _factory.AdminShortname);
+        }
+        finally
+        {
+            // Clean up the session row we inserted.
+            try { await users.DeleteSessionAsync(_factory.AdminShortname, jwt); } catch { }
+        }
     }
 }

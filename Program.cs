@@ -325,7 +325,7 @@ switch (subcommand)
         // Defaults pull LISTENING_PORT / ADMIN_SHORTNAME / ADMIN_PASSWORD
         // out of the already-loaded config.env (dotenvValues), matching
         // curl.sh's env-then-config-then-fallback resolution order.
-        Environment.ExitCode = await Dmart.Cli.SelfCheckCommand.Run(serverArgs, dotenvValues);
+        Environment.ExitCode = await Dmart.Cli.SelfCheckCommand.Run(serverArgs, dotenvValues, dotenvPath);
         return;
     }
 

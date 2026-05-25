@@ -27,20 +27,28 @@ public static class SelfCheckCommand
         string? Space,
         string Subpath,
         bool Keep,
-        bool Verbose);
-    // Note: an earlier draft of this subcommand minted its own HS256 JWT from
-    // the shared JWT_SECRET in config.env so the operator wouldn't need a
-    // password at all. That doesn't work against this server's auth model —
-    // Auth/JwtBearerSetup.cs:OnTokenValidated enforces a DB-backed session
-    // row on every authenticated request ("Logout/password changes/account
-    // deactivation delete session rows, so every non-bot request must still
-    // have a live row"). Only /user/login creates those rows, so we go
-    // through login. Reviving the mint approach would require either
-    // provisioning a UserType.Bot account (bot users skip the session check)
-    // or having selfcheck open a direct DB connection to insert a row —
-    // both heavier than the current shape warrants.
+        bool Verbose,
+        bool JwtBootstrap);
+    // Two auth modes:
+    //   * default (password) — POST /user/login with shortname+password from
+    //     config.env's ADMIN_PASSWORD (or --password). Tests both the login
+    //     flow AND subsequent API calls. Couples selfcheck to whatever
+    //     password the running server currently expects, which is the
+    //     source-of-truth divergence operators hit when they rotate via
+    //     `dmart passwd` without also editing config.env.
+    //
+    //   * --jwt-bootstrap (default for on-host operator smoke) — selfcheck
+    //     reads JWT_SECRET from config.env, opens its own DB connection,
+    //     inserts a transient session row, mints an HS256 JWT for the
+    //     admin shortname, and uses it for every subsequent API call.
+    //     No password anywhere. Auth/JwtBearerSetup.cs:OnTokenValidated
+    //     accepts the token because the session row exists; the smoke
+    //     cleans the row up before exiting. Requires DB access (so the
+    //     dmart user must be able to reach /etc/dmart/config.env's
+    //     DATABASE_* and the same Postgres instance the server is using).
 
-    public static async Task<int> Run(string[] args, IReadOnlyDictionary<string, string?> dotenv)
+    public static async Task<int> Run(string[] args, IReadOnlyDictionary<string, string?> dotenv,
+        string? dotenvPath = null)
     {
         var opts = ParseArgs(args, dotenv);
         if (opts is null) return 0; // --help printed; not an error
@@ -55,12 +63,106 @@ public static class SelfCheckCommand
         };
         http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 
-        return await RunAsync(http, opts, AnsiConsole.Console);
+        // --jwt-bootstrap: mint a JWT from JWT_SECRET + insert a sessions
+        // row before the smoke runs. The token + cleanup callback are
+        // threaded into RunAsync so its smoke steps don't care which auth
+        // path provided the token. We do the work HERE (not inside
+        // RunAsync) so RunAsync stays HTTP-only and the tests can keep
+        // calling it without a real DB.
+        string? mintedToken = null;
+        Func<Task>? cleanupSession = null;
+        if (opts.JwtBootstrap)
+        {
+            try
+            {
+                (mintedToken, cleanupSession) = await JwtBootstrapAsync(opts, dotenvPath, dotenv);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"selfcheck: --jwt-bootstrap setup failed: {ex.GetType().Name}: {ex.Message}");
+                Console.Error.WriteLine("Check that DATABASE_* and JWT_SECRET in /etc/dmart/config.env are reachable from this host.");
+                return 1;
+            }
+        }
+
+        try
+        {
+            return await RunAsync(http, opts, AnsiConsole.Console, mintedToken);
+        }
+        finally
+        {
+            if (cleanupSession is not null)
+            {
+                try { await cleanupSession(); }
+                catch (Exception ex)
+                {
+                    // Don't fail the operator's exit code on cleanup —
+                    // a stale row will be GC'd by SessionInactivityTtl
+                    // anyway. Just surface the warning.
+                    Console.Error.WriteLine(
+                        $"selfcheck: session cleanup warning ({ex.GetType().Name}: {ex.Message})");
+                }
+            }
+        }
+    }
+
+    // Build a minimal DI shell (DmartSettings + Db), mint an HS256 JWT
+    // for the admin shortname, and write a sessions row whose token
+    // column is the hashed JWT. Returns the raw JWT (for the
+    // Authorization header) and a cleanup callback that removes the
+    // session row. Keep the surface tight: no plugin scope, no logging
+    // factory, just the auth primitives.
+    private static async Task<(string token, Func<Task> cleanup)> JwtBootstrapAsync(
+        SelfCheckOptions opts,
+        string? dotenvPath,
+        IReadOnlyDictionary<string, string?> dotenv)
+    {
+        // CliBootstrap.BuildOrExit needs a mutable IDictionary; selfcheck
+        // gets IReadOnly from its caller. Copy into a fresh dict — small
+        // allocation, avoids changing the shared helper's signature.
+        var dotenvWritable = new Dictionary<string, string?>(dotenv);
+        var (settings, db) = CliBootstrap.BuildOrExit(dotenvPath, dotenvWritable);
+        if (string.IsNullOrEmpty(settings.JwtSecret))
+            throw new InvalidOperationException("JWT_SECRET is not set in config.env");
+
+        var issuer = new Dmart.Auth.JwtIssuer(Microsoft.Extensions.Options.Options.Create(settings));
+        var hasher = new Dmart.Auth.SessionTokenHasher(settings);
+        // Bootstrap admin is type=Web in AdminBootstrap; the JWT carries
+        // the same so OnTokenValidated's bot-skip branch doesn't fire.
+        var jwt = issuer.IssueAccess(opts.Admin, roles: null, userType: Dmart.Models.Enums.UserType.Web);
+        var tokenHash = hasher.Hash(jwt);
+
+        await using (var conn = await db.OpenAsync())
+        await using (var cmd = new Npgsql.NpgsqlCommand("""
+            INSERT INTO sessions (uuid, shortname, token, firebase_token, timestamp)
+            VALUES (gen_random_uuid(), $1, $2, NULL, NOW())
+            """, conn))
+        {
+            cmd.Parameters.Add(new() { Value = opts.Admin });
+            cmd.Parameters.Add(new() { Value = tokenHash });
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        async Task Cleanup()
+        {
+            await using var conn = await db.OpenAsync();
+            await using var del = new Npgsql.NpgsqlCommand(
+                "DELETE FROM sessions WHERE shortname = $1 AND token = $2", conn);
+            del.Parameters.Add(new() { Value = opts.Admin });
+            del.Parameters.Add(new() { Value = tokenHash });
+            await del.ExecuteNonQueryAsync();
+        }
+
+        return (jwt, Cleanup);
     }
 
     // Testable body. `http.BaseAddress` must already be set by the caller — the
     // integration test feeds a TestServer-backed HttpClient straight in.
-    public static async Task<int> RunAsync(HttpClient http, SelfCheckOptions opts, IAnsiConsole console)
+    // When `preMintedToken` is non-null the login step is skipped and the
+    // smoke goes straight to step 2 using that bearer; --jwt-bootstrap
+    // callers thread it in via the Run wrapper.
+    public static async Task<int> RunAsync(HttpClient http, SelfCheckOptions opts,
+        IAnsiConsole console, string? preMintedToken = null)
     {
         console.MarkupLine($"[bold]dmart selfcheck[/] [grey]→ {Markup.Escape(opts.Url)}[/]");
         console.WriteLine();
@@ -105,37 +207,58 @@ public static class SelfCheckCommand
             }
         }
 
-        // 1. Login — POST /user/login. Creates the session row that every
-        //    subsequent authenticated request needs. If ADMIN_PASSWORD is
-        //    unset in config.env and no --password was supplied, fail with a
-        //    clear pointer at `dmart passwd` rather than letting an empty
-        //    password slip through to the server.
-        if (string.IsNullOrEmpty(opts.Password))
+        // 1. Acquire a bearer token.
+        //    Two modes: jwt-bootstrap (token already minted by the Run
+        //    wrapper, session row already inserted) vs password login
+        //    (the legacy path). Either way the rest of the smoke runs
+        //    against `Authorization: Bearer <token>`.
+        if (preMintedToken is not null)
         {
-            console.MarkupLine(
-                "  [red]✗[/] no admin password available — set ADMIN_PASSWORD in config.env,");
-            console.MarkupLine(
-                "      run `dmart passwd " + Markup.Escape(opts.Admin) + " <pwd>`, or pass --password.");
-            failures.Add("no password supplied");
-            failed++;
-            return Summarize(console, sw, passed, failed, failures);
-        }
-
-        if (!await RunStep($"login as {opts.Admin}", async () =>
-        {
-            var body = JsonBody($"{{\"shortname\":\"{Esc(opts.Admin)}\",\"password\":\"{Esc(opts.Password!)}\"}}");
-            using var resp = await http.PostAsync("/user/login", body);
-            var json = await ParseAsync(resp);
-            if (!resp.IsSuccessStatusCode || !IsSuccess(json))
-                return (false, ExtractError(json, $"HTTP {(int)resp.StatusCode}"));
-            token = json.GetProperty("records")[0].GetProperty("attributes").GetProperty("access_token").GetString();
-            if (string.IsNullOrEmpty(token))
-                return (false, "login succeeded but no access_token in response");
+            // The session row already exists thanks to the Run wrapper;
+            // record a passing step for symmetry with the login path so
+            // the smoke output stays parallel between modes.
+            token = preMintedToken;
             http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
-            return (true, $"token ({token!.Length} bytes)");
-        }))
+            console.MarkupLine($"  [green]✓[/] jwt-bootstrap as {Markup.Escape(opts.Admin)}" +
+                (opts.Verbose ? $" [grey]— minted token ({token.Length} bytes)[/]" : ""));
+            passed++;
+        }
+        else
         {
-            return Summarize(console, sw, passed, failed, failures);
+            // Password login. If ADMIN_PASSWORD is unset in config.env and
+            // no --password was supplied, fail with a clear pointer at the
+            // alternatives (`dmart passwd`, --password, or --jwt-bootstrap)
+            // rather than letting an empty password slip through to the
+            // server.
+            if (string.IsNullOrEmpty(opts.Password))
+            {
+                console.MarkupLine(
+                    "  [red]✗[/] no admin password available — set ADMIN_PASSWORD in config.env,");
+                console.MarkupLine(
+                    "      run `dmart passwd " + Markup.Escape(opts.Admin) + " <pwd>`, pass --password,");
+                console.MarkupLine(
+                    "      or use --jwt-bootstrap (mints a JWT, no password needed).");
+                failures.Add("no password supplied");
+                failed++;
+                return Summarize(console, sw, passed, failed, failures);
+            }
+
+            if (!await RunStep($"login as {opts.Admin}", async () =>
+            {
+                var body = JsonBody($"{{\"shortname\":\"{Esc(opts.Admin)}\",\"password\":\"{Esc(opts.Password!)}\"}}");
+                using var resp = await http.PostAsync("/user/login", body);
+                var json = await ParseAsync(resp);
+                if (!resp.IsSuccessStatusCode || !IsSuccess(json))
+                    return (false, ExtractError(json, $"HTTP {(int)resp.StatusCode}"));
+                token = json.GetProperty("records")[0].GetProperty("attributes").GetProperty("access_token").GetString();
+                if (string.IsNullOrEmpty(token))
+                    return (false, "login succeeded but no access_token in response");
+                http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                return (true, $"token ({token!.Length} bytes)");
+            }))
+            {
+                return Summarize(console, sw, passed, failed, failures);
+            }
         }
 
         // 2. /info/manifest — the first server-touching request when the
@@ -316,6 +439,7 @@ public static class SelfCheckCommand
         var subpath = "/";
         var keep = false;
         var verbose = false;
+        var jwtBootstrap = false;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -334,6 +458,7 @@ public static class SelfCheckCommand
                 case "--space"    when i + 1 < args.Length: space   = args[++i]; break;
                 case "--subpath"  when i + 1 < args.Length: subpath = args[++i]; break;
                 case "--keep":     keep     = true; break;
+                case "--jwt-bootstrap": jwtBootstrap = true; break;
                 case "-v":
                 case "--verbose":  verbose  = true; break;
                 default:
@@ -342,7 +467,7 @@ public static class SelfCheckCommand
                     return null;
             }
         }
-        return new SelfCheckOptions(url, admin, pwd, space, subpath, keep, verbose);
+        return new SelfCheckOptions(url, admin, pwd, space, subpath, keep, verbose, jwtBootstrap);
     }
 
     private static void PrintHelp()
@@ -352,15 +477,26 @@ public static class SelfCheckCommand
 
             Usage: dmart selfcheck [options]
 
-            Prerequisite: the admin must have a password. After `dmart init`
-            and `dmart migrate`, set one with `dmart passwd dmart <pwd>` or
-            export ADMIN_PASSWORD=... in config.env (then restart dmart).
+            Two auth modes:
+              * default: POSTs /user/login with admin shortname + password
+                from config.env's ADMIN_PASSWORD (or --password). Tests the
+                login flow as part of the smoke.
+              * --jwt-bootstrap: selfcheck reads JWT_SECRET from config.env,
+                opens its own DB connection, inserts a transient session row,
+                mints an HS256 JWT, and uses it for every API call. No
+                password anywhere. Requires the operator running selfcheck
+                to be able to reach the same Postgres the server is using.
+                Use this when ADMIN_PASSWORD in config.env has drifted from
+                what `dmart passwd` set, or when you don't want to store any
+                password on the host at all.
 
             Options:
               --url <url>            Server URL (default: http://127.0.0.1:<LISTENING_PORT>)
               --admin <shortname>    Admin shortname (default: ADMIN_SHORTNAME from config.env or 'dmart')
               --password <pwd>       Admin password (default: ADMIN_PASSWORD from config.env, or DMART_PWD env)
               --password-stdin       Read password from stdin (one line)
+              --jwt-bootstrap        Skip /user/login; mint a JWT from JWT_SECRET + insert a session row.
+                                     Requires DB access from this host.
               --space <name>         Space to CRUD against (default: first non-management space)
               --subpath <path>       Subpath under the space for the test entry (default: '/')
                                      Some spaces don't allow content at root — set to e.g. '/reports'
