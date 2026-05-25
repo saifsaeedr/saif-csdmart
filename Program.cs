@@ -191,7 +191,10 @@ switch (subcommand)
               migrate        Create/update the PG schema (idempotent; no server)
               version        Print version and build info
               settings       Print effective settings as JSON
-              passwd         Set password for a user interactively
+              passwd         Set password for a user. Shortname can be passed
+                             positionally: `dmart passwd <shortname>` skips
+                             the shortname prompt. `dmart passwd` with no
+                             args prompts for both shortname and password.
               check          Run health checks on a space
               selfcheck      Smoke-test the running HTTP surface (login + CRUD + query)
                              Usage: dmart selfcheck [--url <url>] [--admin <name>]
@@ -281,9 +284,21 @@ switch (subcommand)
 
     case "passwd":
     {
-        // Interactive password reset — mirrors Python's set_admin_passwd.py
-        Console.Write("Username: ");
-        var username = Console.ReadLine()?.Trim();
+        // Mirrors Python's set_admin_passwd.py. Shortname can be supplied
+        // positionally (`dmart passwd dmart`) so install-time scripting
+        // doesn't have to feed it through stdin; falls back to the
+        // interactive prompt when omitted.
+        //
+        // Note: we intentionally do NOT accept the password as a
+        // second positional arg. Passwords on a command line leak into
+        // shell history, `ps`, and process-listing audits — read it
+        // through Console.ReadLine instead.
+        string? username = serverArgs.Length >= 1 ? serverArgs[0].Trim() : null;
+        if (string.IsNullOrEmpty(username))
+        {
+            Console.Write("Username: ");
+            username = Console.ReadLine()?.Trim();
+        }
         if (string.IsNullOrEmpty(username)) { Console.Error.WriteLine("Username required"); Environment.ExitCode = 1; return; }
         Console.Write("New password: ");
         var password = Console.ReadLine()?.Trim();
