@@ -225,19 +225,22 @@ public static class SelfCheckCommand
         }
         else
         {
-            // Password login. If ADMIN_PASSWORD is unset in config.env and
-            // no --password was supplied, fail with a clear pointer at the
-            // alternatives (`dmart passwd`, --password, or --jwt-bootstrap)
-            // rather than letting an empty password slip through to the
-            // server.
+            // Password login. The admin password isn't kept on disk by
+            // default (post v0.9.25 install policy — config.env.sample
+            // doesn't ship ADMIN_PASSWORD). If the operator didn't pass
+            // --password or set DMART_PWD, the more useful path is
+            // --jwt-bootstrap; surface both options rather than letting
+            // an empty password slip through to the server.
             if (string.IsNullOrEmpty(opts.Password))
             {
                 console.MarkupLine(
-                    "  [red]✗[/] no admin password available — set ADMIN_PASSWORD in config.env,");
+                    "  [red]✗[/] no admin password available. Try either:");
                 console.MarkupLine(
-                    "      run `dmart passwd " + Markup.Escape(opts.Admin) + " <pwd>`, pass --password,");
+                    "      • dmart selfcheck --jwt-bootstrap   (mints a JWT, no password needed)");
                 console.MarkupLine(
-                    "      or use --jwt-bootstrap (mints a JWT, no password needed).");
+                    "      • dmart selfcheck --password <pwd>");
+                console.MarkupLine(
+                    "      • DMART_PWD=<pwd> dmart selfcheck");
                 failures.Add("no password supplied");
                 failed++;
                 return Summarize(console, sw, passed, failed, failures);
@@ -478,22 +481,24 @@ public static class SelfCheckCommand
             Usage: dmart selfcheck [options]
 
             Two auth modes:
-              * default: POSTs /user/login with admin shortname + password
-                from config.env's ADMIN_PASSWORD (or --password). Tests the
-                login flow as part of the smoke.
-              * --jwt-bootstrap: selfcheck reads JWT_SECRET from config.env,
-                opens its own DB connection, inserts a transient session row,
-                mints an HS256 JWT, and uses it for every API call. No
-                password anywhere. Requires the operator running selfcheck
-                to be able to reach the same Postgres the server is using.
-                Use this when ADMIN_PASSWORD in config.env has drifted from
-                what `dmart passwd` set, or when you don't want to store any
-                password on the host at all.
+              * --jwt-bootstrap (recommended for on-host operator smoke):
+                selfcheck reads JWT_SECRET from config.env, opens its own DB
+                connection, inserts a transient session row, mints an HS256
+                JWT, and uses it for every API call. No password anywhere.
+                Requires this host to be able to reach the same Postgres the
+                server is using.
+              * default (password login): POSTs /user/login with admin
+                shortname + password from --password or DMART_PWD env (or
+                the deprecated ADMIN_PASSWORD entry in config.env, which the
+                shipped sample no longer carries). Tests the login flow as
+                part of the smoke. Useful for off-host smokes or when you
+                want to verify the password path itself.
 
             Options:
               --url <url>            Server URL (default: http://127.0.0.1:<LISTENING_PORT>)
               --admin <shortname>    Admin shortname (default: ADMIN_SHORTNAME from config.env or 'dmart')
-              --password <pwd>       Admin password (default: ADMIN_PASSWORD from config.env, or DMART_PWD env)
+              --password <pwd>       Admin password (default: DMART_PWD env, then ADMIN_PASSWORD from
+                                     config.env if set — sample no longer ships this)
               --password-stdin       Read password from stdin (one line)
               --jwt-bootstrap        Skip /user/login; mint a JWT from JWT_SECRET + insert a session row.
                                      Requires DB access from this host.

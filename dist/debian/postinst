@@ -33,8 +33,12 @@ case "$1" in
         if [ -z "${2:-}" ]; then
             cat <<EOF
 Installed default config: /etc/dmart/config.env
-Edit it with your database credentials and JWT secret, then:
-  systemctl enable --now dmart
+Next steps:
+  1. Edit /etc/dmart/config.env — set DATABASE_* and JWT_SECRET.
+  2. systemctl enable --now dmart
+  3. dmart passwd dmart
+     (prompts for a password. The admin is created passwordless
+      so the secret never sits as cleartext in any file).
 EOF
         fi
 

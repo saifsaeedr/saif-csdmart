@@ -92,8 +92,12 @@ if [ ! -f /etc/dmart/config.env ]; then
     chmod 0640 /etc/dmart/config.env
     chown root:dmart /etc/dmart/config.env
     echo "Installed default config: /etc/dmart/config.env"
-    echo "Edit it with your database credentials and JWT secret, then run:"
-    echo "  systemctl enable --now dmart"
+    echo "Next steps:"
+    echo "  1. Edit /etc/dmart/config.env — set DATABASE_* and JWT_SECRET."
+    echo "  2. systemctl enable --now dmart"
+    echo "  3. dmart passwd dmart"
+    echo "     (prompts for a password. The admin is created passwordless"
+    echo "      so the secret never sits as cleartext in any file)."
 fi
 
 # Re-create runtime directories if missing. The %dir entries in %files

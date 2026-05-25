@@ -43,13 +43,26 @@ public sealed class DmartSettings
     public int DatabasePoolTimeout { get; set; } = 30;
     public int DatabasePoolRecycle { get; set; } = 1800;
 
-    // ADMIN_PASSWORD and ADMIN_EMAIL are read ONLY on first startup, by
-    // AdminBootstrap, when the hardcoded `dmart` admin user doesn't already
-    // exist. Subsequent restarts ignore these values — use `dmart
-    // passwd` / the /user/profile endpoint to change them afterwards.
-    // Main intended use: provisioning a known admin in CI / fresh installs.
+    // AdminPassword is read ONLY by AdminBootstrap when the dmart admin row
+    // is being created for the first time (or exists but has no password
+    // hash yet — e.g. externally-migrated). After a hash is stored, this
+    // setting is ignored on every subsequent restart; `dmart passwd` is
+    // the source of truth for rotation.
+    //
+    // On-disk policy: this is intentionally OMITTED from config.env.sample.
+    // The admin secret doesn't need to sit as cleartext in
+    // /etc/dmart/config.env to bootstrap — the install workflow has
+    // operators run `dmart passwd dmart <pwd>` after first start. The
+    // setting is still HONOURED if you provide it (via env var
+    // `Dmart__AdminPassword`, in-memory IConfiguration overrides, or by
+    // adding it to config.env manually) — useful for:
+    //   * CI fixtures (DmartFactory wires it via in-memory config).
+    //   * Declarative provisioners (Ansible/Salt) that prefer a single
+    //     post-install step. Set Dmart__AdminPassword in the unit's
+    //     Environment= for first boot, remove it on the next deploy.
+    // AdminEmail follows the same lifecycle — first-boot seed only.
     // Leaving AdminPassword unset creates a passwordless admin account
-    // (common for interactive setup where `dmart passwd` follows).
+    // and that's the recommended path.
     public string? AdminPassword { get; set; }
     public string? AdminEmail { get; set; }
 

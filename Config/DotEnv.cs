@@ -70,7 +70,8 @@ public static class DotEnv
         return null;
     }
 
-    // config.env carries JWT_SECRET, DATABASE_PASSWORD, ADMIN_PASSWORD —
+    // config.env carries JWT_SECRET, DATABASE_PASSWORD (the admin password
+    // is deliberately NOT in this file — see config.env.sample) —
     // any of those leaking to a non-admin local user is a complete-takeover
     // class of issue. Two-tier guard:
     //
@@ -100,7 +101,7 @@ public static class DotEnv
         {
             Console.Error.WriteLine(
                 $"refusing to read {path}: world-writable perms are catastrophic for a file " +
-                $"that contains JWT_SECRET / ADMIN_PASSWORD / DATABASE_PASSWORD " +
+                $"that contains JWT_SECRET / DATABASE_PASSWORD " +
                 $"(current mode: 0{Convert.ToString((int)mode, 8)}). " +
                 $"Run: chmod o-w {path}");
             return false;
