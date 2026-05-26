@@ -60,6 +60,13 @@ public sealed class SelfCheckCommandTests : IClassFixture<DmartFactory>
 
         var exitCode = await SelfCheckCommand.RunAsync(http, opts, console);
         exitCode.ShouldBe(0, customMessage: $"selfcheck output:\n{output}");
+        // /info/manifest step extracts attributes.version from the response
+        // and prints it on its own line. Pin that — a future refactor that
+        // accidentally drops the version readout (or the manifest envelope
+        // shape) shows up as this assertion failing.
+        var outputText = output.ToString();
+        outputText.ShouldContain("server version:",
+            customMessage: $"selfcheck didn't print the server version readout. Full output:\n{outputText}");
     }
 
     [FactIfPg]
@@ -95,13 +102,21 @@ public sealed class SelfCheckCommandTests : IClassFixture<DmartFactory>
     }
 
     [Fact]
-    public async Task SelfCheck_MissingPassword_FailsCleanly_NoNetwork()
+    public async Task SelfCheck_RunAsync_MissingPassword_FailsCleanly_NoNetwork()
     {
-        // No password supplied — selfcheck should refuse to send an empty
-        // /user/login and instead emit a pointer to `dmart passwd`. Verified
-        // by passing a deliberately-unreachable URL: if selfcheck tried to
-        // hit the network we'd see a connection error in the failure list
-        // rather than the "no password supplied" branch.
+        // Internal-API contract: when RunAsync is called directly with
+        // Password=null AND no preMintedToken AND JwtBootstrap=false (so
+        // the caller explicitly opts OUT of the auto-promote that the
+        // Run() wrapper applies), the smoke must refuse to send an empty
+        // /user/login and instead fail with a clear pointer. Verified by
+        // passing a deliberately-unreachable URL: if selfcheck tried to
+        // hit the network we'd see a connection error in the failure
+        // list rather than the "no password supplied" branch.
+        //
+        // The user-facing `dmart selfcheck` invocation no longer reaches
+        // this branch — Run() auto-promotes to --jwt-bootstrap when no
+        // password is supplied. This test pins the underlying RunAsync
+        // behaviour that the wrapper relies on.
         var http = new HttpClient { BaseAddress = new Uri("http://127.0.0.1:1") };
         var opts = new SelfCheckCommand.SelfCheckOptions(
             Url: "http://127.0.0.1:1",

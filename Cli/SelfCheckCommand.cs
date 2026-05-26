@@ -63,6 +63,23 @@ public static class SelfCheckCommand
         };
         http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 
+        // Auto-promote to --jwt-bootstrap when no password was supplied
+        // and the operator didn't pick a mode explicitly. The 401-loop
+        // operators kept hitting after `dmart passwd <pwd>` rotations
+        // came from selfcheck silently sending a stale or default
+        // ADMIN_PASSWORD; default-mode-with-no-password should just do
+        // the right thing instead of erroring out. Logged via stderr so
+        // operators who don't expect it can opt back in to the password
+        // path by passing --password / DMART_PWD.
+        var effectiveJwtBootstrap = opts.JwtBootstrap;
+        if (!effectiveJwtBootstrap && string.IsNullOrEmpty(opts.Password))
+        {
+            Console.Error.WriteLine(
+                "selfcheck: no password supplied — falling back to --jwt-bootstrap " +
+                "(mints a JWT from JWT_SECRET, no on-disk password needed).");
+            effectiveJwtBootstrap = true;
+        }
+
         // --jwt-bootstrap: mint a JWT from JWT_SECRET + insert a sessions
         // row before the smoke runs. The token + cleanup callback are
         // threaded into RunAsync so its smoke steps don't care which auth
@@ -71,7 +88,7 @@ public static class SelfCheckCommand
         // calling it without a real DB.
         string? mintedToken = null;
         Func<Task>? cleanupSession = null;
-        if (opts.JwtBootstrap)
+        if (effectiveJwtBootstrap)
         {
             try
             {
@@ -268,7 +285,12 @@ public static class SelfCheckCommand
         //    JWT-mint path was used. Doubles as a "server up + token valid"
         //    combined probe: a connection-refused here means dmart is down,
         //    a 401 means the JWT_SECRET / JwtIssuer / JwtAudience don't
-        //    match the running server.
+        //    match the running server. Also captures the running server's
+        //    InformationalVersion (attributes.version) — useful for the
+        //    "did the upgrade actually take?" check post-`dnf upgrade`,
+        //    since this value comes from the live PID rather than the
+        //    on-disk binary or the package metadata.
+        string? serverVersion = null;
         if (!await RunStep("server reachable + token valid (/info/manifest)", async () =>
         {
             using var resp = await http.GetAsync("/info/manifest");
@@ -277,11 +299,17 @@ public static class SelfCheckCommand
             var json = await ParseAsync(resp);
             if (!IsSuccess(json))
                 return (false, "non-success manifest response");
+            serverVersion = ExtractServerVersion(json);
             return (true, "manifest served");
         }))
         {
             return Summarize(console, sw, passed, failed, failures);
         }
+        // Version on its own line so it's always visible (the RunStep
+        // detail line is gated on --verbose, and an operator running
+        // selfcheck post-upgrade wants the version even without -v).
+        if (serverVersion is not null)
+            console.MarkupLine($"      [grey]server version: {Markup.Escape(serverVersion)}[/]");
 
         // 3. List spaces — pick the user-supplied --space if it exists,
         //    else the first non-system space. management always exists,
@@ -481,15 +509,16 @@ public static class SelfCheckCommand
             Usage: dmart selfcheck [options]
 
             Two auth modes:
-              * --jwt-bootstrap (recommended for on-host operator smoke):
+              * --jwt-bootstrap (default when no password is supplied):
                 selfcheck reads JWT_SECRET from config.env, opens its own DB
                 connection, inserts a transient session row, mints an HS256
                 JWT, and uses it for every API call. No password anywhere.
                 Requires this host to be able to reach the same Postgres the
-                server is using.
-              * default (password login): POSTs /user/login with admin
-                shortname + password from --password or DMART_PWD env (or
-                the deprecated ADMIN_PASSWORD entry in config.env, which the
+                server is using. Auto-engaged when --password and DMART_PWD
+                are both empty (typical on-host operator smoke after install).
+              * password login: POSTs /user/login with admin shortname +
+                password from --password or DMART_PWD env (or the
+                deprecated ADMIN_PASSWORD entry in config.env, which the
                 shipped sample no longer carries). Tests the login flow as
                 part of the smoke. Useful for off-host smokes or when you
                 want to verify the password path itself.
@@ -542,6 +571,20 @@ public static class SelfCheckCommand
             return m.GetString() ?? fallback;
         }
         return fallback;
+    }
+
+    // /info/manifest's success envelope carries attributes.version — the
+    // running server's InformationalVersion (e.g. "v0.9.25-0-g293a438").
+    // Returns null when the field is absent or not a string so the caller
+    // can fall back gracefully on older servers / shape drift.
+    private static string? ExtractServerVersion(JsonElement json)
+    {
+        if (json.ValueKind != JsonValueKind.Object) return null;
+        if (!json.TryGetProperty("attributes", out var attrs)
+            || attrs.ValueKind != JsonValueKind.Object) return null;
+        if (!attrs.TryGetProperty("version", out var v)
+            || v.ValueKind != JsonValueKind.String) return null;
+        return v.GetString();
     }
 
     // Same JSON-string escaper Cli/DmartClient.cs uses — handles the four
