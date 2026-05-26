@@ -205,6 +205,11 @@ switch (subcommand)
                              payloads) and auto-fix them before `dmart import`.
                              Usage: dmart preflight [--dry-run] [--workers N]
                                                     [--output-dir D] <spaces-folder>
+              import         Load a zip or folder export into the database. Supports
+                             --fast, --fast-parallelism=N, --batch-size=N, --resume
+                             (filesystem only — sidecar checkpoint at
+                             <source>/.dmart-import-checkpoint.json lets a crash
+                             resume from the last committed pass / space).
               export         Export a space to a zip in the dmart on-disk layout
                              Usage: dmart export <space_name> [--output <path|dir|.>]
                              --output unset      → ./<space>.zip
@@ -531,6 +536,17 @@ switch (subcommand)
             Bail("--space and --subpath must be provided together (or neither)");
             return;
         }
+        // --resume picks up from a sidecar checkpoint left behind by a
+        // previous run that crashed mid-import. Filesystem-only — the
+        // checkpoint file lives at <source>/.dmart-import-checkpoint.json
+        // by default (overridable with --checkpoint-file). Skips the head
+        // pass entirely if it already committed, and skips per-space
+        // tails for spaces that already finished. Most useful with
+        // --fast --fast-parallelism>1 where each space has its own
+        // transaction boundary.
+        var resume = serverArgs.Any(a => a is "--resume");
+        var checkpointPath = serverArgs.FirstOrDefault(a => a.StartsWith("--checkpoint-file=", StringComparison.Ordinal))?
+            ["--checkpoint-file=".Length..];
         // --type={zip|fs} selects the source kind. Default is auto-detected
         // from the target: a regular file ⇒ zip, a directory ⇒ fs. When
         // explicitly set and the user's choice disagrees with the target's
@@ -552,7 +568,7 @@ switch (subcommand)
         }
         if (string.IsNullOrEmpty(targetPath))
         {
-            Bail("Usage: dmart import [-r|--replace] [--fast] [--fast-parallelism=N] [--batch-size=N] [--type=zip|fs] [--space=NAME --subpath=PATH] <path>");
+            Bail("Usage: dmart import [-r|--replace] [--fast] [--fast-parallelism=N] [--batch-size=N] [--type=zip|fs] [--space=NAME --subpath=PATH] [--resume] [--checkpoint-file=PATH] <path>");
             return;
         }
 
@@ -597,6 +613,11 @@ switch (subcommand)
             Bail($"Error: --type=fs requires a directory, but '{targetPath}' is not a directory.");
             return;
         }
+        if (effectiveType == "zip" && resume)
+        {
+            Bail("--resume requires --type=fs (zip resume is not supported; the sidecar checkpoint needs a stable on-disk location next to the source folder)");
+            return;
+        }
 
         var remapSuffix = targetSpace is not null ? $", into-space={targetSpace}, into-subpath={targetSubpath}" : "";
         Console.WriteLine($"Importing from {targetPath} (type={effectiveType}, replace={replace}, fast={fast}, parallelism={parallelism}, batch-size={batchSize}{remapSuffix})");
@@ -615,7 +636,8 @@ switch (subcommand)
         {
             resp = await importService.ImportFolderAsync(targetPath, actor: null,
                 preserveExisting: !replace, fastUnsafeNoFkCheck: fast, fastParallelism: parallelism,
-                batchSize: batchSize, targetSpace: targetSpace, targetSubpath: targetSubpath);
+                batchSize: batchSize, targetSpace: targetSpace, targetSubpath: targetSubpath,
+                resume: resume, checkpointPath: checkpointPath);
         }
         else
         {
