@@ -459,8 +459,12 @@ public sealed class ImportExportService(
             .Where(z => !string.IsNullOrEmpty(z.FullName) && !z.FullName.EndsWith("/"))
             .Select(ImportEntryRef.FromZip)
             .ToList();
+        // Zip imports don't get a checkpoint sidecar — there's no obvious
+        // place to put it when the zip lives on remote / read-only storage.
+        // 24M-target migrations use the fs path; zip remains the small-
+        // scale convenience.
         return await ImportFromEntriesAsync(entries, ImportSourceKind.Zip,
-            preserveExisting, fastUnsafeNoFkCheck, fastParallelism, batchSize, ct);
+            preserveExisting, fastUnsafeNoFkCheck, fastParallelism, batchSize, checkpoint: null, ct: ct);
     }
 
     public Task<Response> ImportFolderAsync(string folderPath, string? actor, CancellationToken ct = default)
@@ -497,7 +501,7 @@ public sealed class ImportExportService(
     /// stripped, <c>""</c> or <c>"/"</c> means "directly under the space
     /// root". Required when <paramref name="targetSpace"/> is set.
     /// </param>
-    public async Task<Response> ImportFolderAsync(string folderPath, string? actor, bool preserveExisting, bool fastUnsafeNoFkCheck, int fastParallelism, int batchSize = DefaultBatchSize, string? targetSpace = null, string? targetSubpath = null, CancellationToken ct = default)
+    public async Task<Response> ImportFolderAsync(string folderPath, string? actor, bool preserveExisting, bool fastUnsafeNoFkCheck, int fastParallelism, int batchSize = DefaultBatchSize, string? targetSpace = null, string? targetSubpath = null, bool resume = false, string? checkpointPath = null, CancellationToken ct = default)
     {
         _ = actor;
         if (!Directory.Exists(folderPath))
@@ -609,8 +613,27 @@ public sealed class ImportExportService(
 
             entries.Add(ImportEntryRef.FromFile(prefix + rel, abs));
         }
-        return await ImportFromEntriesAsync(entries, ImportSourceKind.Filesystem,
-            preserveExisting, fastUnsafeNoFkCheck, fastParallelism, batchSize, ct);
+        // Resume support: only meaningful for filesystem imports (zip
+        // sidecar location is operator-unfriendly when the zip lives on
+        // remote storage). When --resume is set, load (or create) the
+        // checkpoint file and pass it down so the orchestrator can skip
+        // already-committed passes / spaces.
+        ImportCheckpointStore? checkpoint = null;
+        if (resume)
+        {
+            var path = checkpointPath ?? ImportCheckpointStore.DefaultPathFor(folderPath);
+            checkpoint = ImportCheckpointStore.LoadOrCreate(path, folderPath);
+        }
+
+        var response = await ImportFromEntriesAsync(entries, ImportSourceKind.Filesystem,
+            preserveExisting, fastUnsafeNoFkCheck, fastParallelism, batchSize, checkpoint, ct);
+        // Clean up the sidecar on a clean import — leaves a tidy
+        // source tree for the next operator action. A failed import
+        // leaves the checkpoint in place so the next `--resume`
+        // picks up where we stopped.
+        if (response.Status == Status.Success && checkpoint is not null)
+            checkpoint.Clear();
+        return response;
     }
 
     // Same pipeline that drives ImportZipAsync, but source-agnostic so the
@@ -627,7 +650,7 @@ public sealed class ImportExportService(
     private async Task<Response> ImportFromEntriesAsync(
         IReadOnlyList<ImportEntryRef> entries, ImportSourceKind sourceKind,
         bool preserveExisting, bool fastUnsafeNoFkCheck, int fastParallelism,
-        int batchSize, CancellationToken ct)
+        int batchSize, ImportCheckpointStore? checkpoint = null, CancellationToken ct = default)
     {
         // Clamp batch size — operators tune via --batch-size for their data
         // shape (smaller for fat payloads, larger for tiny ones). The hard
@@ -674,25 +697,36 @@ public sealed class ImportExportService(
         // whether we parallelize Pass 3-5 below. Committing this scope before
         // dispatching the per-space workers ensures every worker reads
         // committed data when checking preserveExisting.
-        NpgsqlConnection? headConn = null;
-        Db.FastImportScope? headScope = null;
-        if (fastUnsafeNoFkCheck)
-            (headConn, headScope) = await db.BeginFastImportSessionAsync(ct);
-        try
+        // When --resume picked up a checkpoint that says head is done,
+        // skip the whole pass — the rows are already in the DB.
+        if (checkpoint?.IsHeadDone() == true)
         {
-            foreach (var ze in entries.Where(IsUserMeta))
-                await TryImportUserAsync(ze, allByPath, results, preserveExisting, headConn, ct);
-            foreach (var ze in entries.Where(z => z.FullName.EndsWith("/.dm/meta.space.json", StringComparison.Ordinal)))
-                await TryImportSpaceAsync(ze, results, preserveExisting, headConn, ct);
-            foreach (var ze in entries.Where(IsRoleMeta))
-                await TryImportRoleAsync(ze, results, preserveExisting, headConn, ct);
-            foreach (var ze in entries.Where(IsPermissionMeta))
-                await TryImportPermissionAsync(ze, results, preserveExisting, headConn, ct);
-            headScope?.MarkSuccess();
+            log.LogInformation("import: --resume skipping head pass (users/spaces/roles/permissions) — checkpoint says done");
         }
-        finally
+        else
         {
-            if (headScope is not null) await headScope.DisposeAsync();
+            NpgsqlConnection? headConn = null;
+            Db.FastImportScope? headScope = null;
+            if (fastUnsafeNoFkCheck)
+                (headConn, headScope) = await db.BeginFastImportSessionAsync(ct);
+            try
+            {
+                foreach (var ze in entries.Where(IsUserMeta))
+                    await TryImportUserAsync(ze, allByPath, results, preserveExisting, headConn, ct);
+                foreach (var ze in entries.Where(z => z.FullName.EndsWith("/.dm/meta.space.json", StringComparison.Ordinal)))
+                    await TryImportSpaceAsync(ze, results, preserveExisting, headConn, ct);
+                foreach (var ze in entries.Where(IsRoleMeta))
+                    await TryImportRoleAsync(ze, results, preserveExisting, headConn, ct);
+                foreach (var ze in entries.Where(IsPermissionMeta))
+                    await TryImportPermissionAsync(ze, results, preserveExisting, headConn, ct);
+                headScope?.MarkSuccess();
+            }
+            finally
+            {
+                if (headScope is not null) await headScope.DisposeAsync();
+            }
+            // Mark head done AFTER the scope disposes (commit landed).
+            checkpoint?.MarkHeadDone();
         }
 
         // ---- Pass 3-5: Entries, Attachments, Histories ----
@@ -706,6 +740,19 @@ public sealed class ImportExportService(
             .GroupBy(GetSpaceName, StringComparer.Ordinal)
             .Where(g => !string.IsNullOrEmpty(g.Key))
             .ToList();
+
+        // Resume: drop space groups the checkpoint says are already done.
+        // Only meaningful in the parallel branch below — the serial branch
+        // shares one transaction so partial tail commits aren't a thing
+        // (a crash mid-serial-tail rolls back the whole pass).
+        if (checkpoint is not null)
+        {
+            var before = spaceGroups.Count;
+            spaceGroups = spaceGroups.Where(g => !checkpoint.IsTailDone(g.Key!)).ToList();
+            if (before > spaceGroups.Count)
+                log.LogInformation("import: --resume skipping {Skipped} of {Total} space tails (already in checkpoint)",
+                    before - spaceGroups.Count, before);
+        }
 
         if (fastUnsafeNoFkCheck && workers > 1 && spaceGroups.Count > 1)
         {
@@ -743,7 +790,14 @@ public sealed class ImportExportService(
                     spaceGroups,
                     new ParallelOptions { MaxDegreeOfParallelism = workers, CancellationToken = ct },
                     async (group, ictx) =>
-                        await ImportSpaceTailAsync(group.ToList(), preserveExisting, results, batchSize, ictx));
+                    {
+                        await ImportSpaceTailAsync(group.ToList(), preserveExisting, results, batchSize, ictx);
+                        // Per-space tail commit landed. Record it so a
+                        // future --resume run skips this space entirely.
+                        // The MarkTailDone call is lock-protected and
+                        // atomically rewrites the sidecar JSON.
+                        checkpoint?.MarkTailDone(group.Key!);
+                    });
             }
             finally
             {

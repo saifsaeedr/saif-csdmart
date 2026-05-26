@@ -131,7 +131,17 @@ _dmart() {
                     return
                     ;;
                 import)
-                    _filedir '@(zip)'
+                    case "$prev" in
+                        --checkpoint-file=*) return ;;
+                    esac
+                    # Operator can pass a zip file OR a directory — let
+                    # _filedir suggest both. Subcommand flags also offered
+                    # when the cur token starts with a dash.
+                    if [[ "$cur" == -* ]]; then
+                        COMPREPLY=($(compgen -W "-r --replace --fast --fast-parallelism= --batch-size= --type=zip --type=fs --space= --subpath= --resume --checkpoint-file= -h --help" -- "$cur"))
+                    else
+                        _filedir
+                    fi
                     return
                     ;;
             esac

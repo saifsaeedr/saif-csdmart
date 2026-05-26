@@ -4,6 +4,7 @@ using Dmart.Models.Api;
 using Dmart.Models.Core;
 using Dmart.Models.Enums;
 using Dmart.Plugins.Native;
+using Dmart.Services;
 
 namespace Dmart.Models.Json;
 
@@ -26,6 +27,7 @@ namespace Dmart.Models.Json;
 // Enums use per-type [JsonConverter] attributes that read [EnumMember] — see
 // EnumMemberConverter.cs. We deliberately don't set UseStringEnumConverter here
 // because that emits source-gen converters that ignore [EnumMember].
+[JsonSerializable(typeof(ImportCheckpointStore))]
 [JsonSerializable(typeof(Query))]
 [JsonSerializable(typeof(JoinQuery))]
 [JsonSerializable(typeof(RedisAggregate))]
