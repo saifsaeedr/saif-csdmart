@@ -5,9 +5,16 @@ _dmart() {
     local cur prev words cword
     _init_completion || return
 
-    local subcommands="serve version settings passwd check health-check export import init cli migrate fix_query_policies help"
+    # Keep this list in sync with the case "..." labels in Program.cs's
+    # subcommand dispatch. Both spellings (hyphen + underscore) are
+    # included where Program.cs accepts both, so TAB suggests whichever
+    # form the operator started typing.
+    local subcommands="serve version settings passwd selfcheck check health-check export import init cli migrate seed fix-query-policies fix_query_policies update-query-policies update_query_policies create-users-folders create_users_folders help"
     local cli_modes="c cmd s script"
     local cli_commands="ls cd pwd switch mkdir create rm move cat print attach upload request progress import export help exit"
+    # Common per-subcommand flag sets reused below.
+    local selfcheck_flags="--url --admin --password --password-stdin --jwt-bootstrap --space --subpath --keep -v --verbose -h --help"
+    local serve_flags="--cxb-config --catalog-config -h --help"
 
     case $cword in
         1)
@@ -31,6 +38,20 @@ _dmart() {
                 fix_query_policies|fix-query-policies)
                     # optional <space> positional (free-form) or --dry-run
                     COMPREPLY=($(compgen -W "--dry-run" -- "$cur"))
+                    return
+                    ;;
+                selfcheck)
+                    COMPREPLY=($(compgen -W "$selfcheck_flags" -- "$cur"))
+                    return
+                    ;;
+                serve)
+                    COMPREPLY=($(compgen -W "$serve_flags" -- "$cur"))
+                    return
+                    ;;
+                passwd)
+                    # First arg is the shortname (positional). Free-form,
+                    # no DB-backed suggestion; offer the help flag.
+                    COMPREPLY=($(compgen -W "-h --help" -- "$cur"))
                     return
                     ;;
             esac
@@ -64,6 +85,23 @@ _dmart() {
                         COMPREPLY=($(compgen -W "$cli_commands" -- "$cur"))
                         return
                     fi
+                    ;;
+                selfcheck)
+                    # If the user just typed a flag that takes an argument,
+                    # try _filedir or stay quiet; otherwise keep offering
+                    # the flag set so multi-flag invocations TAB-complete.
+                    case "$prev" in
+                        --space|--subpath|--admin|--password|--url) return ;;
+                    esac
+                    COMPREPLY=($(compgen -W "$selfcheck_flags" -- "$cur"))
+                    return
+                    ;;
+                serve)
+                    case "$prev" in
+                        --cxb-config|--catalog-config) _filedir; return ;;
+                    esac
+                    COMPREPLY=($(compgen -W "$serve_flags" -- "$cur"))
+                    return
                     ;;
                 export)
                     _filedir
