@@ -200,6 +200,11 @@ switch (subcommand)
                              Usage: dmart selfcheck [--url <url>] [--admin <name>]
                                                     [--password <pwd> | --password-stdin]
                                                     [--space <name>] [--keep] [-v]
+              preflight      Scan a legacy filesystem export for integrity issues
+                             (duplicate UUIDs / missing owners / schema-noncompliant
+                             payloads) and auto-fix them before `dmart import`.
+                             Usage: dmart preflight [--dry-run] [--workers N]
+                                                    [--output-dir D] <spaces-folder>
               export         Export a space to a zip in the dmart on-disk layout
                              Usage: dmart export <space_name> [--output <path|dir|.>]
                              --output unset      → ./<space>.zip
@@ -341,6 +346,17 @@ switch (subcommand)
         // out of the already-loaded config.env (dotenvValues), matching
         // curl.sh's env-then-config-then-fallback resolution order.
         Environment.ExitCode = await Dmart.Cli.SelfCheckCommand.Run(serverArgs, dotenvValues, dotenvPath);
+        return;
+    }
+
+    case "preflight":
+    {
+        // Filesystem integrity scanner + auto-fixer for large legacy
+        // migrations. Pure file I/O — no DB, no live server. See
+        // Cli/PreflightCommand.cs for the full description of the
+        // three scanners (UUID dedup / owner fixup / schema violation
+        // flagging).
+        Environment.ExitCode = await Dmart.Cli.PreflightCommand.Run(serverArgs);
         return;
     }
 
