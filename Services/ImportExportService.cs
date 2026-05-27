@@ -463,8 +463,12 @@ public sealed class ImportExportService(
         // place to put it when the zip lives on remote / read-only storage.
         // 24M-target migrations use the fs path; zip remains the small-
         // scale convenience.
+        // Zip imports don't get validation today — the validator's schema
+        // cache needs filesystem layout to resolve schemas. Threading zip
+        // entries to a synthetic root would work but is out of scope for
+        // now. Operators wanting validation use the filesystem path.
         return await ImportFromEntriesAsync(entries, ImportSourceKind.Zip,
-            preserveExisting, fastUnsafeNoFkCheck, fastParallelism, batchSize, checkpoint: null, ct: ct);
+            preserveExisting, fastUnsafeNoFkCheck, fastParallelism, batchSize, checkpoint: null, validation: null, ct: ct);
     }
 
     public Task<Response> ImportFolderAsync(string folderPath, string? actor, CancellationToken ct = default)
@@ -501,7 +505,7 @@ public sealed class ImportExportService(
     /// stripped, <c>""</c> or <c>"/"</c> means "directly under the space
     /// root". Required when <paramref name="targetSpace"/> is set.
     /// </param>
-    public async Task<Response> ImportFolderAsync(string folderPath, string? actor, bool preserveExisting, bool fastUnsafeNoFkCheck, int fastParallelism, int batchSize = DefaultBatchSize, string? targetSpace = null, string? targetSubpath = null, bool resume = false, string? checkpointPath = null, CancellationToken ct = default)
+    public async Task<Response> ImportFolderAsync(string folderPath, string? actor, bool preserveExisting, bool fastUnsafeNoFkCheck, int fastParallelism, int batchSize = DefaultBatchSize, string? targetSpace = null, string? targetSubpath = null, bool resume = false, string? checkpointPath = null, DateTime? sinceUtc = null, bool validate = true, string? issuesFilePath = null, CancellationToken ct = default)
     {
         _ = actor;
         if (!Directory.Exists(folderPath))
@@ -592,10 +596,30 @@ public sealed class ImportExportService(
             : "";
 
         var entries = new List<ImportEntryRef>();
+        long mtimeSkipped = 0;
         foreach (var abs in Directory.EnumerateFiles(folderPath, "*", enumOpts))
         {
             var rel = Path.GetRelativePath(folderPath, abs).Replace(Path.DirectorySeparatorChar, '/');
             if (ShouldSkip(rel)) continue;
+
+            // --since: drop entries whose file mtime is older than the cutoff.
+            // One stat() per surviving path; no file read. Uses mtime as a
+            // proxy for the meta's updated_at — they match in practice because
+            // dmart writes meta.<rt>.json on every entry update. Operators
+            // with rsync-mangled mtimes should not use this flag.
+            if (sinceUtc.HasValue)
+            {
+                try
+                {
+                    if (File.GetLastWriteTimeUtc(abs) < sinceUtc.Value)
+                    {
+                        mtimeSkipped++;
+                        continue;
+                    }
+                }
+                catch (IOException) { continue; }
+                catch (UnauthorizedAccessException) { continue; }
+            }
 
             // Remap mode: reject any source-level space meta. The operator
             // said "import into {targetSpace}", so a meta.space.json in
@@ -613,6 +637,13 @@ public sealed class ImportExportService(
 
             entries.Add(ImportEntryRef.FromFile(prefix + rel, abs));
         }
+
+        if (sinceUtc.HasValue)
+        {
+            log.LogInformation(
+                "import: --since kept {Kept} entries, skipped {MtimeSkipped} by mtime",
+                entries.Count, mtimeSkipped);
+        }
         // Resume support: only meaningful for filesystem imports (zip
         // sidecar location is operator-unfriendly when the zip lives on
         // remote storage). When --resume is set, load (or create) the
@@ -625,8 +656,58 @@ public sealed class ImportExportService(
             checkpoint = ImportCheckpointStore.LoadOrCreate(path, folderPath);
         }
 
-        var response = await ImportFromEntriesAsync(entries, ImportSourceKind.Filesystem,
-            preserveExisting, fastUnsafeNoFkCheck, fastParallelism, batchSize, checkpoint, ct);
+        // Validation context: when enabled (default), per-entry validators
+        // fire during the tail passes — owner remap, uuid dedup, schema
+        // check. Issues land in a JSONL sidecar at issuesFilePath (default:
+        // <folder>/import-issues-<timestamp>.jsonl). Source files are
+        // never mutated; fixes happen in memory before the bulk COPY.
+        ImportValidationContext? validation = null;
+        if (validate)
+        {
+            var sidecar = issuesFilePath ?? Path.Combine(folderPath,
+                $"import-issues-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}.jsonl");
+            validation = new ImportValidationContext(folderPath, new ImportIssueSink(sidecar), log);
+
+            // Seed the known-users set from existing PG rows so re-runs and
+            // partial imports don't falsely flag owners that are valid in
+            // PG but happen not to appear in the current source. Cheap —
+            // shortname is indexed and we only need the column.
+            try
+            {
+                await using var seedConn = await db.OpenAsync(ct);
+                await using var cmd = new NpgsqlCommand("SELECT shortname FROM users", seedConn);
+                await using var rdr = await cmd.ExecuteReaderAsync(ct);
+                var seeded = 0;
+                while (await rdr.ReadAsync(ct))
+                {
+                    var sn = rdr.GetString(0);
+                    validation.RegisterKnownUser(sn);
+                    seeded++;
+                }
+                log.LogInformation("import: validation seeded with {Count} existing PG users", seeded);
+            }
+            catch (Exception ex)
+            {
+                log.LogWarning(ex, "import: failed to seed validation user set from PG; only source-side users will be valid");
+            }
+
+            log.LogInformation("import: validation enabled, sidecar at {Path}", sidecar);
+        }
+
+        Response response;
+        try
+        {
+            response = await ImportFromEntriesAsync(entries, ImportSourceKind.Filesystem,
+                preserveExisting, fastUnsafeNoFkCheck, fastParallelism, batchSize, checkpoint, validation, ct);
+        }
+        finally
+        {
+            if (validation is not null)
+            {
+                log.LogInformation("import: {Count} validation issues logged to sidecar", validation.Sink.Count);
+                await validation.DisposeAsync();
+            }
+        }
         // Clean up the sidecar on a clean import — leaves a tidy
         // source tree for the next operator action. A failed import
         // leaves the checkpoint in place so the next `--resume`
@@ -650,7 +731,8 @@ public sealed class ImportExportService(
     private async Task<Response> ImportFromEntriesAsync(
         IReadOnlyList<ImportEntryRef> entries, ImportSourceKind sourceKind,
         bool preserveExisting, bool fastUnsafeNoFkCheck, int fastParallelism,
-        int batchSize, ImportCheckpointStore? checkpoint = null, CancellationToken ct = default)
+        int batchSize, ImportCheckpointStore? checkpoint = null,
+        ImportValidationContext? validation = null, CancellationToken ct = default)
     {
         // Clamp batch size — operators tune via --batch-size for their data
         // shape (smaller for fat payloads, larger for tiny ones). The hard
@@ -712,7 +794,23 @@ public sealed class ImportExportService(
             try
             {
                 foreach (var ze in entries.Where(IsUserMeta))
+                {
                     await TryImportUserAsync(ze, allByPath, results, preserveExisting, headConn, ct);
+                    // Register the user as known so the per-entry owner
+                    // validator can later check incoming owner_shortname
+                    // refs without a PG round-trip. The shortname is the
+                    // segment between ".dm/" and "/meta.user.json".
+                    if (validation is not null)
+                    {
+                        var fn = ze.FullName;
+                        const string head = "/users/.dm/";
+                        const string tail = "/meta.user.json";
+                        var h = fn.IndexOf(head, StringComparison.Ordinal);
+                        var t = fn.LastIndexOf(tail, StringComparison.Ordinal);
+                        if (h >= 0 && t > h + head.Length)
+                            validation.RegisterKnownUser(fn[(h + head.Length)..t]);
+                    }
+                }
                 foreach (var ze in entries.Where(z => z.FullName.EndsWith("/.dm/meta.space.json", StringComparison.Ordinal)))
                     await TryImportSpaceAsync(ze, results, preserveExisting, headConn, ct);
                 foreach (var ze in entries.Where(IsRoleMeta))
@@ -791,7 +889,7 @@ public sealed class ImportExportService(
                     new ParallelOptions { MaxDegreeOfParallelism = workers, CancellationToken = ct },
                     async (group, ictx) =>
                     {
-                        await ImportSpaceTailAsync(group.ToList(), preserveExisting, results, batchSize, ictx);
+                        await ImportSpaceTailAsync(group.ToList(), preserveExisting, results, batchSize, validation, ictx);
                         // Per-space tail commit landed. Record it so a
                         // future --resume run skips this space entirely.
                         // The MarkTailDone call is lock-protected and
@@ -818,7 +916,7 @@ public sealed class ImportExportService(
                 (tailConn, tailScope) = await db.BeginFastImportSessionAsync(ct);
             try
             {
-                await RunTailPassesAsync(tailConn, tailEntries, preserveExisting, results, batchSize, ct);
+                await RunTailPassesAsync(tailConn, tailEntries, preserveExisting, results, batchSize, validation, ct);
                 tailScope?.MarkSuccess();
             }
             finally
@@ -911,12 +1009,13 @@ public sealed class ImportExportService(
         bool preserveExisting,
         ImportStats results,
         int batchSize,
+        ImportValidationContext? validation,
         CancellationToken ct)
     {
         var (conn, scope) = await db.BeginFastImportSessionAsync(ct);
         try
         {
-            await RunTailPassesAsync(conn, spaceEntries, preserveExisting, results, batchSize, ct);
+            await RunTailPassesAsync(conn, spaceEntries, preserveExisting, results, batchSize, validation, ct);
             scope.MarkSuccess();
         }
         finally
@@ -940,6 +1039,7 @@ public sealed class ImportExportService(
         bool preserveExisting,
         ImportStats results,
         int batchSize,
+        ImportValidationContext? validation,
         CancellationToken ct)
     {
         // ---- Pass 3: Entries (including folders) ----
@@ -960,7 +1060,7 @@ public sealed class ImportExportService(
         var bulkEntries = conn is not null ? new List<Entry>(batchSize) : null;
         foreach (var ze in zes.Where(IsEntryMeta))
         {
-            await TryImportEntryAsync(ze, bodyLookup, results, preserveExisting, conn, bulkEntries, ct);
+            await TryImportEntryAsync(ze, bodyLookup, results, preserveExisting, conn, bulkEntries, validation, ct);
             if (bulkEntries is { Count: > 0 } && bulkEntries.Count >= batchSize)
             {
                 await BulkInsertEntriesAsync(conn!, bulkEntries, preserveExisting, results, ct);
@@ -1172,7 +1272,7 @@ public sealed class ImportExportService(
     private async Task TryImportEntryAsync(
         ImportEntryRef ze, Dictionary<string, ImportEntryRef> bodyLookup,
         ImportStats st, bool preserveExisting, NpgsqlConnection? conn,
-        List<Entry>? bulkCollect, CancellationToken ct)
+        List<Entry>? bulkCollect, ImportValidationContext? validation, CancellationToken ct)
     {
         try
         {
@@ -1185,11 +1285,94 @@ public sealed class ImportExportService(
             // meant: the directory IS the entry.
             var (subpath, shortname) = DecodeEntryPath(ze.FullName);
 
-            var node = await ReadJsonObjectAsync(ze, ct);
+            System.Text.Json.Nodes.JsonObject node;
+            try
+            {
+                node = await ReadJsonObjectAsync(ze, ct);
+            }
+            catch (Exception parseEx) when (validation is not null)
+            {
+                // Validation-enabled mode: a malformed meta isn't a silent
+                // failure. Log it to the sidecar and skip the entry instead
+                // of letting the import barf with a generic error.
+                validation.Sink.Add(new ImportIssue
+                {
+                    Path = ze.FullName,
+                    Kind = "parse-error",
+                    Action = "skipped",
+                    Details = new() { ["error"] = parseEx.Message },
+                });
+                st.AddFailure(new() { ["path"] = ze.FullName, ["kind"] = "parse-error", ["error"] = parseEx.Message });
+                return;
+            }
             node["space_name"] = spaceName;
             node["subpath"] = subpath;
             node["shortname"] = shortname;
             node["resource_type"] ??= InferResourceTypeFromFilename(ze.Name);
+
+            // ============================================================
+            // VALIDATION HOOKS — only when validation is enabled.
+            // Source files are NEVER mutated; all fixes happen on `node`
+            // before it deserializes into the Entry instance below.
+            // ============================================================
+            if (validation is not null)
+            {
+                // ---- UUID dedup ----
+                // First reader of any given uuid keeps it; later collisions
+                // get a fresh Guid. Covers both source-internal duplicates
+                // and source-vs-PG duplicates (the PG check is implicit:
+                // the original uuid would have caused a PK violation; the
+                // regen turns it into a fresh row whose composite
+                // (space, subpath, shortname) is what idempotency keys on).
+                var uuidStr = node["uuid"]?.GetValue<string?>();
+                if (!string.IsNullOrEmpty(uuidStr) && Guid.TryParse(uuidStr, out var parsedUuid))
+                {
+                    if (!validation.TryClaimUuid(parsedUuid, ze.FullName))
+                    {
+                        var newUuid = Guid.NewGuid();
+                        validation.RegisterClaimedUuid(newUuid, ze.FullName);
+                        validation.Sink.Add(new ImportIssue
+                        {
+                            Path = ze.FullName,
+                            Kind = "uuid-regenerated",
+                            Action = "fixed-in-memory",
+                            Details = new()
+                            {
+                                ["original_uuid"] = uuidStr!,
+                                ["new_uuid"] = newUuid.ToString(),
+                                ["first_seen_at"] = validation.GetUuidOwner(parsedUuid) ?? "(unknown)",
+                            },
+                        });
+                        node["uuid"] = newUuid.ToString();
+                    }
+                }
+
+                // ---- Owner remap ----
+                // Unknown owner → swap to "dmart" sentinel in memory.
+                // The known-users set was seeded from PG + populated from
+                // source-side meta.user.json files during the head pass.
+                var ownerVal = node["owner_shortname"]?.GetValue<string?>();
+                if (!string.IsNullOrEmpty(ownerVal) && !validation.IsKnownOwner(ownerVal))
+                {
+                    validation.Sink.Add(new ImportIssue
+                    {
+                        Path = ze.FullName,
+                        Kind = "owner-remapped",
+                        Action = "fixed-in-memory",
+                        Details = new()
+                        {
+                            ["shortname"] = shortname,
+                            ["original_owner"] = ownerVal!,
+                            ["replacement"] = "dmart",
+                        },
+                    });
+                    node["owner_shortname"] = "dmart";
+                }
+
+                // ---- Schema validation moved BELOW InlinePayloadBody ----
+                // The body must be in memory before we can check it. See the
+                // matching block after InlinePayloadBody() runs.
+            }
 
             // Re-inline payload.body from the external file when it's a string
             // filename that points at a sibling JSON/HTML/text/image file.
@@ -1211,6 +1394,94 @@ public sealed class ImportExportService(
             }
             InlinePayloadBody(node, baseDir, bodyLookup);
             EnsureOwner(node);
+
+            // ---- Schema validation (runs AFTER body has been inlined) ----
+            // PG always stores body inlined into payload.body — never as a
+            // filename ref. So validation must happen with the actual body
+            // bytes in hand, which is the moment between InlinePayloadBody
+            // (loads the body off disk) and the Deserialize below (turns
+            // node into the Entry that goes into PG).
+            //
+            // Three body shapes can land here:
+            //   * JSON object/array  — produced by inlining a .json body file
+            //                          (or already inline in source meta)
+            //   * String             — inlining failed (body file missing on
+            //                          disk), or the original source had a
+            //                          filename ref that we couldn't resolve.
+            //                          Treat as inline JSON if it parses;
+            //                          otherwise skip validation for this row.
+            //   * null               — no body at all. Nothing to validate.
+            if (validation is not null)
+            {
+                var schemaShortname = node["payload"]?["schema_shortname"]?.GetValue<string?>();
+                if (!string.IsNullOrEmpty(schemaShortname))
+                {
+                    var bodyNode = node["payload"]?["body"];
+                    JsonElement? bodyEl = null;
+                    if (bodyNode is System.Text.Json.Nodes.JsonObject || bodyNode is System.Text.Json.Nodes.JsonArray)
+                    {
+                        using var d = JsonDocument.Parse(bodyNode.ToJsonString());
+                        bodyEl = d.RootElement.Clone();
+                    }
+                    else if (bodyNode is System.Text.Json.Nodes.JsonValue v
+                        && v.TryGetValue<string>(out var bodyStr)
+                        && !string.IsNullOrEmpty(bodyStr))
+                    {
+                        // String body — could be inlined text/HTML/etc that
+                        // happens to look like JSON, or a leftover filename
+                        // ref. Try to parse; on failure skip validation for
+                        // this row (we still log the unresolved-body case as
+                        // a separate issue so the operator sees it).
+                        try
+                        {
+                            using var d = JsonDocument.Parse(bodyStr);
+                            bodyEl = d.RootElement.Clone();
+                        }
+                        catch
+                        {
+                            validation.Sink.Add(new ImportIssue
+                            {
+                                Path = ze.FullName,
+                                Kind = "body-not-validatable",
+                                Action = "skipped-validation",
+                                Details = new()
+                                {
+                                    ["reason"] = "body is a non-JSON string (likely an unresolved filename or text content)",
+                                    ["schema_shortname"] = schemaShortname!,
+                                },
+                            });
+                        }
+                    }
+
+                    if (bodyEl is not null)
+                    {
+                        var errors = await validation.ValidateBodyAsync(
+                            spaceName, schemaShortname!, bodyEl.Value, ct);
+                        if (errors is not null)
+                        {
+                            validation.Sink.Add(new ImportIssue
+                            {
+                                Path = ze.FullName,
+                                Kind = "schema-violation",
+                                Action = "skipped",
+                                Details = new()
+                                {
+                                    ["schema_shortname"] = schemaShortname!,
+                                    ["space"] = spaceName,
+                                    ["errors"] = errors,
+                                },
+                            });
+                            st.AddFailure(new()
+                            {
+                                ["path"] = ze.FullName,
+                                ["kind"] = "schema-violation",
+                                ["error"] = string.Join("; ", errors),
+                            });
+                            return;  // SKIP — don't insert into PG
+                        }
+                    }
+                }
+            }
 
             var entry = node.Deserialize(DmartJsonContext.Default.Entry);
             if (entry is null) { st.AddFailure(new() { ["path"] = ze.FullName, ["error"] = "empty entry meta" }); return; }

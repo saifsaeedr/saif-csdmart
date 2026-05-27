@@ -547,6 +547,39 @@ switch (subcommand)
         var resume = serverArgs.Any(a => a is "--resume");
         var checkpointPath = serverArgs.FirstOrDefault(a => a.StartsWith("--checkpoint-file=", StringComparison.Ordinal))?
             ["--checkpoint-file=".Length..];
+
+        // --no-validate: disable the always-on import-time validation
+        // (owner remap, uuid dedup, schema validation, parse-error logging).
+        // Default is validate=true; this flag flips it off — useful when
+        // the operator has already run preflight separately and doesn't
+        // want the per-entry overhead repeated, or when the sidecar file
+        // is undesirable.
+        var noValidate = serverArgs.Any(a => a is "--no-validate");
+
+        // --issues-file=PATH: override the default sidecar location
+        // (default is <source>/import-issues-<timestamp>.jsonl).
+        var issuesFilePath = serverArgs.FirstOrDefault(a => a.StartsWith("--issues-file=", StringComparison.Ordinal))?
+            ["--issues-file=".Length..];
+
+        // --since=ISO-DATE: drop entries whose file mtime is older than the
+        // cutoff. Uses mtime as a proxy for the meta's updated_at (matches
+        // in practice because dmart Python writes the meta on every update;
+        // breaks if rsync clobbered the mtimes). Combines naturally with
+        // --filter-subpath. One stat() per surviving path, no file read.
+        DateTime? sinceUtc = null;
+        var sinceArg = serverArgs.FirstOrDefault(a => a.StartsWith("--since=", StringComparison.Ordinal))?
+            ["--since=".Length..];
+        if (sinceArg is not null)
+        {
+            if (!DateTime.TryParse(sinceArg, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                out var parsed))
+            {
+                Bail($"--since: cannot parse '{sinceArg}' as a date (try ISO-8601, e.g. 2026-02-26T00:00:00Z)");
+                return;
+            }
+            sinceUtc = parsed;
+        }
         // --type={zip|fs} selects the source kind. Default is auto-detected
         // from the target: a regular file ⇒ zip, a directory ⇒ fs. When
         // explicitly set and the user's choice disagrees with the target's
@@ -568,7 +601,7 @@ switch (subcommand)
         }
         if (string.IsNullOrEmpty(targetPath))
         {
-            Bail("Usage: dmart import [-r|--replace] [--fast] [--fast-parallelism=N] [--batch-size=N] [--type=zip|fs] [--space=NAME --subpath=PATH] [--resume] [--checkpoint-file=PATH] <path>");
+            Bail("Usage: dmart import [-r|--replace] [--fast] [--fast-parallelism=N] [--batch-size=N] [--type=zip|fs] [--space=NAME --subpath=PATH] [--since=ISO-DATE] [--no-validate] [--issues-file=PATH] [--resume] [--checkpoint-file=PATH] <path>");
             return;
         }
 
@@ -620,7 +653,8 @@ switch (subcommand)
         }
 
         var remapSuffix = targetSpace is not null ? $", into-space={targetSpace}, into-subpath={targetSubpath}" : "";
-        Console.WriteLine($"Importing from {targetPath} (type={effectiveType}, replace={replace}, fast={fast}, parallelism={parallelism}, batch-size={batchSize}{remapSuffix})");
+        var sinceSuffix = sinceUtc.HasValue ? $", since={sinceUtc.Value:o}" : "";
+        Console.WriteLine($"Importing from {targetPath} (type={effectiveType}, replace={replace}, fast={fast}, parallelism={parallelism}, batch-size={batchSize}{remapSuffix}{sinceSuffix})");
 
         var (s, dbInst) = CliBootstrap.BuildOrExit(dotenvPath, dotenvValues);
         var importService = CliBootstrap.BuildImportExportService(s, dbInst);
@@ -637,7 +671,9 @@ switch (subcommand)
             resp = await importService.ImportFolderAsync(targetPath, actor: null,
                 preserveExisting: !replace, fastUnsafeNoFkCheck: fast, fastParallelism: parallelism,
                 batchSize: batchSize, targetSpace: targetSpace, targetSubpath: targetSubpath,
-                resume: resume, checkpointPath: checkpointPath);
+                resume: resume, checkpointPath: checkpointPath,
+                sinceUtc: sinceUtc,
+                validate: !noValidate, issuesFilePath: issuesFilePath);
         }
         else
         {
