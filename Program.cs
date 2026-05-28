@@ -548,6 +548,24 @@ switch (subcommand)
         var checkpointPath = serverArgs.FirstOrDefault(a => a.StartsWith("--checkpoint-file=", StringComparison.Ordinal))?
             ["--checkpoint-file=".Length..];
 
+        // --tag=VALUE: stamp an arbitrary tag onto every imported entry.
+        // Repeatable (pass --tag=a --tag=b for multiple). Deduped against
+        // each entry's existing tags. Typical use: mark a migration batch
+        // (e.g. --tag=migrated-2026-05) so the imported rows can be found,
+        // filtered, or rolled back later.
+        var importTags = serverArgs
+            .Where(a => a.StartsWith("--tag=", StringComparison.Ordinal))
+            .Select(a => a["--tag=".Length..])
+            .Where(t => t.Length > 0)
+            .ToList();
+
+        // --skip-history: don't import history.jsonl files (Pass 5). History
+        // is an audit trail, not current state — often unwanted in a migration
+        // target, frequently carries sensitive diffs (password changes), and
+        // is a large fraction of on-disk bytes. Dropping it speeds the import
+        // and sidesteps data-quality issues that cluster in history.
+        var skipHistory = serverArgs.Any(a => a is "--skip-history");
+
         // --no-validate: disable the always-on import-time validation
         // (owner remap, uuid dedup, schema validation, parse-error logging).
         // Default is validate=true; this flag flips it off — useful when
@@ -601,7 +619,7 @@ switch (subcommand)
         }
         if (string.IsNullOrEmpty(targetPath))
         {
-            Bail("Usage: dmart import [-r|--replace] [--fast] [--fast-parallelism=N] [--batch-size=N] [--type=zip|fs] [--space=NAME --subpath=PATH] [--since=ISO-DATE] [--no-validate] [--issues-file=PATH] [--resume] [--checkpoint-file=PATH] <path>");
+            Bail("Usage: dmart import [-r|--replace] [--fast] [--fast-parallelism=N] [--batch-size=N] [--type=zip|fs] [--space=NAME --subpath=PATH] [--since=ISO-DATE] [--skip-history] [--tag=VALUE] [--no-validate] [--issues-file=PATH] [--resume] [--checkpoint-file=PATH] <path>");
             return;
         }
 
@@ -673,7 +691,9 @@ switch (subcommand)
                 batchSize: batchSize, targetSpace: targetSpace, targetSubpath: targetSubpath,
                 resume: resume, checkpointPath: checkpointPath,
                 sinceUtc: sinceUtc,
-                validate: !noValidate, issuesFilePath: issuesFilePath);
+                validate: !noValidate, issuesFilePath: issuesFilePath,
+                skipHistory: skipHistory,
+                importTags: importTags.Count > 0 ? importTags : null);
         }
         else
         {
