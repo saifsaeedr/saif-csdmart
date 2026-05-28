@@ -2189,7 +2189,23 @@ public sealed class ImportExportService(
         switch (node)
         {
             case JsonObject obj:
-                foreach (var key in obj.Select(kv => kv.Key).ToList())
+                // Snapshot the keys. Enumerating a JsonObject forces STJ to
+                // materialize its backing dictionary, which THROWS on
+                // duplicate keys (malformed but common in legacy data — e.g.
+                // a JSON Schema body with two "append_subpath" entries).
+                // PG jsonb dedups keys on insert anyway, so when we can't
+                // safely walk an object we leave it untouched rather than
+                // abort the whole entry.
+                List<string> keys;
+                try
+                {
+                    keys = obj.Select(kv => kv.Key).ToList();
+                }
+                catch (ArgumentException)
+                {
+                    return count;
+                }
+                foreach (var key in keys)
                 {
                     var child = obj[key];
                     if (child is JsonValue jv && jv.TryGetValue<string>(out var s)
