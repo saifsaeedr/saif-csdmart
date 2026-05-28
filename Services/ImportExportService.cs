@@ -468,7 +468,7 @@ public sealed class ImportExportService(
         // entries to a synthetic root would work but is out of scope for
         // now. Operators wanting validation use the filesystem path.
         return await ImportFromEntriesAsync(entries, ImportSourceKind.Zip,
-            preserveExisting, fastUnsafeNoFkCheck, fastParallelism, batchSize, checkpoint: null, validation: null, ct: ct);
+            preserveExisting, fastUnsafeNoFkCheck, fastParallelism, batchSize, checkpoint: null, validation: null, importTags: null, ct: ct);
     }
 
     public Task<Response> ImportFolderAsync(string folderPath, string? actor, CancellationToken ct = default)
@@ -505,7 +505,7 @@ public sealed class ImportExportService(
     /// stripped, <c>""</c> or <c>"/"</c> means "directly under the space
     /// root". Required when <paramref name="targetSpace"/> is set.
     /// </param>
-    public async Task<Response> ImportFolderAsync(string folderPath, string? actor, bool preserveExisting, bool fastUnsafeNoFkCheck, int fastParallelism, int batchSize = DefaultBatchSize, string? targetSpace = null, string? targetSubpath = null, bool resume = false, string? checkpointPath = null, DateTime? sinceUtc = null, bool validate = true, string? issuesFilePath = null, CancellationToken ct = default)
+    public async Task<Response> ImportFolderAsync(string folderPath, string? actor, bool preserveExisting, bool fastUnsafeNoFkCheck, int fastParallelism, int batchSize = DefaultBatchSize, string? targetSpace = null, string? targetSubpath = null, bool resume = false, string? checkpointPath = null, DateTime? sinceUtc = null, bool validate = true, string? issuesFilePath = null, bool skipHistory = false, IReadOnlyList<string>? importTags = null, CancellationToken ct = default)
     {
         _ = actor;
         if (!Directory.Exists(folderPath))
@@ -644,6 +644,19 @@ public sealed class ImportExportService(
                 "import: --since kept {Kept} entries, skipped {MtimeSkipped} by mtime",
                 entries.Count, mtimeSkipped);
         }
+
+        // --skip-history: drop history.jsonl from the entry set so Pass 5
+        // (histories) finds nothing. History is an audit trail, not current
+        // state — often unwanted in a migration target, frequently carries
+        // sensitive diffs (password changes), a large fraction of on-disk
+        // bytes, and the place data-quality issues cluster (embedded NULs).
+        if (skipHistory)
+        {
+            var before = entries.Count;
+            entries.RemoveAll(e => e.Name == "history.jsonl");
+            log.LogInformation("import: --skip-history dropped {Count} history.jsonl files", before - entries.Count);
+        }
+
         // Resume support: only meaningful for filesystem imports (zip
         // sidecar location is operator-unfriendly when the zip lives on
         // remote storage). When --resume is set, load (or create) the
@@ -698,7 +711,7 @@ public sealed class ImportExportService(
         try
         {
             response = await ImportFromEntriesAsync(entries, ImportSourceKind.Filesystem,
-                preserveExisting, fastUnsafeNoFkCheck, fastParallelism, batchSize, checkpoint, validation, ct);
+                preserveExisting, fastUnsafeNoFkCheck, fastParallelism, batchSize, checkpoint, validation, importTags, ct);
         }
         finally
         {
@@ -732,7 +745,8 @@ public sealed class ImportExportService(
         IReadOnlyList<ImportEntryRef> entries, ImportSourceKind sourceKind,
         bool preserveExisting, bool fastUnsafeNoFkCheck, int fastParallelism,
         int batchSize, ImportCheckpointStore? checkpoint = null,
-        ImportValidationContext? validation = null, CancellationToken ct = default)
+        ImportValidationContext? validation = null, IReadOnlyList<string>? importTags = null,
+        CancellationToken ct = default)
     {
         // Clamp batch size — operators tune via --batch-size for their data
         // shape (smaller for fat payloads, larger for tiny ones). The hard
@@ -889,7 +903,7 @@ public sealed class ImportExportService(
                     new ParallelOptions { MaxDegreeOfParallelism = workers, CancellationToken = ct },
                     async (group, ictx) =>
                     {
-                        await ImportSpaceTailAsync(group.ToList(), preserveExisting, results, batchSize, validation, ictx);
+                        await ImportSpaceTailAsync(group.ToList(), preserveExisting, results, batchSize, validation, importTags, ictx);
                         // Per-space tail commit landed. Record it so a
                         // future --resume run skips this space entirely.
                         // The MarkTailDone call is lock-protected and
@@ -916,7 +930,7 @@ public sealed class ImportExportService(
                 (tailConn, tailScope) = await db.BeginFastImportSessionAsync(ct);
             try
             {
-                await RunTailPassesAsync(tailConn, tailEntries, preserveExisting, results, batchSize, validation, ct);
+                await RunTailPassesAsync(tailConn, tailEntries, preserveExisting, results, batchSize, validation, importTags, ct);
                 tailScope?.MarkSuccess();
             }
             finally
@@ -1010,12 +1024,13 @@ public sealed class ImportExportService(
         ImportStats results,
         int batchSize,
         ImportValidationContext? validation,
+        IReadOnlyList<string>? importTags,
         CancellationToken ct)
     {
         var (conn, scope) = await db.BeginFastImportSessionAsync(ct);
         try
         {
-            await RunTailPassesAsync(conn, spaceEntries, preserveExisting, results, batchSize, validation, ct);
+            await RunTailPassesAsync(conn, spaceEntries, preserveExisting, results, batchSize, validation, importTags, ct);
             scope.MarkSuccess();
         }
         finally
@@ -1040,6 +1055,7 @@ public sealed class ImportExportService(
         ImportStats results,
         int batchSize,
         ImportValidationContext? validation,
+        IReadOnlyList<string>? importTags,
         CancellationToken ct)
     {
         // ---- Pass 3: Entries (including folders) ----
@@ -1060,7 +1076,7 @@ public sealed class ImportExportService(
         var bulkEntries = conn is not null ? new List<Entry>(batchSize) : null;
         foreach (var ze in zes.Where(IsEntryMeta))
         {
-            await TryImportEntryAsync(ze, bodyLookup, results, preserveExisting, conn, bulkEntries, validation, ct);
+            await TryImportEntryAsync(ze, bodyLookup, results, preserveExisting, conn, bulkEntries, validation, importTags, ct);
             if (bulkEntries is { Count: > 0 } && bulkEntries.Count >= batchSize)
             {
                 await BulkInsertEntriesAsync(conn!, bulkEntries, preserveExisting, results, ct);
@@ -1117,6 +1133,7 @@ public sealed class ImportExportService(
             node["shortname"] ??= spaceName;
             node["subpath"] = "/";
             EnsureOwner(node);
+            StripNullChars(node);   // PG jsonb can't store   (22P05)
             var space = node.Deserialize(DmartJsonContext.Default.Space);
             if (space is null) { st.AddFailure(new() { ["path"] = ze.FullName, ["error"] = "empty space meta" }); return; }
             if (preserveExisting && await (conn is null ? spaces.GetAsync(space.Shortname, ct) : spaces.GetAsync(space.Shortname, conn, ct)) is not null)
@@ -1145,6 +1162,7 @@ public sealed class ImportExportService(
             node["subpath"] = "/users";
             EnsureOwner(node);
             await InlinePayloadBodyAsync(node, $"{spaceName}/users", allByPath, ct);
+            StripNullChars(node);   // PG jsonb can't store   (22P05)
             var user = node.Deserialize(DmartJsonContext.Default.User);
             if (user is null) { st.AddFailure(new() { ["path"] = ze.FullName, ["error"] = "empty user meta" }); return; }
             if (preserveExisting && await (conn is null ? users.GetByShortnameAsync(user.Shortname, ct) : users.GetByShortnameAsync(user.Shortname, conn, ct)) is not null)
@@ -1172,6 +1190,7 @@ public sealed class ImportExportService(
             node["space_name"] = spaceName;
             node["subpath"] = "/roles";
             EnsureOwner(node);
+            StripNullChars(node);   // PG jsonb can't store   (22P05)
             var role = node.Deserialize(DmartJsonContext.Default.Role);
             if (role is null) { st.AddFailure(new() { ["path"] = ze.FullName, ["error"] = "empty role meta" }); return; }
             if (preserveExisting && await (conn is null ? access.GetRoleAsync(role.Shortname, ct) : access.GetRoleAsync(role.Shortname, conn, ct)) is not null)
@@ -1199,6 +1218,7 @@ public sealed class ImportExportService(
             node["space_name"] = spaceName;
             node["subpath"] = "/permissions";
             EnsureOwner(node);
+            StripNullChars(node);   // PG jsonb can't store   (22P05)
             var perm = node.Deserialize(DmartJsonContext.Default.Permission);
             if (perm is null) { st.AddFailure(new() { ["path"] = ze.FullName, ["error"] = "empty permission meta" }); return; }
             if (preserveExisting && await (conn is null ? access.GetPermissionAsync(perm.Shortname, ct) : access.GetPermissionAsync(perm.Shortname, conn, ct)) is not null)
@@ -1272,7 +1292,8 @@ public sealed class ImportExportService(
     private async Task TryImportEntryAsync(
         ImportEntryRef ze, Dictionary<string, ImportEntryRef> bodyLookup,
         ImportStats st, bool preserveExisting, NpgsqlConnection? conn,
-        List<Entry>? bulkCollect, ImportValidationContext? validation, CancellationToken ct)
+        List<Entry>? bulkCollect, ImportValidationContext? validation,
+        IReadOnlyList<string>? importTags, CancellationToken ct)
     {
         try
         {
@@ -1309,6 +1330,27 @@ public sealed class ImportExportService(
             node["subpath"] = subpath;
             node["shortname"] = shortname;
             node["resource_type"] ??= InferResourceTypeFromFilename(ze.Name);
+
+            // ---- --tag: stamp arbitrary tags onto every imported entry ----
+            // Applied regardless of --no-validate. Deduped against existing
+            // tags so re-runs don't pile up duplicates. Common use: mark a
+            // migration batch (e.g. "migrated-2026-05") so the imported rows
+            // can be identified / filtered / rolled back later.
+            if (importTags is { Count: > 0 })
+            {
+                if (node["tags"] is not JsonArray tagsArr)
+                {
+                    tagsArr = new JsonArray();
+                    node["tags"] = tagsArr;
+                }
+                var existing = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var t in tagsArr)
+                    if (t is JsonValue tv && tv.TryGetValue<string>(out var s))
+                        existing.Add(s);
+                foreach (var tag in importTags)
+                    if (existing.Add(tag))
+                        tagsArr.Add((JsonNode)tag);   // implicit string→JsonNode; AOT-safe (avoids generic Add<T>)
+            }
 
             // ============================================================
             // VALIDATION HOOKS — only when validation is enabled.
@@ -1394,6 +1436,23 @@ public sealed class ImportExportService(
             }
             InlinePayloadBody(node, baseDir, bodyLookup);
             EnsureOwner(node);
+
+            // ---- Strip PG-incompatible NUL chars ( ) ----
+            // Unconditional — runs even with --no-validate — because it's a
+            // correctness fix for PG jsonb (22P05), not a validation choice.
+            // Covers both meta fields and the just-inlined body. Logged to
+            // the sidecar only when validation is on.
+            var nullsStripped = StripNullChars(node);
+            if (nullsStripped > 0 && validation is not null)
+            {
+                validation.Sink.Add(new ImportIssue
+                {
+                    Path = ze.FullName,
+                    Kind = "null-bytes-stripped",
+                    Action = "fixed-in-memory",
+                    Details = new() { ["strings_modified"] = nullsStripped },
+                });
+            }
 
             // ---- Schema validation (runs AFTER body has been inlined) ----
             // PG always stores body inlined into payload.body — never as a
@@ -1583,6 +1642,7 @@ public sealed class ImportExportService(
             }
 
             EnsureOwner(node);
+            StripNullChars(node);   // PG jsonb can't store   (22P05)
             var att = node.Deserialize(DmartJsonContext.Default.Attachment);
             if (att is null) { st.AddFailure(new() { ["path"] = ze.FullName, ["error"] = "empty attachment meta" }); return; }
             // Fast-mode bulk path — see TryImportEntryAsync for the same pattern.
@@ -1643,6 +1703,7 @@ public sealed class ImportExportService(
                 try
                 {
                     var hNode = JsonNode.Parse(line) as JsonObject ?? throw new InvalidDataException("not a JSON object");
+                    StripNullChars(hNode);   // PG jsonb can't store   (22P05) — common in history diffs
                     var owner = hNode["owner_shortname"]?.GetValue<string>();
                     if (string.IsNullOrEmpty(owner)) owner = "dmart";
                     // History Append takes Dictionary<string, object>. Deserialize
@@ -2112,6 +2173,71 @@ public sealed class ImportExportService(
         var node = await JsonNode.ParseAsync(s, cancellationToken: ct);
         return node as JsonObject
             ?? throw new InvalidDataException($"{ze.FullName}: expected a JSON object at the root");
+    }
+
+    // PostgreSQL's jsonb type cannot store the U+0000 (NUL) character — an
+    // insert containing it raises "22P05: unsupported Unicode escape
+    // sequence", which under --fast bulk COPY aborts the whole batch.
+    // Legacy text data occasionally carries embedded NULs in string fields
+    // (e.g. a displayname or body copied from a system that allowed them).
+    // We strip them from the in-memory JSON tree before insert; the source
+    // file on disk is never modified. Returns the count of string values
+    // that were modified, for sidecar reporting.
+    private static int StripNullChars(JsonNode? node)
+    {
+        var count = 0;
+        switch (node)
+        {
+            case JsonObject obj:
+                // Snapshot the keys. Enumerating a JsonObject forces STJ to
+                // materialize its backing dictionary, which THROWS on
+                // duplicate keys (malformed but common in legacy data — e.g.
+                // a JSON Schema body with two "append_subpath" entries).
+                // PG jsonb dedups keys on insert anyway, so when we can't
+                // safely walk an object we leave it untouched rather than
+                // abort the whole entry.
+                List<string> keys;
+                try
+                {
+                    keys = obj.Select(kv => kv.Key).ToList();
+                }
+                catch (ArgumentException)
+                {
+                    return count;
+                }
+                foreach (var key in keys)
+                {
+                    var child = obj[key];
+                    if (child is JsonValue jv && jv.TryGetValue<string>(out var s)
+                        && s.Contains('\0'))
+                    {
+                        obj[key] = s.Replace("\0", "");
+                        count++;
+                    }
+                    else
+                    {
+                        count += StripNullChars(child);
+                    }
+                }
+                break;
+            case JsonArray arr:
+                for (var i = 0; i < arr.Count; i++)
+                {
+                    var child = arr[i];
+                    if (child is JsonValue jv && jv.TryGetValue<string>(out var s)
+                        && s.Contains('\0'))
+                    {
+                        arr[i] = s.Replace("\0", "");
+                        count++;
+                    }
+                    else
+                    {
+                        count += StripNullChars(child);
+                    }
+                }
+                break;
+        }
+        return count;
     }
 
     private static async Task WriteJsonAsync(ZipArchive zip, string path, JsonObject node, CancellationToken ct)
