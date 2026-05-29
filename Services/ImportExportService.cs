@@ -906,6 +906,14 @@ public sealed class ImportExportService(
             .Where(g => !string.IsNullOrEmpty(g.Key))
             .ToList();
 
+        // Denominator for overall progress: the entry + attachment metas that
+        // the batch loop will flush (known now, whether the list came from the
+        // walk or --from-list). Set once before any worker starts so each batch
+        // line can show processed/total %. Histories aren't counted — they're a
+        // per-line unit and are skipped under --skip-history.
+        results.TotalToProcess = tailEntries.Count(e => IsEntryMeta(e) || IsAttachmentMeta(e));
+        log.LogInformation("import: {Total} entries to process", results.TotalToProcess);
+
         // Sub-sharding a single space is only safe for filesystem sources: the
         // FS lean walk derives bodies from each meta's on-disk sibling, so an
         // entry's meta/attachments/history are resolved independently of which
@@ -1268,26 +1276,30 @@ public sealed class ImportExportService(
         Db.FastImportSession session, string label, List<Entry> batch,
         bool preserveExisting, ImportStats results, CancellationToken ct)
     {
+        var count = batch.Count;
         var (affected, skipped) = await session.RunBatchAsync(
             (c, t) => BulkInsertEntriesAsync(c, batch, preserveExisting, t), log, ct);
         results.AddEntries(affected);
         if (preserveExisting) results.AddSkipped(skipped);
+        results.AddProcessed(count);
         batch.Clear();
-        log.LogInformation("import[{Label}]: entries committed +{Batch} (total {Total})",
-            label, affected, results.EntriesInserted);
+        log.LogInformation("import[{Label}]: entries +{Batch} (inserted {Inserted}, processed {Proc}/{Total} = {Pct}%)",
+            label, affected, results.EntriesInserted, results.Processed, results.TotalToProcess, results.ProgressPct());
     }
 
     private async Task FlushAttachmentsAsync(
         Db.FastImportSession session, string label, List<Attachment> batch,
         bool preserveExisting, ImportStats results, CancellationToken ct)
     {
+        var count = batch.Count;
         var (affected, skipped) = await session.RunBatchAsync(
             (c, t) => BulkInsertAttachmentsAsync(c, batch, preserveExisting, t), log, ct);
         results.AddAttachments(affected);
         if (preserveExisting) results.AddSkipped(skipped);
+        results.AddProcessed(count);
         batch.Clear();
-        log.LogInformation("import[{Label}]: attachments committed +{Batch} (total {Total})",
-            label, affected, results.AttachmentsInserted);
+        log.LogInformation("import[{Label}]: attachments +{Batch} (inserted {Inserted}, processed {Proc}/{Total} = {Pct}%)",
+            label, affected, results.AttachmentsInserted, results.Processed, results.TotalToProcess, results.ProgressPct());
     }
 
     // ---- Shard partitioning ----------------------------------------------
@@ -2279,6 +2291,13 @@ public sealed class ImportExportService(
         // existed in the DB. Reported back to the caller so they can tell
         // "no-op" runs apart from "everything failed" runs.
         public int Skipped;
+        // Overall tail-pass progress: TotalToProcess is the count of entry +
+        // attachment metas to flush (known up front from the walk or --from-list,
+        // set ONCE before workers start). Processed accrues per flushed batch
+        // across all shards. Lets each batch line show a real percentage even
+        // when inserts are near-zero (e.g. an idempotent re-run skipping most rows).
+        public int Processed;
+        public int TotalToProcess;
         public readonly List<Dictionary<string, object>> Failed = new();
 
         // Thread-safe counter bumpers — Interlocked is the cheapest way to
@@ -2296,6 +2315,15 @@ public sealed class ImportExportService(
         public void AddEntries(int n)     => Interlocked.Add(ref EntriesInserted, n);
         public void AddAttachments(int n) => Interlocked.Add(ref AttachmentsInserted, n);
         public void AddSkipped(int n)     => Interlocked.Add(ref Skipped, n);
+        public void AddProcessed(int n)   => Interlocked.Add(ref Processed, n);
+        // Overall % of tail entries processed. Reads two ints non-atomically,
+        // but it's a progress display — a momentarily stale denominator/numerator
+        // is harmless. Clamped to 100 and guarded against a 0 total.
+        public int ProgressPct()
+        {
+            var total = TotalToProcess;
+            return total > 0 ? (int)Math.Min(100L, 100L * Processed / total) : 100;
+        }
         // List<T>.Add isn't safe under concurrent writers; lock around it.
         // Reads at the response site happen after the parallel join → no
         // lock needed for the final enumeration.
