@@ -548,6 +548,19 @@ switch (subcommand)
         var checkpointPath = serverArgs.FirstOrDefault(a => a.StartsWith("--checkpoint-file=", StringComparison.Ordinal))?
             ["--checkpoint-file=".Length..];
 
+        // --from-list=FILE: import straight from a saved work-list (one
+        // source-relative meta path per line) and SKIP the filesystem walk.
+        // The list is trusted as-is — useful to resume a huge import without
+        // re-enumerating a slow/remote tree, or to feed a list built by
+        // external preflight tooling. fs-only.
+        var fromListPath = serverArgs.FirstOrDefault(a => a.StartsWith("--from-list=", StringComparison.Ordinal))?
+            ["--from-list=".Length..];
+        // --save-list=FILE: write the enumerated work-list here instead of the
+        // default <source>/.dmart-import-worklist.txt. (The list is written on
+        // every walk regardless; this only overrides the path.)
+        var saveListPath = serverArgs.FirstOrDefault(a => a.StartsWith("--save-list=", StringComparison.Ordinal))?
+            ["--save-list=".Length..];
+
         // --tag=VALUE: stamp an arbitrary tag onto every imported entry.
         // Repeatable (pass --tag=a --tag=b for multiple). Deduped against
         // each entry's existing tags. Typical use: mark a migration batch
@@ -619,7 +632,7 @@ switch (subcommand)
         }
         if (string.IsNullOrEmpty(targetPath))
         {
-            Bail("Usage: dmart import [-r|--replace] [--fast] [--fast-parallelism=N] [--batch-size=N] [--type=zip|fs] [--space=NAME --subpath=PATH] [--since=ISO-DATE] [--skip-history] [--tag=VALUE] [--no-validate] [--issues-file=PATH] [--resume] [--checkpoint-file=PATH] <path>");
+            Bail("Usage: dmart import [-r|--replace] [--fast] [--fast-parallelism=N] [--batch-size=N] [--type=zip|fs] [--space=NAME --subpath=PATH] [--since=ISO-DATE] [--skip-history] [--tag=VALUE] [--no-validate] [--issues-file=PATH] [--resume] [--checkpoint-file=PATH] [--from-list=FILE] [--save-list=FILE] <path>");
             return;
         }
 
@@ -669,6 +682,11 @@ switch (subcommand)
             Bail("--resume requires --type=fs (zip resume is not supported; the sidecar checkpoint needs a stable on-disk location next to the source folder)");
             return;
         }
+        if (effectiveType == "zip" && (fromListPath is not null || saveListPath is not null))
+        {
+            Bail("--from-list / --save-list require --type=fs (work-lists are relative to a source folder; zip imports read every archive member)");
+            return;
+        }
 
         var remapSuffix = targetSpace is not null ? $", into-space={targetSpace}, into-subpath={targetSubpath}" : "";
         var sinceSuffix = sinceUtc.HasValue ? $", since={sinceUtc.Value:o}" : "";
@@ -693,7 +711,8 @@ switch (subcommand)
                 sinceUtc: sinceUtc,
                 validate: !noValidate, issuesFilePath: issuesFilePath,
                 skipHistory: skipHistory,
-                importTags: importTags.Count > 0 ? importTags : null);
+                importTags: importTags.Count > 0 ? importTags : null,
+                fromListPath: fromListPath, saveListPath: saveListPath);
         }
         else
         {

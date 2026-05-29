@@ -24,6 +24,54 @@ public class ImportFolderTests : IClassFixture<DmartFactory>
     private readonly DmartFactory _factory;
     public ImportFolderTests(DmartFactory factory) => _factory = factory;
 
+    // Regression: --skip-history must skip Pass 5 for FILESYSTEM imports.
+    // The FS lean walk only enumerates meta.*.json, so history.jsonl is never
+    // an entry to filter out — it's DERIVED from each meta's sibling during the
+    // history pass. Before the Pass-5 gate, --skip-history was silently a no-op
+    // for fs (histories imported anyway). Verifies 0 histories with the flag,
+    // and that the sibling history.jsonl IS picked up without it.
+    [FactIfPg]
+    public async Task Folder_Import_SkipHistory_Skips_Derived_History_For_Filesystem()
+    {
+        var sp = _factory.Services;
+        _factory.CreateClient();
+        var io = sp.GetRequiredService<ImportExportService>();
+        var spaceRepo = sp.GetRequiredService<SpaceRepository>();
+
+        var spaceName = "iexskiphist_" + Guid.NewGuid().ToString("N")[..6];
+        var src = Path.Combine(Path.GetTempPath(), $"dmart-skiphist-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(src, spaceName, ".dm", "ent"));
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(src, spaceName, ".dm", "meta.space.json"),
+                $$"""{"uuid":"{{Guid.NewGuid()}}","shortname":"{{spaceName}}","is_active":true,"owner_shortname":"dmart","languages":["english"]}""");
+            await File.WriteAllTextAsync(Path.Combine(src, spaceName, ".dm", "ent", "meta.content.json"),
+                $$"""{"uuid":"{{Guid.NewGuid()}}","shortname":"ent","is_active":true,"owner_shortname":"dmart"}""");
+            // Sibling history.jsonl with two lines — derived + imported by Pass 5.
+            await File.WriteAllTextAsync(Path.Combine(src, spaceName, ".dm", "ent", "history.jsonl"),
+                "{\"owner_shortname\":\"dmart\",\"diff\":{\"a\":1}}\n{\"owner_shortname\":\"dmart\",\"diff\":{\"b\":2}}\n");
+
+            // 1) --skip-history → Pass 5 skipped → no histories.
+            var skip = await io.ImportFolderAsync(src, actor: null,
+                preserveExisting: false, fastUnsafeNoFkCheck: false, fastParallelism: 1,
+                batchSize: ImportExportService.DefaultBatchSize, skipHistory: true);
+            skip.Status.ShouldBe(Status.Success, customMessage: $"unexpected error: {skip.Error?.Message}");
+            ((int)skip.Attributes!["histories_inserted"]!).ShouldBe(0, "skipHistory must skip the derived history pass");
+
+            // 2) without the flag → the sibling history.jsonl is derived + imported.
+            var keep = await io.ImportFolderAsync(src, actor: null,
+                preserveExisting: false, fastUnsafeNoFkCheck: false, fastParallelism: 1,
+                batchSize: ImportExportService.DefaultBatchSize, skipHistory: false);
+            keep.Status.ShouldBe(Status.Success, customMessage: $"unexpected error: {keep.Error?.Message}");
+            ((int)keep.Attributes!["histories_inserted"]!).ShouldBeGreaterThan(0, "history pass must import the sibling history.jsonl");
+        }
+        finally
+        {
+            try { await spaceRepo.DeleteAsync(spaceName); } catch { }
+            try { Directory.Delete(src, recursive: true); } catch { }
+        }
+    }
+
     [FactIfPg]
     public async Task Folder_Import_Round_Trips_From_Unzipped_Export()
     {
