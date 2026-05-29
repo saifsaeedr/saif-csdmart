@@ -505,7 +505,7 @@ public sealed class ImportExportService(
     /// stripped, <c>""</c> or <c>"/"</c> means "directly under the space
     /// root". Required when <paramref name="targetSpace"/> is set.
     /// </param>
-    public async Task<Response> ImportFolderAsync(string folderPath, string? actor, bool preserveExisting, bool fastUnsafeNoFkCheck, int fastParallelism, int batchSize = DefaultBatchSize, string? targetSpace = null, string? targetSubpath = null, bool resume = false, string? checkpointPath = null, DateTime? sinceUtc = null, bool validate = true, string? issuesFilePath = null, bool skipHistory = false, IReadOnlyList<string>? importTags = null, CancellationToken ct = default)
+    public async Task<Response> ImportFolderAsync(string folderPath, string? actor, bool preserveExisting, bool fastUnsafeNoFkCheck, int fastParallelism, int batchSize = DefaultBatchSize, string? targetSpace = null, string? targetSubpath = null, bool resume = false, string? checkpointPath = null, DateTime? sinceUtc = null, bool validate = true, string? issuesFilePath = null, bool skipHistory = false, IReadOnlyList<string>? importTags = null, string? fromListPath = null, string? saveListPath = null, CancellationToken ct = default)
     {
         _ = actor;
         if (!Directory.Exists(folderPath))
@@ -604,65 +604,104 @@ public sealed class ImportExportService(
         // mtime, fewer inode reads). The downstream inline/history/attachment
         // points derive + open those siblings directly when AbsolutePath is set.
         var entries = new List<ImportEntryRef>();
-        long mtimeSkipped = 0;
-        foreach (var abs in Directory.EnumerateFiles(folderPath, "meta.*.json", enumOpts))
+        if (!string.IsNullOrEmpty(fromListPath))
         {
-            var rel = Path.GetRelativePath(folderPath, abs).Replace(Path.DirectorySeparatorChar, '/');
-            if (ShouldSkip(rel)) continue;
-
-            // --since: drop entries whose file mtime is older than the cutoff.
-            // One stat() per surviving path; no file read. Uses mtime as a
-            // proxy for the meta's updated_at — they match in practice because
-            // dmart writes meta.<rt>.json on every entry update. Operators
-            // with rsync-mangled mtimes should not use this flag.
+            // --from-list: skip the walk entirely and take the supplied list as
+            // the decided set. Each line is a source-relative meta path (the same
+            // `rel` the walk produces); reconstruct the identical entry the walk
+            // would have built. The remap prefix and `Path.Combine` give back the
+            // exact (FullName, AbsolutePath) pair, so shards + checkpoint keys
+            // line up unchanged. Trusted as-is — no staleness check. --since is
+            // moot here (the list already encodes the selection).
             if (sinceUtc.HasValue)
+                log.LogInformation("import: --from-list supplied — ignoring --since (the list is the decided set)");
+            foreach (var rel in ImportWorkList.Read(fromListPath))
             {
-                try
+                var abs = Path.Combine(folderPath, rel.Replace('/', Path.DirectorySeparatorChar));
+                entries.Add(ImportEntryRef.FromFile(prefix + rel, abs));
+            }
+            log.LogInformation("import: --from-list loaded {Count} entries from {Path}, skipping filesystem walk",
+                entries.Count, fromListPath);
+        }
+        else
+        {
+            long mtimeSkipped = 0;
+            foreach (var abs in Directory.EnumerateFiles(folderPath, "meta.*.json", enumOpts))
+            {
+                var rel = Path.GetRelativePath(folderPath, abs).Replace(Path.DirectorySeparatorChar, '/');
+                if (ShouldSkip(rel)) continue;
+
+                // --since: drop entries whose file mtime is older than the cutoff.
+                // One stat() per surviving path; no file read. Uses mtime as a
+                // proxy for the meta's updated_at — they match in practice because
+                // dmart writes meta.<rt>.json on every entry update. Operators
+                // with rsync-mangled mtimes should not use this flag.
+                if (sinceUtc.HasValue)
                 {
-                    if (File.GetLastWriteTimeUtc(abs) < sinceUtc.Value)
+                    try
                     {
-                        mtimeSkipped++;
-                        continue;
+                        if (File.GetLastWriteTimeUtc(abs) < sinceUtc.Value)
+                        {
+                            mtimeSkipped++;
+                            continue;
+                        }
                     }
+                    catch (IOException) { continue; }
+                    catch (UnauthorizedAccessException) { continue; }
                 }
-                catch (IOException) { continue; }
-                catch (UnauthorizedAccessException) { continue; }
+
+                // Remap mode: reject any source-level space meta. The operator
+                // said "import into {targetSpace}", so a meta.space.json in
+                // the source is ambiguous — either they meant a full-dump
+                // import (in which case --space is wrong) or they have a
+                // misplaced meta.space.json in their tree (operator error).
+                // Either way, fail loudly instead of silently overwriting
+                // the target space's own meta.
+                if (remapMode && rel.EndsWith("/.dm/meta.space.json", StringComparison.Ordinal))
+                    return Response.Fail(InternalErrorCode.INVALID_DATA,
+                        $"remap mode (--space/--subpath) found a space meta in the source at '{rel}' — " +
+                        "remap is for content-only imports into an existing space, " +
+                        "remove the meta.space.json or invoke without --space",
+                        ErrorTypes.Request);
+
+                entries.Add(ImportEntryRef.FromFile(prefix + rel, abs));
             }
 
-            // Remap mode: reject any source-level space meta. The operator
-            // said "import into {targetSpace}", so a meta.space.json in
-            // the source is ambiguous — either they meant a full-dump
-            // import (in which case --space is wrong) or they have a
-            // misplaced meta.space.json in their tree (operator error).
-            // Either way, fail loudly instead of silently overwriting
-            // the target space's own meta.
-            if (remapMode && rel.EndsWith("/.dm/meta.space.json", StringComparison.Ordinal))
-                return Response.Fail(InternalErrorCode.INVALID_DATA,
-                    $"remap mode (--space/--subpath) found a space meta in the source at '{rel}' — " +
-                    "remap is for content-only imports into an existing space, " +
-                    "remove the meta.space.json or invoke without --space",
-                    ErrorTypes.Request);
-
-            entries.Add(ImportEntryRef.FromFile(prefix + rel, abs));
+            if (sinceUtc.HasValue)
+                log.LogInformation(
+                    "import: --since kept {Kept} entries, skipped {MtimeSkipped} by mtime",
+                    entries.Count, mtimeSkipped);
         }
 
-        if (sinceUtc.HasValue)
-        {
-            log.LogInformation(
-                "import: --since kept {Kept} entries, skipped {MtimeSkipped} by mtime",
-                entries.Count, mtimeSkipped);
-        }
-
-        // --skip-history: drop history.jsonl from the entry set so Pass 5
-        // (histories) finds nothing. History is an audit trail, not current
-        // state — often unwanted in a migration target, frequently carries
-        // sensitive diffs (password changes), a large fraction of on-disk
-        // bytes, and the place data-quality issues cluster (embedded NULs).
+        // --skip-history is enforced in Pass 5 (RunTailPassesAsync), NOT here:
+        // the FS lean walk only enumerates meta.*.json, so history.jsonl is
+        // never in `entries` to drop — it is DERIVED from each meta's sibling
+        // during the history pass. Gating that derivation (and the zip path's
+        // explicit history.jsonl members) at Pass 5 covers both source kinds.
+        // History is an audit trail, not current state — often unwanted in a
+        // migration target, frequently carries sensitive diffs, a large fraction
+        // of on-disk bytes, and where data-quality issues cluster (embedded NULs).
         if (skipHistory)
+            log.LogInformation("import: --skip-history set — Pass 5 (histories) will be skipped");
+
+        // Persist the enumerated work-list (the relative meta paths actually
+        // selected, post --since / --skip-history) so a re-run can `--from-list`
+        // it and skip this walk. Only when we walked — no point rewriting the
+        // list we just read FROM. Non-fatal: it's an optimization for the next
+        // run, not the import itself.
+        if (string.IsNullOrEmpty(fromListPath))
         {
-            var before = entries.Count;
-            entries.RemoveAll(e => e.Name == "history.jsonl");
-            log.LogInformation("import: --skip-history dropped {Count} history.jsonl files", before - entries.Count);
+            var workListPath = saveListPath ?? ImportWorkList.DefaultPathFor(folderPath);
+            try
+            {
+                ImportWorkList.Write(workListPath,
+                    entries.Select(e => Path.GetRelativePath(folderPath, e.AbsolutePath!).Replace(Path.DirectorySeparatorChar, '/')));
+                log.LogInformation("import: wrote work-list ({Count} entries) to {Path}", entries.Count, workListPath);
+            }
+            catch (Exception ex)
+            {
+                log.LogWarning(ex, "import: failed to write work-list to {Path}", workListPath);
+            }
         }
 
         // Resume support: only meaningful for filesystem imports (zip
@@ -719,7 +758,7 @@ public sealed class ImportExportService(
         try
         {
             response = await ImportFromEntriesAsync(entries, ImportSourceKind.Filesystem,
-                preserveExisting, fastUnsafeNoFkCheck, fastParallelism, batchSize, checkpoint, validation, importTags, ct);
+                preserveExisting, fastUnsafeNoFkCheck, fastParallelism, batchSize, checkpoint, validation, importTags, skipHistory, ct);
         }
         finally
         {
@@ -734,7 +773,13 @@ public sealed class ImportExportService(
         // leaves the checkpoint in place so the next `--resume`
         // picks up where we stopped.
         if (response.Status == Status.Success && checkpoint is not null)
+        {
             checkpoint.Clear();
+            // Drop the auto-written work-list too. Leave an operator-named
+            // --save-list (or a --from-list source) alone — those are theirs.
+            if (string.IsNullOrEmpty(saveListPath) && string.IsNullOrEmpty(fromListPath))
+                ImportWorkList.Delete(ImportWorkList.DefaultPathFor(folderPath));
+        }
         return response;
     }
 
@@ -754,7 +799,7 @@ public sealed class ImportExportService(
         bool preserveExisting, bool fastUnsafeNoFkCheck, int fastParallelism,
         int batchSize, ImportCheckpointStore? checkpoint = null,
         ImportValidationContext? validation = null, IReadOnlyList<string>? importTags = null,
-        CancellationToken ct = default)
+        bool skipHistory = false, CancellationToken ct = default)
     {
         // Clamp batch size — operators tune via --batch-size for their data
         // shape (smaller for fat payloads, larger for tiny ones). The hard
@@ -920,7 +965,7 @@ public sealed class ImportExportService(
                     shards,
                     new ParallelOptions { MaxDegreeOfParallelism = workers, CancellationToken = ct },
                     async (shard, ictx) =>
-                        await RunShardTailIsolatedAsync(shard.Key, shard.Entries, preserveExisting, results, batchSize, validation, importTags, checkpoint, ictx));
+                        await RunShardTailIsolatedAsync(shard.Key, shard.Entries, preserveExisting, results, batchSize, validation, importTags, checkpoint, skipHistory, ictx));
             }
             finally
             {
@@ -934,14 +979,14 @@ public sealed class ImportExportService(
             // make even a serial run survive a transport drop, and the
             // per-shard checkpoint means --resume works serially too.
             foreach (var shard in shards)
-                await RunShardTailIsolatedAsync(shard.Key, shard.Entries, preserveExisting, results, batchSize, validation, importTags, checkpoint, ct);
+                await RunShardTailIsolatedAsync(shard.Key, shard.Entries, preserveExisting, results, batchSize, validation, importTags, checkpoint, skipHistory, ct);
         }
         else
         {
             // Non-fast slow path: one pass over all tail entries; the repos
             // open their own per-call connections (historical behaviour, no
             // bulk COPY, no resume).
-            await RunTailPassesAsync(null, "serial", tailEntries, preserveExisting, results, batchSize, validation, importTags, ct);
+            await RunTailPassesAsync(null, "serial", tailEntries, preserveExisting, results, batchSize, validation, importTags, skipHistory, ct);
         }
 
         // Fast mode deferred the per-role/per-permission cache invalidations
@@ -1061,11 +1106,12 @@ public sealed class ImportExportService(
         ImportValidationContext? validation,
         IReadOnlyList<string>? importTags,
         ImportCheckpointStore? checkpoint,
+        bool skipHistory,
         CancellationToken ct)
     {
         try
         {
-            await ImportShardTailAsync(shardKey, shardEntries, preserveExisting, results, batchSize, validation, importTags, ct);
+            await ImportShardTailAsync(shardKey, shardEntries, preserveExisting, results, batchSize, validation, importTags, skipHistory, ct);
             // Per-shard commit landed. Record it so a future --resume skips this
             // shard. MarkTailDone is lock-protected and atomically rewrites the
             // sidecar.
@@ -1094,12 +1140,13 @@ public sealed class ImportExportService(
         int batchSize,
         ImportValidationContext? validation,
         IReadOnlyList<string>? importTags,
+        bool skipHistory,
         CancellationToken ct)
     {
         var session = await db.BeginFastImportSessionAsync(ct);
         try
         {
-            await RunTailPassesAsync(session, label, shardEntries, preserveExisting, results, batchSize, validation, importTags, ct);
+            await RunTailPassesAsync(session, label, shardEntries, preserveExisting, results, batchSize, validation, importTags, skipHistory, ct);
             session.MarkSuccess();
         }
         finally
@@ -1125,6 +1172,7 @@ public sealed class ImportExportService(
         int batchSize,
         ImportValidationContext? validation,
         IReadOnlyList<string>? importTags,
+        bool skipHistory,
         CancellationToken ct)
     {
         // In fast mode the session owns the connection. The connection handed
@@ -1174,6 +1222,12 @@ public sealed class ImportExportService(
             await FlushAttachmentsAsync(session!, label, bulkAttachments, preserveExisting, results, ct);
 
         // ---- Pass 5: Histories ----
+        // --skip-history covers BOTH the zip path (history.jsonl removed from the
+        // entry list upstream) AND the FS lean-walk path (where history.jsonl is
+        // never enumerated and is instead DERIVED below from each meta's sibling)
+        // — the upstream RemoveAll can't reach the derived case, so the gate must
+        // live here too.
+        if (skipHistory) return;
         // History append is NOT idempotent (every line inserts a fresh row), so
         // it deliberately skips the per-batch commit + replay path: it runs in
         // the session's trailing transaction, committed once at shard end
@@ -1960,14 +2014,25 @@ public sealed class ImportExportService(
                         await histories.AppendAsync(spaceName, subpath, sn, owner, reqHeaders, diff, conn, ct);
                     st.IncHistories();
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException)
+                // Swallow only genuine PER-LINE data errors (bad JSON, a value PG
+                // rejects). A DEAD connection fails every remaining line, so don't
+                // log a flood — let it propagate (shard isolation records one
+                // shard-failed and the other shards continue). Histories run
+                // without reconnect (append isn't idempotent), so a broken
+                // connection here is terminal for this shard.
+                catch (Exception ex) when (ex is not OperationCanceledException
+                                           && (conn is null || conn.State == System.Data.ConnectionState.Open))
                 {
                     log.LogWarning(ex, "history line skipped in {Path}", ze.FullName);
                     st.AddFailure(new() { ["path"] = ze.FullName, ["kind"] = "history_line", ["error"] = ex.Message });
                 }
             }
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        // Same split as the per-line catch: a broken connection propagates
+        // (terminal for the shard), a per-file error (e.g. unreadable file) is
+        // logged and skipped.
+        catch (Exception ex) when (ex is not OperationCanceledException
+                                   && (conn is null || conn.State == System.Data.ConnectionState.Open))
         {
             log.LogWarning(ex, "import history failed at {Path}", ze.FullName);
             st.AddFailure(new() { ["path"] = ze.FullName, ["kind"] = "history", ["error"] = ex.Message });
