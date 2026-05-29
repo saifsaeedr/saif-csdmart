@@ -920,13 +920,7 @@ public sealed class ImportExportService(
                     shards,
                     new ParallelOptions { MaxDegreeOfParallelism = workers, CancellationToken = ct },
                     async (shard, ictx) =>
-                    {
-                        await ImportShardTailAsync(shard.Key, shard.Entries, preserveExisting, results, batchSize, validation, importTags, ictx);
-                        // Per-shard commit landed. Record it so a future
-                        // --resume skips this shard. MarkTailDone is
-                        // lock-protected and atomically rewrites the sidecar.
-                        checkpoint?.MarkTailDone(shard.Key);
-                    });
+                        await RunShardTailIsolatedAsync(shard.Key, shard.Entries, preserveExisting, results, batchSize, validation, importTags, checkpoint, ictx));
             }
             finally
             {
@@ -940,10 +934,7 @@ public sealed class ImportExportService(
             // make even a serial run survive a transport drop, and the
             // per-shard checkpoint means --resume works serially too.
             foreach (var shard in shards)
-            {
-                await ImportShardTailAsync(shard.Key, shard.Entries, preserveExisting, results, batchSize, validation, importTags, ct);
-                checkpoint?.MarkTailDone(shard.Key);
-            }
+                await RunShardTailIsolatedAsync(shard.Key, shard.Entries, preserveExisting, results, batchSize, validation, importTags, checkpoint, ct);
         }
         else
         {
@@ -964,7 +955,7 @@ public sealed class ImportExportService(
             await access.InvalidateAllCachesAsync(ct);
         }
 
-        return Response.Ok(attributes: new()
+        var attributes = new Dictionary<string, object>
         {
             ["entries_inserted"] = results.EntriesInserted,
             ["attachments_inserted"] = results.AttachmentsInserted,
@@ -976,7 +967,29 @@ public sealed class ImportExportService(
             ["skipped"] = results.Skipped,
             ["failed_count"] = results.Failed.Count,
             ["failed"] = results.Failed,
-        });
+        };
+
+        // A whole-shard failure (isolated above so siblings still finished) is
+        // categorically worse than per-row skips — its rows didn't land. Report
+        // the run as FAILED so the operator gets a non-zero exit and re-runs
+        // with --resume (committed shards are durable and get skipped). Safe to
+        // read results.Failed here — all parallel workers have joined.
+        var failedShardKeys = results.Failed
+            .Where(f => f.TryGetValue("kind", out var k) && k as string == "shard-failed")
+            .Select(f => f.TryGetValue("shard", out var s) ? s as string : null)
+            .Where(s => !string.IsNullOrEmpty(s))
+            .ToList();
+        if (failedShardKeys.Count > 0)
+        {
+            var msg = $"import: {failedShardKeys.Count} shard(s) failed and were left uncommitted — "
+                + $"re-run with --resume to retry them (failed: {string.Join(", ", failedShardKeys)}). "
+                + $"Committed: entries={results.EntriesInserted}, attachments={results.AttachmentsInserted}, "
+                + $"histories={results.HistoriesInserted}, skipped={results.Skipped}.";
+            log.LogError("{Message}", msg);
+            return Response.Fail(InternalErrorCode.SOMETHING_WRONG, msg, ErrorTypes.Exception) with { Attributes = attributes };
+        }
+
+        return Response.Ok(attributes: attributes);
     }
 
     // ---- layout classifiers ----
@@ -1025,6 +1038,48 @@ public sealed class ImportExportService(
     {
         var first = ze.FullName.IndexOf('/');
         return first <= 0 ? "" : ze.FullName[..first];
+    }
+
+    // Runs one shard and records its outcome, isolating real failures from
+    // genuine cancellation:
+    //   * OperationCanceledException (the import's own token was cancelled —
+    //     e.g. a Ctrl+C/SIGINT or host shutdown) is RE-THROWN so it propagates
+    //     out of Parallel.ForEachAsync and every other worker stops too. We
+    //     honor cancellation; we never keep importing through it.
+    //   * Any other exception is ISOLATED — recorded as a `shard-failed` issue
+    //     and swallowed so sibling shards keep going. The shard is NOT
+    //     checkpointed, so a later --resume retries only this one. Without this,
+    //     Parallel.ForEachAsync cancels every other in-flight shard on the
+    //     first unhandled throw, turning one bad shard into a run-wide abort
+    //     (and a flood of "A task was canceled" sidecar noise).
+    private async Task RunShardTailIsolatedAsync(
+        string shardKey,
+        List<ImportEntryRef> shardEntries,
+        bool preserveExisting,
+        ImportStats results,
+        int batchSize,
+        ImportValidationContext? validation,
+        IReadOnlyList<string>? importTags,
+        ImportCheckpointStore? checkpoint,
+        CancellationToken ct)
+    {
+        try
+        {
+            await ImportShardTailAsync(shardKey, shardEntries, preserveExisting, results, batchSize, validation, importTags, ct);
+            // Per-shard commit landed. Record it so a future --resume skips this
+            // shard. MarkTailDone is lock-protected and atomically rewrites the
+            // sidecar.
+            checkpoint?.MarkTailDone(shardKey);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            log.LogError(ex, "import: shard {Shard} failed — other shards continue; re-run with --resume to retry it", shardKey);
+            results.AddFailure(new() { ["shard"] = shardKey, ["kind"] = "shard-failed", ["error"] = ex.Message });
+        }
     }
 
     // Per-shard worker. Owns its own fast session (connection, replica role,
@@ -1315,7 +1370,7 @@ public sealed class ImportExportService(
             else              await spaces.UpsertAsync(space, conn, ct);
             st.IncSpaces();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             log.LogWarning(ex, "import space failed at {Path}", ze.FullName);
             st.AddFailure(new() { ["path"] = ze.FullName, ["kind"] = "space", ["error"] = ex.Message });
@@ -1344,7 +1399,7 @@ public sealed class ImportExportService(
             else              await users.UpsertAsync(user, conn, ct);
             st.IncUsers();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             log.LogWarning(ex, "import user failed at {Path}", ze.FullName);
             st.AddFailure(new() { ["path"] = ze.FullName, ["kind"] = "user", ["error"] = ex.Message });
@@ -1372,7 +1427,7 @@ public sealed class ImportExportService(
             else              await access.UpsertRoleAsync(role, conn, deferCacheRefresh: true, ct);
             st.IncRoles();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             log.LogWarning(ex, "import role failed at {Path}", ze.FullName);
             st.AddFailure(new() { ["path"] = ze.FullName, ["kind"] = "role", ["error"] = ex.Message });
@@ -1400,7 +1455,7 @@ public sealed class ImportExportService(
             else              await access.UpsertPermissionAsync(perm, conn, deferCacheRefresh: true, ct);
             st.IncPermissions();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             log.LogWarning(ex, "import permission failed at {Path}", ze.FullName);
             st.AddFailure(new() { ["path"] = ze.FullName, ["kind"] = "permission", ["error"] = ex.Message });
@@ -1481,7 +1536,7 @@ public sealed class ImportExportService(
             {
                 node = await ReadJsonObjectAsync(ze, ct);
             }
-            catch (Exception parseEx) when (validation is not null)
+            catch (Exception parseEx) when (validation is not null && parseEx is not OperationCanceledException)
             {
                 // Validation-enabled mode: a malformed meta isn't a silent
                 // failure. Log it to the sidecar and skip the entry instead
@@ -1738,7 +1793,7 @@ public sealed class ImportExportService(
             else              await entries.UpsertAsync(entry, conn, ct);
             st.IncEntries();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             log.LogWarning(ex, "import entry failed at {Path}", ze.FullName);
             st.AddFailure(new() { ["path"] = ze.FullName, ["kind"] = "entry", ["error"] = ex.Message });
@@ -1847,7 +1902,7 @@ public sealed class ImportExportService(
             else              await attachments.UpsertAsync(att, conn, ct);
             st.IncAttachments();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             log.LogWarning(ex, "import attachment failed at {Path}", ze.FullName);
             st.AddFailure(new() { ["path"] = ze.FullName, ["kind"] = "attachment", ["error"] = ex.Message });
@@ -1905,14 +1960,14 @@ public sealed class ImportExportService(
                         await histories.AppendAsync(spaceName, subpath, sn, owner, reqHeaders, diff, conn, ct);
                     st.IncHistories();
                 }
-                catch (Exception ex)
+                catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     log.LogWarning(ex, "history line skipped in {Path}", ze.FullName);
                     st.AddFailure(new() { ["path"] = ze.FullName, ["kind"] = "history_line", ["error"] = ex.Message });
                 }
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             log.LogWarning(ex, "import history failed at {Path}", ze.FullName);
             st.AddFailure(new() { ["path"] = ze.FullName, ["kind"] = "history", ["error"] = ex.Message });
