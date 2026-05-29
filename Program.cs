@@ -560,6 +560,14 @@ switch (subcommand)
         // every walk regardless; this only overrides the path.)
         var saveListPath = serverArgs.FirstOrDefault(a => a.StartsWith("--save-list=", StringComparison.Ordinal))?
             ["--save-list=".Length..];
+        // --spaces=a,b,c: import only the named top-level spaces from a
+        // spaces-root. The import path must be the PARENT that holds {space}/…
+        // dirs (the first path segment is the space name); entries outside the
+        // set are skipped during the walk. fs-only; mutually exclusive with the
+        // --space/--subpath single-space remap.
+        var includeSpaces = serverArgs.FirstOrDefault(a => a.StartsWith("--spaces=", StringComparison.Ordinal))?
+            ["--spaces=".Length..]
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
         // --tag=VALUE: stamp an arbitrary tag onto every imported entry.
         // Repeatable (pass --tag=a --tag=b for multiple). Deduped against
@@ -632,7 +640,7 @@ switch (subcommand)
         }
         if (string.IsNullOrEmpty(targetPath))
         {
-            Bail("Usage: dmart import [-r|--replace] [--fast] [--fast-parallelism=N] [--batch-size=N] [--type=zip|fs] [--space=NAME --subpath=PATH] [--since=ISO-DATE] [--skip-history] [--tag=VALUE] [--no-validate] [--issues-file=PATH] [--resume] [--checkpoint-file=PATH] [--from-list=FILE] [--save-list=FILE] <path>");
+            Bail("Usage: dmart import [-r|--replace] [--fast] [--fast-parallelism=N] [--batch-size=N] [--type=zip|fs] [--space=NAME --subpath=PATH] [--since=ISO-DATE] [--skip-history] [--tag=VALUE] [--no-validate] [--issues-file=PATH] [--resume] [--checkpoint-file=PATH] [--from-list=FILE] [--save-list=FILE] [--spaces=A,B,C] <path>");
             return;
         }
 
@@ -687,6 +695,16 @@ switch (subcommand)
             Bail("--from-list / --save-list require --type=fs (work-lists are relative to a source folder; zip imports read every archive member)");
             return;
         }
+        if (effectiveType == "zip" && includeSpaces is { Length: > 0 })
+        {
+            Bail("--spaces requires --type=fs");
+            return;
+        }
+        if (includeSpaces is { Length: > 0 } && (targetSpace is not null || targetSubpath is not null))
+        {
+            Bail("--spaces (filter a multi-space import) can't combine with --space/--subpath (remap into one space) — they're opposite modes");
+            return;
+        }
 
         var remapSuffix = targetSpace is not null ? $", into-space={targetSpace}, into-subpath={targetSubpath}" : "";
         var sinceSuffix = sinceUtc.HasValue ? $", since={sinceUtc.Value:o}" : "";
@@ -712,7 +730,8 @@ switch (subcommand)
                 validate: !noValidate, issuesFilePath: issuesFilePath,
                 skipHistory: skipHistory,
                 importTags: importTags.Count > 0 ? importTags : null,
-                fromListPath: fromListPath, saveListPath: saveListPath);
+                fromListPath: fromListPath, saveListPath: saveListPath,
+                includeSpaces: includeSpaces);
         }
         else
         {

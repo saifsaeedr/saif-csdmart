@@ -72,6 +72,52 @@ public class ImportFolderTests : IClassFixture<DmartFactory>
         }
     }
 
+    // --spaces filter: pointed at a spaces-root holding sibling space folders,
+    // only the selected space(s) import; the others are skipped entirely.
+    [FactIfPg]
+    public async Task Folder_Import_Spaces_Filter_Imports_Only_Selected()
+    {
+        var sp = _factory.Services;
+        _factory.CreateClient();
+        var io = sp.GetRequiredService<ImportExportService>();
+        var entryRepo = sp.GetRequiredService<EntryRepository>();
+        var spaceRepo = sp.GetRequiredService<SpaceRepository>();
+
+        var stamp = Guid.NewGuid().ToString("N")[..6];
+        var keep = "iexkeep_" + stamp;
+        var skip = "iexskip_" + stamp;
+        var root = Path.Combine(Path.GetTempPath(), $"dmart-spaces-{Guid.NewGuid():N}");
+        foreach (var (space, sn) in new[] { (keep, "k1"), (skip, "s1") })
+        {
+            Directory.CreateDirectory(Path.Combine(root, space, ".dm", sn));
+            await File.WriteAllTextAsync(Path.Combine(root, space, ".dm", "meta.space.json"),
+                $$"""{"uuid":"{{Guid.NewGuid()}}","shortname":"{{space}}","is_active":true,"owner_shortname":"dmart","languages":["english"]}""");
+            await File.WriteAllTextAsync(Path.Combine(root, space, ".dm", sn, "meta.content.json"),
+                $$"""{"uuid":"{{Guid.NewGuid()}}","shortname":"{{sn}}","is_active":true,"owner_shortname":"dmart"}""");
+        }
+        try
+        {
+            var resp = await io.ImportFolderAsync(root, actor: null,
+                preserveExisting: false, fastUnsafeNoFkCheck: false, fastParallelism: 1,
+                batchSize: ImportExportService.DefaultBatchSize,
+                includeSpaces: new[] { keep });
+            resp.Status.ShouldBe(Status.Success, customMessage: $"unexpected error: {resp.Error?.Message}");
+
+            // Selected space + its entry landed.
+            (await spaceRepo.GetAsync(keep)).ShouldNotBeNull("selected space should import");
+            (await entryRepo.GetAsync(keep, "/", "k1", ResourceType.Content)).ShouldNotBeNull("selected space's entry should import");
+            // The other sibling space was filtered out entirely.
+            (await spaceRepo.GetAsync(skip)).ShouldBeNull("--spaces must exclude the unselected space");
+            (await entryRepo.GetAsync(skip, "/", "s1", ResourceType.Content)).ShouldBeNull("excluded space's entry must not import");
+        }
+        finally
+        {
+            try { await spaceRepo.DeleteAsync(keep); } catch { }
+            try { await spaceRepo.DeleteAsync(skip); } catch { }
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
     [FactIfPg]
     public async Task Folder_Import_Round_Trips_From_Unzipped_Export()
     {
