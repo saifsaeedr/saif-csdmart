@@ -595,9 +595,17 @@ public sealed class ImportExportService(
                 : $"{targetSpace}/{normalizedSubpath}/")
             : "";
 
+        // Lean walk: enumerate ONLY meta.*.json. The dmart layout makes every
+        // other file derivable from its meta — payload body (3 dirs up from
+        // the meta + the payload.body filename), history.jsonl (meta sibling),
+        // and attachment bodies (attachment-meta sibling). Holding only metas
+        // (not bodies/history/attachment binaries) cuts the import-process
+        // working set ~3x and, under --since, stats only metas (the correct
+        // mtime, fewer inode reads). The downstream inline/history/attachment
+        // points derive + open those siblings directly when AbsolutePath is set.
         var entries = new List<ImportEntryRef>();
         long mtimeSkipped = 0;
-        foreach (var abs in Directory.EnumerateFiles(folderPath, "*", enumOpts))
+        foreach (var abs in Directory.EnumerateFiles(folderPath, "meta.*.json", enumOpts))
         {
             var rel = Path.GetRelativePath(folderPath, abs).Replace(Path.DirectorySeparatorChar, '/');
             if (ShouldSkip(rel)) continue;
@@ -769,14 +777,13 @@ public sealed class ImportExportService(
         }
 
         // Global path → entry dict used by InlinePayloadBodyAsync to resolve
-        // sibling body files during the user head pass. Only built when an
-        // import actually contains user meta files — most operator imports
-        // don't, and building a 100k-entry dict eagerly for nothing is a
-        // measurable cost on large dumps. Tail passes (Pass 3-5) build their
-        // own per-pass body lookups from a slice of entries, so they don't
-        // need this dict.
+        // user-meta sibling body files during the head pass. ZIP ONLY: under
+        // the filesystem lean walk the head pass derives the body from the
+        // meta's AbsolutePath, so this dict would be a wasted (and large)
+        // metas-only map. Built only for zip sources that actually carry user
+        // metas. Tail passes (Pass 3-5) build their own per-slice lookups.
         IReadOnlyDictionary<string, ImportEntryRef> allByPath =
-            entries.Any(IsUserMeta)
+            sourceKind == ImportSourceKind.Zip && entries.Any(IsUserMeta)
                 ? entries.ToDictionary(e => e.FullName, e => e, StringComparer.Ordinal)
                 : new Dictionary<string, ImportEntryRef>(StringComparer.Ordinal);
 
@@ -1106,9 +1113,39 @@ public sealed class ImportExportService(
             await BulkInsertAttachmentsAsync(conn!, bulkAttachments, preserveExisting, results, ct);
 
         // ---- Pass 5: Histories ----
+        // Zip: history.jsonl files are explicit members of the entry list.
+        // FS lean walk: history.jsonl was never enumerated (we walked only
+        // meta.*.json), so derive it as the meta's SIBLING for each
+        // history-bearing meta and import it. The two loops are mutually
+        // exclusive — zip refs have no AbsolutePath, and an FS metas-only
+        // list contains no history.jsonl members — so neither double-imports.
         foreach (var ze in zes.Where(z => z.Name == "history.jsonl"))
             await TryImportHistoryAsync(ze, results, conn, ct);
+        foreach (var ze in zes.Where(z => z.AbsolutePath is not null && IsHistoryBearingMeta(z)))
+        {
+            var dir = Path.GetDirectoryName(ze.AbsolutePath);
+            if (dir is null) continue;
+            var historyDisk = Path.Combine(dir, "history.jsonl");
+            if (!File.Exists(historyDisk)) continue;
+            // Logical history path = meta's directory + /history.jsonl, so
+            // TryImportHistoryAsync derives the same space/subpath/sn it would
+            // from a zip-listed history.jsonl.
+            var slash = ze.FullName.LastIndexOf('/');
+            var histFull = (slash < 0 ? "" : ze.FullName[..slash]) + "/history.jsonl";
+            await TryImportHistoryAsync(ImportEntryRef.FromFile(histFull, historyDisk), results, conn, ct);
+        }
     }
+
+    // A meta whose directory may carry a sibling history.jsonl: entry,
+    // folder, user, role, and permission metas — but NOT space metas
+    // (no {sn}/history.jsonl shape) and NOT attachment metas (their
+    // attachments.{rt}/ dir may hold several metas, so a shared
+    // history.jsonl there would ambiguously bind to all of them).
+    private static bool IsHistoryBearingMeta(ImportEntryRef ze)
+        => ze.Name.StartsWith("meta.", StringComparison.Ordinal)
+           && ze.Name.EndsWith(".json", StringComparison.Ordinal)
+           && ze.Name != "meta.space.json"
+           && !ze.FullName.Contains("/attachments.", StringComparison.Ordinal);
 
     // ---- importers ----
 
@@ -1161,7 +1198,7 @@ public sealed class ImportExportService(
             node["space_name"] = spaceName;
             node["subpath"] = "/users";
             EnsureOwner(node);
-            await InlinePayloadBodyAsync(node, $"{spaceName}/users", allByPath, ct);
+            await InlinePayloadBodyAsync(node, $"{spaceName}/users", allByPath, ze, ct);
             StripNullChars(node);   // PG jsonb can't store   (22P05)
             var user = node.Deserialize(DmartJsonContext.Default.User);
             if (user is null) { st.AddFailure(new() { ["path"] = ze.FullName, ["error"] = "empty user meta" }); return; }
@@ -1434,7 +1471,7 @@ public sealed class ImportExportService(
             {
                 baseDir = $"{spaceName}/{subpath.TrimStart('/')}".TrimEnd('/');
             }
-            InlinePayloadBody(node, baseDir, bodyLookup);
+            InlinePayloadBody(node, baseDir, bodyLookup, ze);
             EnsureOwner(node);
 
             // ---- Strip PG-incompatible NUL chars ( ) ----
@@ -1612,7 +1649,10 @@ public sealed class ImportExportService(
             node["resource_type"] ??= rtDir.Substring("attachments.".Length);
 
             // Body re-inline: JSON bodies come from `{att_sn}.json`; media
-            // bytes come from the filename in payload.body.
+            // bytes come from the filename in payload.body. Under the FS lean
+            // walk the body is a SIBLING of the attachment meta (same
+            // attachments.{rt}/ dir) and is derived + opened directly; under
+            // zip it's resolved via the pre-built attachment-body lookup.
             var attDir = ze.FullName[..ze.FullName.LastIndexOf('/')];
             if (node["payload"] is JsonObject p)
             {
@@ -1620,22 +1660,34 @@ public sealed class ImportExportService(
                 var contentType = p["content_type"]?.GetValue<string>() ?? "";
                 if (!string.IsNullOrEmpty(bodyField))
                 {
-                    var bodyPath = $"{attDir}/{bodyField}";
-                    if (bodies.TryGetValue(bodyPath, out var bodyZe))
+                    Stream? bs = null;
+                    if (ze.AbsolutePath is not null)
                     {
-                        if (contentType.Equals("json", StringComparison.OrdinalIgnoreCase))
+                        var bodyDisk = Path.Combine(Path.GetDirectoryName(ze.AbsolutePath)!, bodyField);
+                        if (File.Exists(bodyDisk)) bs = File.OpenRead(bodyDisk);
+                    }
+                    else
+                    {
+                        var bodyPath = $"{attDir}/{bodyField}";
+                        if (bodies.TryGetValue(bodyPath, out var bodyZe)) bs = OpenEntry(bodyZe);
+                    }
+
+                    if (bs is not null)
+                    {
+                        await using (bs)
                         {
-                            await using var bs = OpenEntry(bodyZe);
-                            using var sr = new StreamReader(bs);
-                            var jsonText = await sr.ReadToEndAsync(ct);
-                            p["body"] = JsonNode.Parse(jsonText);
-                        }
-                        else
-                        {
-                            await using var bs = OpenEntry(bodyZe);
-                            using var mem = new MemoryStream();
-                            await bs.CopyToAsync(mem, ct);
-                            node["media"] = Convert.ToBase64String(mem.ToArray());
+                            if (contentType.Equals("json", StringComparison.OrdinalIgnoreCase))
+                            {
+                                using var sr = new StreamReader(bs);
+                                var jsonText = await sr.ReadToEndAsync(ct);
+                                p["body"] = JsonNode.Parse(jsonText);
+                            }
+                            else
+                            {
+                                using var mem = new MemoryStream();
+                                await bs.CopyToAsync(mem, ct);
+                                node["media"] = Convert.ToBase64String(mem.ToArray());
+                            }
                         }
                     }
                 }
@@ -2071,30 +2123,62 @@ public sealed class ImportExportService(
         "json", "text", "html", "markdown", "csv", "jsonl",
     };
 
+    // Body disk path for a filesystem meta under the lean walk: the payload
+    // body lives in the container, which is 3 directories up from the meta
+    // file, named by payload.body. This single rule holds for BOTH on-disk
+    // shapes — leaf entries (`parent/.dm/sn/meta.rt.json` → container `parent`)
+    // and folder entries (`parent/sn/.dm/meta.folder.json` → container `parent`)
+    // — because the meta sits 3 levels below the container in both. Returns
+    // null when the path can't be formed or the file is absent.
+    private static string? DeriveBodyDiskPath(string metaAbsolutePath, string filename)
+    {
+        var container = Path.GetDirectoryName(Path.GetDirectoryName(Path.GetDirectoryName(metaAbsolutePath)));
+        if (container is null) return null;
+        var bodyDisk = Path.Combine(container, filename);
+        return File.Exists(bodyDisk) ? bodyDisk : null;
+    }
+
     // Re-inline the externalized payload.body from a sibling body file.
-    // Mutates `metaNode` in place.
+    // Mutates `metaNode` in place. When metaRef carries an AbsolutePath
+    // (filesystem lean walk), the body path is DERIVED and opened directly;
+    // otherwise (zip) it's resolved via the pre-built `bodies` lookup.
     private static void InlinePayloadBody(
-        JsonObject metaNode, string baseDir, Dictionary<string, ImportEntryRef> bodies)
+        JsonObject metaNode, string baseDir, Dictionary<string, ImportEntryRef> bodies, ImportEntryRef metaRef)
     {
         if (metaNode["payload"] is not JsonObject payload) return;
         if (payload["body"] is not JsonValue bodyVal) return;
         if (!bodyVal.TryGetValue<string>(out var filename) || string.IsNullOrEmpty(filename)) return;
         var contentType = (payload["content_type"]?.GetValue<string>() ?? "").ToLowerInvariant();
         if (!InlinableContentTypes.Contains(contentType)) return;
-        // Python stores the filename relative to the entry's subpath directory.
-        var bodyPath = $"{baseDir}/{filename}".Replace("//", "/");
-        if (!bodies.TryGetValue(bodyPath, out var ze)) return;
-        using var s = OpenEntry(ze);
-        using var sr = new StreamReader(s);
-        var raw = sr.ReadToEnd();
-        if (string.Equals(contentType, "json", StringComparison.OrdinalIgnoreCase))
+
+        Stream s;
+        if (metaRef.AbsolutePath is not null)
         {
-            try { payload["body"] = JsonNode.Parse(raw); }
-            catch { payload["body"] = raw; /* leave as string if the file isn't JSON */ }
+            var bodyDisk = DeriveBodyDiskPath(metaRef.AbsolutePath, filename);
+            if (bodyDisk is null) return;
+            s = File.OpenRead(bodyDisk);
         }
         else
         {
-            payload["body"] = raw;
+            // Python stores the filename relative to the entry's subpath directory.
+            var bodyPath = $"{baseDir}/{filename}".Replace("//", "/");
+            if (!bodies.TryGetValue(bodyPath, out var ze)) return;
+            s = OpenEntry(ze);
+        }
+
+        using (s)
+        using (var sr = new StreamReader(s))
+        {
+            var raw = sr.ReadToEnd();
+            if (string.Equals(contentType, "json", StringComparison.OrdinalIgnoreCase))
+            {
+                try { payload["body"] = JsonNode.Parse(raw); }
+                catch { payload["body"] = raw; /* leave as string if the file isn't JSON */ }
+            }
+            else
+            {
+                payload["body"] = raw;
+            }
         }
     }
 
@@ -2105,24 +2189,39 @@ public sealed class ImportExportService(
     // both the zip and folder sources can resolve siblings the same way.
     private static async Task InlinePayloadBodyAsync(
         JsonObject metaNode, string baseDir,
-        IReadOnlyDictionary<string, ImportEntryRef> allByPath, CancellationToken ct)
+        IReadOnlyDictionary<string, ImportEntryRef> allByPath, ImportEntryRef metaRef, CancellationToken ct)
     {
         if (metaNode["payload"] is not JsonObject payload) return;
         if (payload["body"] is not JsonValue bodyVal) return;
         if (!bodyVal.TryGetValue<string>(out var filename) || string.IsNullOrEmpty(filename)) return;
         var contentType = (payload["content_type"]?.GetValue<string>() ?? "").ToLowerInvariant();
         if (!InlinableContentTypes.Contains(contentType)) return;
-        var bodyPath = $"{baseDir}/{filename}".Replace("//", "/");
-        if (!allByPath.TryGetValue(bodyPath, out var bodyRef)) return;
-        await using var s = OpenEntry(bodyRef);
-        using var sr = new StreamReader(s);
-        var raw = await sr.ReadToEndAsync(ct);
-        if (string.Equals(contentType, "json", StringComparison.OrdinalIgnoreCase))
+
+        Stream s;
+        if (metaRef.AbsolutePath is not null)
         {
-            try { payload["body"] = JsonNode.Parse(raw); }
-            catch { payload["body"] = raw; }
+            var bodyDisk = DeriveBodyDiskPath(metaRef.AbsolutePath, filename);
+            if (bodyDisk is null) return;
+            s = File.OpenRead(bodyDisk);
         }
-        else payload["body"] = raw;
+        else
+        {
+            var bodyPath = $"{baseDir}/{filename}".Replace("//", "/");
+            if (!allByPath.TryGetValue(bodyPath, out var bodyRef)) return;
+            s = OpenEntry(bodyRef);
+        }
+
+        await using (s)
+        {
+            using var sr = new StreamReader(s);
+            var raw = await sr.ReadToEndAsync(ct);
+            if (string.Equals(contentType, "json", StringComparison.OrdinalIgnoreCase))
+            {
+                try { payload["body"] = JsonNode.Parse(raw); }
+                catch { payload["body"] = raw; }
+            }
+            else payload["body"] = raw;
+        }
     }
 
     private static (string space, string rest) SplitSpaceAndRest(string fullName)

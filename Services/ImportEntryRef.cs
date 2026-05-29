@@ -11,23 +11,30 @@ internal sealed class ImportEntryRef
 {
     public string FullName { get; }
     public string Name { get; }
+    // Absolute on-disk path for filesystem-sourced entries; null for zip
+    // entries. Doubles as the source discriminator in the lean-walk path:
+    // when non-null, related files (payload body, history.jsonl, attachment
+    // body) are DERIVED from this path and opened directly, instead of being
+    // pre-enumerated into lookup dictionaries.
+    public string? AbsolutePath { get; }
     private readonly Func<Stream> _open;
 
-    private ImportEntryRef(string fullName, Func<Stream> open)
+    private ImportEntryRef(string fullName, Func<Stream> open, string? absolutePath)
     {
         FullName = fullName;
         var slash = fullName.LastIndexOf('/');
         Name = slash < 0 ? fullName : fullName[(slash + 1)..];
         _open = open;
+        AbsolutePath = absolutePath;
     }
 
     public Stream Open() => _open();
 
     public static ImportEntryRef FromZip(ZipArchiveEntry ze)
-        => new(ze.FullName, ze.Open);
+        => new(ze.FullName, ze.Open, absolutePath: null);
 
     public static ImportEntryRef FromFile(string relativeName, string absolutePath)
-        => new(relativeName, () => File.OpenRead(absolutePath));
+        => new(relativeName, () => File.OpenRead(absolutePath), absolutePath);
 }
 
 // Source kind for an import run. Drives two behaviours that differ
