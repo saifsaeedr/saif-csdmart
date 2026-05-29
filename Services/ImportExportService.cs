@@ -808,10 +808,10 @@ public sealed class ImportExportService(
         }
         else
         {
-            NpgsqlConnection? headConn = null;
-            Db.FastImportScope? headScope = null;
+            Db.FastImportSession? headSession = null;
             if (fastUnsafeNoFkCheck)
-                (headConn, headScope) = await db.BeginFastImportSessionAsync(ct);
+                headSession = await db.BeginFastImportSessionAsync(ct);
+            var headConn = headSession?.Connection;
             try
             {
                 foreach (var ze in entries.Where(IsUserMeta))
@@ -838,52 +838,70 @@ public sealed class ImportExportService(
                     await TryImportRoleAsync(ze, results, preserveExisting, headConn, ct);
                 foreach (var ze in entries.Where(IsPermissionMeta))
                     await TryImportPermissionAsync(ze, results, preserveExisting, headConn, ct);
-                headScope?.MarkSuccess();
+                headSession?.MarkSuccess();
             }
             finally
             {
-                if (headScope is not null) await headScope.DisposeAsync();
+                if (headSession is not null) await headSession.DisposeAsync();
             }
             // Mark head done AFTER the scope disposes (commit landed).
             checkpoint?.MarkHeadDone();
         }
 
         // ---- Pass 3-5: Entries, Attachments, Histories ----
-        // Decide between parallel-per-space and serial-on-one-session. The
-        // parallel branch requires --fast (workers need their own
-        // session_replication_role='replica' sessions) AND fastParallelism>1
-        // AND more than one space worth of work (no point spinning up
-        // workers for a single space — same elapsed time, more code paths).
+        // The unit of parallelism is a SHARD, not a space. A shard is either a
+        // whole space, or a slice of one space — so a single large space (the
+        // common `--space=X --subpath=Y` remap case) still uses all N workers
+        // instead of silently running serially. Each shard owns its own fast
+        // session (connection + replica role + transaction) and commits
+        // independently; within a shard, RunBatchAsync commits per batch.
         var tailEntries = entries.Where(IsTailEntry).ToList();
         var spaceGroups = tailEntries
             .GroupBy(GetSpaceName, StringComparer.Ordinal)
             .Where(g => !string.IsNullOrEmpty(g.Key))
             .ToList();
 
-        // Resume: drop space groups the checkpoint says are already done.
-        // Only meaningful in the parallel branch below — the serial branch
-        // shares one transaction so partial tail commits aren't a thing
-        // (a crash mid-serial-tail rolls back the whole pass).
+        // Sub-sharding a single space is only safe for filesystem sources: the
+        // FS lean walk derives bodies from each meta's on-disk sibling, so an
+        // entry's meta/attachments/history are resolved independently of which
+        // shard its siblings landed in. A zip carries body files as separate
+        // archive members resolved via a per-shard lookup, so splitting a space
+        // could strand a body in another shard — keep zip at per-space shards.
+        var allowSubSharding = fastUnsafeNoFkCheck && sourceKind == ImportSourceKind.Filesystem;
+        var shards = BuildShards(spaceGroups, fastUnsafeNoFkCheck ? workers : 1, allowSubSharding);
+
+        // Resume: drop shards the checkpoint says are done. Matches the shard
+        // key AND the bare space name, so a checkpoint written by an older
+        // (per-space) run still short-circuits a now-sub-sharded space.
         if (checkpoint is not null)
         {
-            var before = spaceGroups.Count;
-            spaceGroups = spaceGroups.Where(g => !checkpoint.IsTailDone(g.Key!)).ToList();
-            if (before > spaceGroups.Count)
-                log.LogInformation("import: --resume skipping {Skipped} of {Total} space tails (already in checkpoint)",
-                    before - spaceGroups.Count, before);
+            var before = shards.Count;
+            shards = shards.Where(s => !checkpoint.IsTailDone(s.Key)
+                                       && !checkpoint.IsTailDone(BaseSpaceOf(s.Key))).ToList();
+            if (before > shards.Count)
+                log.LogInformation("import: --resume skipping {Skipped} of {Total} shards (already in checkpoint)",
+                    before - shards.Count, before);
         }
 
-        if (fastUnsafeNoFkCheck && workers > 1 && spaceGroups.Count > 1)
+        var runParallel = fastUnsafeNoFkCheck && workers > 1 && shards.Count > 1;
+        if (fastUnsafeNoFkCheck && workers > 1 && shards.Count <= 1)
+            log.LogWarning(
+                "import: --fast-parallelism={Workers} requested but the work formed a single shard "
+                + "(one space{ZipNote}, or too few entries to split) — running serially",
+                workers, sourceKind == ImportSourceKind.Zip ? ", zip source" : "");
+
+        if (shards.Count == 0)
         {
-            // Prefetch is for zip sources only. ZipArchive isn't thread-safe
-            // — workers can't concurrently call ZipArchiveEntry.Open() on
-            // entries from the shared archive ("local file header is corrupt"
-            // otherwise), so we pre-read every tail entry's bytes once on the
-            // main thread and hand workers MemoryStream views via OpenEntry.
-            // Filesystem sources skip this entirely: File.OpenRead is
-            // thread-safe and prefetching would needlessly double-buffer
-            // O(body bytes) of memory for a folder import. OpenEntry falls
-            // back to ze.Open() when the prefetch cache is unset.
+            // --resume: every shard already committed — nothing left to do.
+        }
+        else if (runParallel)
+        {
+            log.LogInformation("import: {Shards} shards across {Workers} workers", shards.Count, workers);
+            // Prefetch is for zip sources only. ZipArchive isn't thread-safe —
+            // workers can't concurrently Open() entries from the shared archive,
+            // so we pre-read every tail entry's bytes once and hand workers
+            // MemoryStream views via OpenEntry. Filesystem sources skip this:
+            // File.OpenRead is thread-safe.
             if (sourceKind == ImportSourceKind.Zip)
             {
                 var prefetched = new Dictionary<string, byte[]>(tailEntries.Count, StringComparer.Ordinal);
@@ -896,26 +914,18 @@ public sealed class ImportExportService(
                 }
                 _prefetchedBodies.Value = prefetched;
             }
-
-            // Parallel per space. Each worker owns its own
-            // BeginFastImportSessionAsync — its own connection, own
-            // session_replication_role flip, own transaction. Workers commit
-            // independently; on a worker's throw, only its space rolls back.
-            // ImportStats mutations use the Interlocked / lock-protected
-            // methods so concurrent updates don't race.
             try
             {
                 await Parallel.ForEachAsync(
-                    spaceGroups,
+                    shards,
                     new ParallelOptions { MaxDegreeOfParallelism = workers, CancellationToken = ct },
-                    async (group, ictx) =>
+                    async (shard, ictx) =>
                     {
-                        await ImportSpaceTailAsync(group.ToList(), preserveExisting, results, batchSize, validation, importTags, ictx);
-                        // Per-space tail commit landed. Record it so a
-                        // future --resume run skips this space entirely.
-                        // The MarkTailDone call is lock-protected and
-                        // atomically rewrites the sidecar JSON.
-                        checkpoint?.MarkTailDone(group.Key!);
+                        await ImportShardTailAsync(shard.Key, shard.Entries, preserveExisting, results, batchSize, validation, importTags, ictx);
+                        // Per-shard commit landed. Record it so a future
+                        // --resume skips this shard. MarkTailDone is
+                        // lock-protected and atomically rewrites the sidecar.
+                        checkpoint?.MarkTailDone(shard.Key);
                     });
             }
             finally
@@ -923,27 +933,24 @@ public sealed class ImportExportService(
                 _prefetchedBodies.Value = null;
             }
         }
+        else if (fastUnsafeNoFkCheck)
+        {
+            // Serial fast: process shards one at a time, each on its own
+            // session. Per-batch commits inside each shard (plus reconnect)
+            // make even a serial run survive a transport drop, and the
+            // per-shard checkpoint means --resume works serially too.
+            foreach (var shard in shards)
+            {
+                await ImportShardTailAsync(shard.Key, shard.Entries, preserveExisting, results, batchSize, validation, importTags, ct);
+                checkpoint?.MarkTailDone(shard.Key);
+            }
+        }
         else
         {
-            // Serial fallback. For --fast we still open a single dedicated
-            // scope for the tail passes (so bulk COPY has a session to run
-            // on and so the deferred cache invalidate at the end still works
-            // off committed data). For non-fast there's no scope — repos
-            // open their own per-call connections, identical to historical
-            // behaviour.
-            NpgsqlConnection? tailConn = null;
-            Db.FastImportScope? tailScope = null;
-            if (fastUnsafeNoFkCheck)
-                (tailConn, tailScope) = await db.BeginFastImportSessionAsync(ct);
-            try
-            {
-                await RunTailPassesAsync(tailConn, tailEntries, preserveExisting, results, batchSize, validation, importTags, ct);
-                tailScope?.MarkSuccess();
-            }
-            finally
-            {
-                if (tailScope is not null) await tailScope.DisposeAsync();
-            }
+            // Non-fast slow path: one pass over all tail entries; the repos
+            // open their own per-call connections (historical behaviour, no
+            // bulk COPY, no resume).
+            await RunTailPassesAsync(null, "serial", tailEntries, preserveExisting, results, batchSize, validation, importTags, ct);
         }
 
         // Fast mode deferred the per-role/per-permission cache invalidations
@@ -1020,13 +1027,13 @@ public sealed class ImportExportService(
         return first <= 0 ? "" : ze.FullName[..first];
     }
 
-    // Per-space worker for Round 3 parallelism. Owns its own
-    // BeginFastImportSessionAsync scope (own connection, own
-    // session_replication_role flip, own transaction). On a throw, only
-    // this worker's transaction rolls back — sibling workers committing in
-    // parallel are unaffected.
-    private async Task ImportSpaceTailAsync(
-        List<ImportEntryRef> spaceEntries,
+    // Per-shard worker. Owns its own fast session (connection, replica role,
+    // transaction). On a throw, only this shard's uncommitted work rolls back
+    // — sibling shards committing in parallel are unaffected, and the batches
+    // this shard already committed survive.
+    private async Task ImportShardTailAsync(
+        string label,
+        List<ImportEntryRef> shardEntries,
         bool preserveExisting,
         ImportStats results,
         int batchSize,
@@ -1034,29 +1041,29 @@ public sealed class ImportExportService(
         IReadOnlyList<string>? importTags,
         CancellationToken ct)
     {
-        var (conn, scope) = await db.BeginFastImportSessionAsync(ct);
+        var session = await db.BeginFastImportSessionAsync(ct);
         try
         {
-            await RunTailPassesAsync(conn, spaceEntries, preserveExisting, results, batchSize, validation, importTags, ct);
-            scope.MarkSuccess();
+            await RunTailPassesAsync(session, label, shardEntries, preserveExisting, results, batchSize, validation, importTags, ct);
+            session.MarkSuccess();
         }
         finally
         {
-            await scope.DisposeAsync();
+            await session.DisposeAsync();
         }
     }
 
     // Runs Pass 3 (entries), Pass 4 (attachments), Pass 5 (histories) for a
-    // given entry slice on a given connection. The connection is
-    // optional: when null we're on the slow (non-fast) path and the repos
-    // each open their own connection per call. When non-null we're inside a
-    // fast scope (single-session, replica mode) and bulk COPY kicks in.
+    // given entry slice. `session` is optional: null on the slow (non-fast)
+    // path, where the repos open their own connection per call. When non-null
+    // we're in a fast session (replica mode) and bulk COPY kicks in, flushing
+    // each batch through session.RunBatchAsync (commit-per-batch + reconnect).
     //
-    // Used by BOTH the serial fallback (one slice = all tail entries on one
-    // session) AND the per-space parallel worker (one slice = one space's
-    // tail entries on its own session).
+    // Used by BOTH the non-fast serial pass (session null, all tail entries)
+    // AND the per-shard worker (session non-null, one shard's tail entries).
     private async Task RunTailPassesAsync(
-        NpgsqlConnection? conn,
+        Db.FastImportSession? session,
+        string label,
         IReadOnlyList<ImportEntryRef> zes,
         bool preserveExisting,
         ImportStats results,
@@ -1065,33 +1072,35 @@ public sealed class ImportExportService(
         IReadOnlyList<string>? importTags,
         CancellationToken ct)
     {
+        // In fast mode the session owns the connection. The connection handed
+        // to the per-row Try* helpers below is only a bulk-mode SIGNAL
+        // (non-null ⇒ collect into the bulk list and return without I/O), so a
+        // stale reference after a reconnect is never dereferenced. The bulk
+        // flushes and the history pass read session.Connection at point of use.
+        var bulk = session is not null;
+        var signalConn = session?.Connection;
+
         // ---- Pass 3: Entries (including folders) ----
         var bodyLookup = new Dictionary<string, ImportEntryRef>(StringComparer.Ordinal);
         foreach (var ze in zes)
             if (!ze.FullName.Contains("/.dm/", StringComparison.Ordinal))
                 bodyLookup[ze.FullName] = ze;
 
-        // Bulk COPY mode kicks in when we have a fast-import connection in
-        // hand. Without one (slow path) the per-row Upsert path is used.
-        //
-        // The bulkEntries accumulator is flushed every `batchSize` rows
-        // rather than once at the end — without this, a single space with
-        // millions of entries holds every parsed Entry (with inlined JSON
-        // payload bodies) in RAM until the loop completes. At ~10 KB avg
-        // payload and 10k batch size, peak per-batch is ~100 MB; the full
-        // import is bounded regardless of total entry count.
-        var bulkEntries = conn is not null ? new List<Entry>(batchSize) : null;
+        // The bulkEntries accumulator is flushed every `batchSize` rows rather
+        // than once at the end — without this, a single shard with millions of
+        // entries holds every parsed Entry (with inlined JSON payload bodies)
+        // in RAM until the loop completes. At ~10 KB avg payload and 10k batch
+        // size, peak per-batch is ~100 MB; the import is bounded regardless of
+        // total entry count. Each flush is also a durable commit boundary.
+        var bulkEntries = bulk ? new List<Entry>(batchSize) : null;
         foreach (var ze in zes.Where(IsEntryMeta))
         {
-            await TryImportEntryAsync(ze, bodyLookup, results, preserveExisting, conn, bulkEntries, validation, importTags, ct);
+            await TryImportEntryAsync(ze, bodyLookup, results, preserveExisting, signalConn, bulkEntries, validation, importTags, ct);
             if (bulkEntries is { Count: > 0 } && bulkEntries.Count >= batchSize)
-            {
-                await BulkInsertEntriesAsync(conn!, bulkEntries, preserveExisting, results, ct);
-                bulkEntries.Clear();
-            }
+                await FlushEntriesAsync(session!, label, bulkEntries, preserveExisting, results, ct);
         }
         if (bulkEntries is { Count: > 0 })
-            await BulkInsertEntriesAsync(conn!, bulkEntries, preserveExisting, results, ct);
+            await FlushEntriesAsync(session!, label, bulkEntries, preserveExisting, results, ct);
 
         // ---- Pass 4: Attachments ----
         var attachmentBodies = new Dictionary<string, ImportEntryRef>(StringComparer.Ordinal);
@@ -1099,20 +1108,25 @@ public sealed class ImportExportService(
             if (ze.FullName.Contains("/attachments.", StringComparison.Ordinal) && !ze.Name.StartsWith("meta.", StringComparison.Ordinal))
                 attachmentBodies[ze.FullName] = ze;
 
-        var bulkAttachments = conn is not null ? new List<Attachment>(batchSize) : null;
+        var bulkAttachments = bulk ? new List<Attachment>(batchSize) : null;
         foreach (var ze in zes.Where(IsAttachmentMeta))
         {
-            await TryImportAttachmentAsync(ze, attachmentBodies, results, preserveExisting, conn, bulkAttachments, ct);
+            await TryImportAttachmentAsync(ze, attachmentBodies, results, preserveExisting, signalConn, bulkAttachments, ct);
             if (bulkAttachments is { Count: > 0 } && bulkAttachments.Count >= batchSize)
-            {
-                await BulkInsertAttachmentsAsync(conn!, bulkAttachments, preserveExisting, results, ct);
-                bulkAttachments.Clear();
-            }
+                await FlushAttachmentsAsync(session!, label, bulkAttachments, preserveExisting, results, ct);
         }
         if (bulkAttachments is { Count: > 0 })
-            await BulkInsertAttachmentsAsync(conn!, bulkAttachments, preserveExisting, results, ct);
+            await FlushAttachmentsAsync(session!, label, bulkAttachments, preserveExisting, results, ct);
 
         // ---- Pass 5: Histories ----
+        // History append is NOT idempotent (every line inserts a fresh row), so
+        // it deliberately skips the per-batch commit + replay path: it runs in
+        // the session's trailing transaction, committed once at shard end
+        // (MarkSuccess ⇒ DisposeAsync). A crash before that commit rolls the
+        // whole history slice back, so a --resume re-run can't double-insert.
+        // Read session.Connection HERE so we pick up any connection swapped in
+        // by a reconnect during Pass 3/4 — never a cached reference.
+        var histConn = session?.Connection;
         // Zip: history.jsonl files are explicit members of the entry list.
         // FS lean walk: history.jsonl was never enumerated (we walked only
         // meta.*.json), so derive it as the meta's SIBLING for each
@@ -1120,7 +1134,7 @@ public sealed class ImportExportService(
         // exclusive — zip refs have no AbsolutePath, and an FS metas-only
         // list contains no history.jsonl members — so neither double-imports.
         foreach (var ze in zes.Where(z => z.Name == "history.jsonl"))
-            await TryImportHistoryAsync(ze, results, conn, ct);
+            await TryImportHistoryAsync(ze, results, histConn, ct);
         foreach (var ze in zes.Where(z => z.AbsolutePath is not null && IsHistoryBearingMeta(z)))
         {
             var dir = Path.GetDirectoryName(ze.AbsolutePath);
@@ -1132,8 +1146,127 @@ public sealed class ImportExportService(
             // from a zip-listed history.jsonl.
             var slash = ze.FullName.LastIndexOf('/');
             var histFull = (slash < 0 ? "" : ze.FullName[..slash]) + "/history.jsonl";
-            await TryImportHistoryAsync(ImportEntryRef.FromFile(histFull, historyDisk), results, conn, ct);
+            await TryImportHistoryAsync(ImportEntryRef.FromFile(histFull, historyDisk), results, histConn, ct);
         }
+    }
+
+    // Flush one entry batch as a durable, reconnect-safe unit, then apply its
+    // stats deltas (only after the commit lands, so a replay can't double-
+    // count) and clear the accumulator. The batch list is cleared AFTER
+    // RunBatchAsync returns because a transport replay re-runs the body against
+    // the same rows.
+    private async Task FlushEntriesAsync(
+        Db.FastImportSession session, string label, List<Entry> batch,
+        bool preserveExisting, ImportStats results, CancellationToken ct)
+    {
+        var (affected, skipped) = await session.RunBatchAsync(
+            (c, t) => BulkInsertEntriesAsync(c, batch, preserveExisting, t), log, ct);
+        results.AddEntries(affected);
+        if (preserveExisting) results.AddSkipped(skipped);
+        batch.Clear();
+        log.LogInformation("import[{Label}]: entries committed +{Batch} (total {Total})",
+            label, affected, results.EntriesInserted);
+    }
+
+    private async Task FlushAttachmentsAsync(
+        Db.FastImportSession session, string label, List<Attachment> batch,
+        bool preserveExisting, ImportStats results, CancellationToken ct)
+    {
+        var (affected, skipped) = await session.RunBatchAsync(
+            (c, t) => BulkInsertAttachmentsAsync(c, batch, preserveExisting, t), log, ct);
+        results.AddAttachments(affected);
+        if (preserveExisting) results.AddSkipped(skipped);
+        batch.Clear();
+        log.LogInformation("import[{Label}]: attachments committed +{Batch} (total {Total})",
+            label, affected, results.AttachmentsInserted);
+    }
+
+    // ---- Shard partitioning ----------------------------------------------
+    //
+    // Build the list of shards to dispatch. A shard is a (key, entries) pair.
+    // When sub-sharding is allowed and there's spare worker capacity, a single
+    // space is split into up to N sub-shards so one big space saturates the
+    // worker pool; otherwise each space is its own shard.
+    private static List<(string Key, List<ImportEntryRef> Entries)> BuildShards(
+        List<IGrouping<string, ImportEntryRef>> spaceGroups, int workers, bool allowSubSharding)
+    {
+        var shards = new List<(string Key, List<ImportEntryRef> Entries)>();
+        // Sub-shards per space: 1 when serial, when sub-sharding is disallowed
+        // (zip), or when there are already ≥workers spaces (the pool is full of
+        // spaces); otherwise split each space so the shards total ≈ workers.
+        var subShards = !allowSubSharding || workers <= 1 || spaceGroups.Count >= workers
+            ? 1
+            : Math.Max(1, workers / Math.Max(1, spaceGroups.Count));
+        foreach (var g in spaceGroups)
+        {
+            if (subShards <= 1)
+            {
+                shards.Add((g.Key!, g.ToList()));
+                continue;
+            }
+            var buckets = new List<ImportEntryRef>[subShards];
+            for (var i = 0; i < subShards; i++) buckets[i] = new List<ImportEntryRef>();
+            foreach (var ze in g)
+                buckets[ShardIndexFor(ze, subShards)].Add(ze);
+            for (var i = 0; i < subShards; i++)
+                if (buckets[i].Count > 0)
+                    shards.Add(($"{g.Key}#{i}", buckets[i]));
+        }
+        return shards;
+    }
+
+    // Strip the "#index" suffix BuildShards appends to a sub-sharded space, so
+    // a checkpoint written by an older per-space run still matches.
+    private static string BaseSpaceOf(string shardKey)
+    {
+        var h = shardKey.IndexOf('#');
+        return h < 0 ? shardKey : shardKey[..h];
+    }
+
+    // Assign a tail entry to one of `count` sub-shards.
+    //
+    // INVARIANT: an entry's meta, its attachment metas, and its body files must
+    // land in the SAME shard — Pass 4/5 resolve those from the meta's directory
+    // (and, for zip, a per-shard body lookup), so splitting them across shards
+    // would let two workers race on one logical entry / strand a body. We hash
+    // the "{space}/{subpath}/.dm/{shortname}" prefix that all of an entry's
+    // files share, NOT the full path.
+    //
+    // PARTITIONING STRATEGY is a deliberate trade-off (see plan). This default
+    // is hash-of-group-key:
+    //   * stable across runs (a FIXED hash, not string.GetHashCode which is
+    //     per-process randomized) ⇒ --resume re-derives the same shards;
+    //   * co-locates an entry's siblings;
+    //   * NOT size-balanced — a shard may draw the fat-payload entries.
+    // Alternatives: round-robin (count-balanced, unstable) or greedy
+    // size-balanced (best balance, more bookkeeping). Swap this body to change
+    // the trade-off.
+    private static int ShardIndexFor(ImportEntryRef ze, int count)
+    {
+        var key = ShardGroupKey(ze.FullName);
+        // FNV-1a (32-bit) — a stable hash so the same path maps to the same
+        // shard on every run, which is what makes per-shard --resume sound.
+        uint h = 2166136261;
+        foreach (var c in key)
+        {
+            h ^= c;
+            h *= 16777619;
+        }
+        return (int)(h % (uint)count);
+    }
+
+    // The "{...}/.dm/{shortname}" prefix shared by an entry's meta, attachment
+    // metas, body files, and history. Every tail path sits under exactly one
+    // "/.dm/" segment; the segment immediately after it is the owning entry's
+    // shortname (or, for a folder's own meta, its filename — folders are
+    // sparse, so grouping them by their .dm dir is harmless).
+    private static string ShardGroupKey(string fullName)
+    {
+        var dm = fullName.IndexOf("/.dm/", StringComparison.Ordinal);
+        if (dm < 0) return fullName;   // defensive; tail metas always have /.dm/
+        var afterDm = dm + "/.dm/".Length;
+        var nextSlash = fullName.IndexOf('/', afterDm);
+        return nextSlash < 0 ? fullName[..afterDm] : fullName[..nextSlash];
     }
 
     // A meta whose directory may carry a sibling history.jsonl: entry,
@@ -1832,9 +1965,12 @@ public sealed class ImportExportService(
         query_policies = EXCLUDED.query_policies
         """;
 
-    private static async Task BulkInsertEntriesAsync(
+    // Returns (Affected, Skipped) rather than mutating ImportStats: the caller
+    // (FlushEntriesAsync) applies the deltas only after the batch commits, so a
+    // transport replay of this body can't double-count.
+    private static async Task<(int Affected, int Skipped)> BulkInsertEntriesAsync(
         NpgsqlConnection conn, List<Entry> rows, bool preserveExisting,
-        ImportStats st, CancellationToken ct)
+        CancellationToken ct)
     {
         // Compute query_policies up front — the per-row UpsertAsync does this
         // inside its own scope; the bulk path must replicate it because the
@@ -1862,8 +1998,9 @@ public sealed class ImportExportService(
                 await WriteNullableJsonbAsync(writer, JsonbHelpers.ToJsonb(e.Displayname), ct);
                 await WriteNullableJsonbAsync(writer, JsonbHelpers.ToJsonb(e.Description), ct);
                 await writer.WriteAsync(JsonbHelpers.ToJsonbList(e.Tags), NpgsqlDbType.Jsonb, ct);
-                await writer.WriteAsync(e.CreatedAt == default ? now : e.CreatedAt, NpgsqlDbType.TimestampTz, ct);
-                await writer.WriteAsync(e.UpdatedAt == default ? now : e.UpdatedAt, NpgsqlDbType.TimestampTz, ct);
+                // TIMESTAMP (without time zone) columns — write tz-less.
+                await writer.WriteAsync(TimeUtils.Naive(e.CreatedAt == default ? now : e.CreatedAt), NpgsqlDbType.Timestamp, ct);
+                await writer.WriteAsync(TimeUtils.Naive(e.UpdatedAt == default ? now : e.UpdatedAt), NpgsqlDbType.Timestamp, ct);
                 await writer.WriteAsync(e.OwnerShortname, NpgsqlDbType.Text, ct);
                 await WriteNullableTextAsync(writer, e.OwnerGroupShortname, ct);
                 await WriteNullableJsonbAsync(writer, JsonbHelpers.ToJsonb(e.Acl), ct);
@@ -1893,22 +2030,19 @@ public sealed class ImportExportService(
             : $"INSERT INTO entries ({EntryCopyColumns}) SELECT {EntryCopyColumns} FROM _imp_entries "
                 + $"ON CONFLICT (shortname, space_name, subpath) DO UPDATE SET {EntryConflictSet}";
 
+        // affected = inserted + (updated when not preserveExisting).
+        // preserveExisting=true: DO NOTHING means skipped rows aren't in `affected`.
+        int affected;
         await using (var merge = new NpgsqlCommand(mergeSql, conn))
-        {
-            var affected = await merge.ExecuteNonQueryAsync(ct);
-            // affected = inserted + (updated when not preserveExisting).
-            // preserveExisting=true: DO NOTHING means skipped rows aren't in `affected`.
-            st.AddEntries(affected);
-            if (preserveExisting) st.AddSkipped(rows.Count - affected);
-        }
+            affected = await merge.ExecuteNonQueryAsync(ct);
 
-        // The temp table is `ON COMMIT DROP` and we're inside the fast-import
-        // transaction — but the same import will reuse this connection for
-        // the next bulk pass (attachments) in the same transaction, so the
-        // table is still around. Drop explicitly to release the OID and to
-        // keep the helpers self-contained (caller-order independent).
+        // The temp table is `ON COMMIT DROP`, so the per-batch commit would
+        // drop it anyway — but drop explicitly to release the OID promptly and
+        // keep the helper self-contained (caller-order independent).
         await using (var drop = new NpgsqlCommand("DROP TABLE _imp_entries", conn))
             await drop.ExecuteNonQueryAsync(ct);
+
+        return (affected, preserveExisting ? rows.Count - affected : 0);
     }
 
     private const string AttachmentCopyColumns =
@@ -1936,9 +2070,11 @@ public sealed class ImportExportService(
         state = EXCLUDED.state
         """;
 
-    private static async Task BulkInsertAttachmentsAsync(
+    // See BulkInsertEntriesAsync — returns deltas instead of mutating stats so
+    // the caller applies them only post-commit (replay-safe).
+    private static async Task<(int Affected, int Skipped)> BulkInsertAttachmentsAsync(
         NpgsqlConnection conn, List<Attachment> rows, bool preserveExisting,
-        ImportStats st, CancellationToken ct)
+        CancellationToken ct)
     {
         var now = TimeUtils.Now();
 
@@ -1961,8 +2097,9 @@ public sealed class ImportExportService(
                 await WriteNullableJsonbAsync(writer, JsonbHelpers.ToJsonb(a.Displayname), ct);
                 await WriteNullableJsonbAsync(writer, JsonbHelpers.ToJsonb(a.Description), ct);
                 await writer.WriteAsync(JsonbHelpers.ToJsonbList(a.Tags), NpgsqlDbType.Jsonb, ct);
-                await writer.WriteAsync(a.CreatedAt == default ? now : a.CreatedAt, NpgsqlDbType.TimestampTz, ct);
-                await writer.WriteAsync(a.UpdatedAt == default ? now : a.UpdatedAt, NpgsqlDbType.TimestampTz, ct);
+                // TIMESTAMP (without time zone) columns — write tz-less.
+                await writer.WriteAsync(TimeUtils.Naive(a.CreatedAt == default ? now : a.CreatedAt), NpgsqlDbType.Timestamp, ct);
+                await writer.WriteAsync(TimeUtils.Naive(a.UpdatedAt == default ? now : a.UpdatedAt), NpgsqlDbType.Timestamp, ct);
                 await writer.WriteAsync(a.OwnerShortname, NpgsqlDbType.Text, ct);
                 await WriteNullableTextAsync(writer, a.OwnerGroupShortname, ct);
                 await WriteNullableJsonbAsync(writer, JsonbHelpers.ToJsonb(a.Acl), ct);
@@ -1984,15 +2121,14 @@ public sealed class ImportExportService(
             : $"INSERT INTO attachments ({AttachmentCopyColumns}) SELECT {AttachmentCopyColumns} FROM _imp_attachments "
                 + $"ON CONFLICT (shortname, space_name, subpath) DO UPDATE SET {AttachmentConflictSet}";
 
+        int affected;
         await using (var merge = new NpgsqlCommand(mergeSql, conn))
-        {
-            var affected = await merge.ExecuteNonQueryAsync(ct);
-            st.AddAttachments(affected);
-            if (preserveExisting) st.AddSkipped(rows.Count - affected);
-        }
+            affected = await merge.ExecuteNonQueryAsync(ct);
 
         await using (var drop = new NpgsqlCommand("DROP TABLE _imp_attachments", conn))
             await drop.ExecuteNonQueryAsync(ct);
+
+        return (affected, preserveExisting ? rows.Count - affected : 0);
     }
 
     // Small adapters so the per-column WriteAsync loop above stays compact.

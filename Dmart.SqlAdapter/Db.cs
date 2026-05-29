@@ -73,6 +73,9 @@ public sealed class DmartDbOptions
     public int MaxOverflow { get; set; } = 10;
     public int PoolTimeout { get; set; } = 30;
     public int PoolRecycle { get; set; } = 300;
+    // Seconds of socket inactivity before a keepalive probe; keeps long-idle
+    // connections alive through firewall/NAT reapers. 0 disables.
+    public int Keepalive { get; set; } = 30;
 
     public string ResolveConnectionString()
     {
@@ -88,6 +91,11 @@ public sealed class DmartDbOptions
             Timeout = PoolTimeout,
             ConnectionIdleLifetime = PoolRecycle,
         };
+        if (Keepalive > 0)
+        {
+            csb.KeepAlive = Keepalive;
+            csb.TcpKeepAlive = true;
+        }
         return csb.ConnectionString;
     }
 }
