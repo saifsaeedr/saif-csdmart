@@ -2,7 +2,6 @@ using Dmart.Auth;
 using Dmart.Config;
 using Dmart.DataAdapters.Sql;
 using Dmart.Services;
-using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
 namespace Dmart.Cli;
@@ -64,7 +63,14 @@ internal static class CliBootstrap
     // the dedicated DI graph would not propagate to instances built here.
     public static ImportExportService BuildImportExportService(DmartSettings s, Db db)
     {
-        var nlog = NullLoggerFactory.Instance;
+        // Real (not null) logger so a long `dmart import` shows progress —
+        // shard fan-out, per-batch commit counts, reconnect warnings — instead
+        // of running silently for hours. A minimal stderr provider keeps this
+        // AOT-safe (the generic AddConsoleFormatter<,> the serve path avoids is
+        // never touched) and gives clean human-readable lines.
+        var nlog = LoggerFactory.Create(b => b
+            .SetMinimumLevel(LogLevel.Information)
+            .AddProvider(new StderrLoggerProvider(LogLevel.Information)));
         var refresher = new AuthzCacheRefresher();
         var entryRepo = new EntryRepository(db);
         var userRepo = new UserRepository(db, refresher, new SessionTokenHasher(s));
@@ -80,5 +86,31 @@ internal static class CliBootstrap
             db,
             Options.Create(s),
             nlog.CreateLogger<ImportExportService>());
+    }
+
+    // Minimal AOT-safe console logger: writes Information+ messages to stderr
+    // as plain "info: <message>" / "warn: <message>" lines. No reflection, no
+    // generic formatter — safe under NativeAOT. stderr (not stdout) so import
+    // progress doesn't intermingle with any machine-readable stdout a caller
+    // might capture.
+    private sealed class StderrLoggerProvider(LogLevel min) : ILoggerProvider
+    {
+        public ILogger CreateLogger(string categoryName) => new StderrLogger(min);
+        public void Dispose() { }
+
+        private sealed class StderrLogger(LogLevel min) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+            public bool IsEnabled(LogLevel level) => level >= min && level != LogLevel.None;
+
+            public void Log<TState>(LogLevel level, EventId eventId, TState state,
+                Exception? exception, Func<TState, Exception?, string> formatter)
+            {
+                if (!IsEnabled(level)) return;
+                var tag = level >= LogLevel.Error ? "error" : level >= LogLevel.Warning ? "warn" : "info";
+                Console.Error.WriteLine($"{tag}: {formatter(state, exception)}");
+                if (exception is not null) Console.Error.WriteLine($"  {exception.Message}");
+            }
+        }
     }
 }

@@ -42,6 +42,13 @@ public sealed class DmartSettings
     public int DatabaseMaxOverflow { get; set; } = 10;
     public int DatabasePoolTimeout { get; set; } = 30;
     public int DatabasePoolRecycle { get; set; } = 1800;
+    // Seconds of socket inactivity before Npgsql sends a keepalive probe (and
+    // enables OS TCP keepalive). Keeps long-idle connections alive through
+    // firewall/NAT idle reapers and lets a dead peer be detected promptly —
+    // the failure mode that aborted multi-hour `dmart import --fast` runs,
+    // where the connection sat idle for minutes between batches while the
+    // filesystem walk read the next slice. 0 disables (Npgsql default).
+    public int DatabaseKeepalive { get; set; } = 30;
 
     // AdminPassword is read ONLY by AdminBootstrap when the dmart admin row
     // is being created for the first time (or exists but has no password

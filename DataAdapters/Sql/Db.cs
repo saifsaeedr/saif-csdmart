@@ -32,91 +32,192 @@ public sealed class Db(IOptions<DmartSettings> settings)
         return c;
     }
 
-    // Opens a single connection and sets `session_replication_role = 'replica'`
-    // on it — bypasses FK constraints AND user-defined triggers for every
-    // statement issued on that session. Used by `dmart import --fast` to
-    // turn the import zip into a trusted bulk load: every UpsertAsync issued
-    // by the import threads this connection in, so the SET stays in effect
-    // for the whole import. The returned `Scope` restores the default and
-    // disposes the connection on `await using`, so a mid-import throw still
-    // leaves the session reset.
+    // Opens a fast-import session: a dedicated connection in
+    // session_replication_role='replica' (bypasses FK constraints AND
+    // user-defined triggers for every statement on the session) with an open
+    // transaction. Used by `dmart import --fast` to turn the source into a
+    // trusted bulk load.
+    //
+    // Unlike a single import-long transaction, the session commits at BATCH
+    // boundaries via RunBatchAsync, so a transport drop costs only the
+    // in-flight batch — and the session transparently reconnects and replays
+    // the batch (the bulk merge is idempotent under ON CONFLICT, and prior
+    // batches are already committed). This is what lets a multi-hour import
+    // survive a firewall/NAT idle reset or a briefly-restarted server instead
+    // of discarding hours of work. The SET is session-level (not LOCAL), so it
+    // persists across the per-batch commits and is re-applied after a reconnect.
     //
     // Hard-fails with a clear InvalidOperationException if the caller's DB
     // role can't set session_replication_role (requires superuser OR the
     // pg_session_replication_role predefined role since PG 14). No silent
-    // fallback — the operator explicitly opted into `--fast` and should hear
-    // about it when their role can't honour it.
-    public async Task<(NpgsqlConnection Conn, FastImportScope Scope)> BeginFastImportSessionAsync(CancellationToken ct = default)
+    // fallback — the operator explicitly opted into `--fast`.
+    public async Task<FastImportSession> BeginFastImportSessionAsync(CancellationToken ct = default)
     {
-        var conn = await OpenAsync(ct);
-        NpgsqlTransaction? tx = null;
-        try
-        {
-            await using (var cmd = new NpgsqlCommand("SET session_replication_role = 'replica'", conn))
-                await cmd.ExecuteNonQueryAsync(ct);
-            // One transaction for the whole import — collapses N row-level
-            // implicit COMMITs (and their fsyncs) into one final COMMIT.
-            // Npgsql auto-associates this transaction with any NpgsqlCommand
-            // built on `conn`, so the repos don't need to know about it.
-            tx = await conn.BeginTransactionAsync(ct);
-        }
-        catch (PostgresException ex)
-        {
-            if (tx is not null) await tx.DisposeAsync();
-            await conn.DisposeAsync();
-            throw new InvalidOperationException(
-                "dmart import --fast requires the DB role to be superuser or hold "
-                + $"pg_session_replication_role; SET session_replication_role failed: {ex.MessageText}",
-                ex);
-        }
-        catch
-        {
-            if (tx is not null) await tx.DisposeAsync();
-            await conn.DisposeAsync();
-            throw;
-        }
-        return (conn, new FastImportScope(conn, tx));
+        var session = new FastImportSession(this);
+        await session.OpenAsync(ct);
+        return session;
     }
 
-    // Scope returned by BeginFastImportSessionAsync. The import calls MarkSuccess()
-    // exactly once if the whole 5-pass body finished without an unhandled throw;
-    // DisposeAsync commits on success, rolls back otherwise. Per-row failures the
-    // import collects into `results.Failed` are NOT throws and should NOT prevent
-    // the commit — the operator still gets the partial result they would have
-    // gotten without --fast.
-    public sealed class FastImportScope(NpgsqlConnection conn, NpgsqlTransaction tx) : IAsyncDisposable
+    // A reconnectable, batch-committing import session. The import calls
+    // RunBatchAsync once per bulk batch (durable + retryable), then MarkSuccess()
+    // before disposing so the trailing transaction (e.g. the non-idempotent
+    // history slice, which deliberately runs outside the per-batch path) is
+    // committed. Per-row failures the import collects into `results.Failed` are
+    // NOT throws and don't prevent the commit.
+    public sealed class FastImportSession : IAsyncDisposable
     {
+        private readonly Db _db;
+        private NpgsqlConnection _conn = null!;
+        private NpgsqlTransaction _tx = null!;
         private bool _success;
+
+        internal FastImportSession(Db db) => _db = db;
+
+        // The live connection. NOT stable across a reconnect — callers issuing
+        // DB I/O must read this at the point of use, never cache it, or a
+        // mid-run reconnect hands them a disposed connection.
+        public NpgsqlConnection Connection => _conn;
+
+        internal async Task OpenAsync(CancellationToken ct)
+        {
+            _conn = await _db.OpenAsync(ct);
+            try
+            {
+                await SetReplicaRoleAsync(_conn, ct);
+                // Npgsql auto-associates the open transaction with any
+                // NpgsqlCommand built on _conn, so the repos and bulk helpers
+                // don't need to know about it.
+                _tx = await _conn.BeginTransactionAsync(ct);
+            }
+            catch (PostgresException ex)
+            {
+                await _conn.DisposeAsync();
+                throw new InvalidOperationException(
+                    "dmart import --fast requires the DB role to be superuser or hold "
+                    + $"pg_session_replication_role; SET session_replication_role failed: {ex.MessageText}",
+                    ex);
+            }
+            catch
+            {
+                await _conn.DisposeAsync();
+                throw;
+            }
+        }
+
         public void MarkSuccess() => _success = true;
+
+        // Run one batch as its own durable unit: execute `body` in the current
+        // transaction, COMMIT it, then open a fresh transaction for the next
+        // batch. On a TRANSPORT-level failure (connection reset, socket/IO
+        // error — NOT a PostgresException, which is a deterministic server-side
+        // rejection that replay won't fix) the dead connection is replaced and
+        // `body` is replayed. Safe because prior batches are already committed
+        // and the bulk merge is idempotent (ON CONFLICT). `body` returns its
+        // stats deltas; the caller applies them only AFTER this returns, so a
+        // replay can't double-count.
+        public async Task<T> RunBatchAsync<T>(
+            Func<NpgsqlConnection, CancellationToken, Task<T>> body,
+            ILogger? log, CancellationToken ct)
+        {
+            const int maxAttempts = 5;
+            for (var attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    var result = await body(_conn, ct);
+                    await _tx.CommitAsync(ct);
+                    await _tx.DisposeAsync();
+                    _tx = await _conn.BeginTransactionAsync(ct);
+                    return result;
+                }
+                catch (Exception ex) when (attempt < maxAttempts && IsTransient(ex) && !ct.IsCancellationRequested)
+                {
+                    log?.LogWarning(ex,
+                        "import: transport error on batch (attempt {Attempt}/{Max}); reconnecting",
+                        attempt, maxAttempts);
+                    // Exponential backoff capped at 5s — a NAT reaper or a
+                    // restarting server may need a beat before a fresh
+                    // connection is accepted.
+                    await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(5000, 200 * (1 << (attempt - 1)))), ct);
+                    await ReconnectAsync(ct);
+                }
+            }
+        }
+
+        // Replace a dead connection with a fresh one in replica mode + open tx.
+        // The old tx/conn are disposed best-effort — they're already broken.
+        private async Task ReconnectAsync(CancellationToken ct)
+        {
+            try { await _tx.DisposeAsync(); }   catch { /* already broken */ }
+            try { await _conn.DisposeAsync(); } catch { /* already broken */ }
+            _conn = await _db.OpenAsync(ct);
+            await SetReplicaRoleAsync(_conn, ct);
+            _tx = await _conn.BeginTransactionAsync(ct);
+        }
 
         public async ValueTask DisposeAsync()
         {
             try
             {
-                if (_success) await tx.CommitAsync();
-                else          await tx.RollbackAsync();
+                if (_success) await _tx.CommitAsync();
+                else          await _tx.RollbackAsync();
             }
             catch
             {
-                // Best-effort: a broken connection at this point means the
-                // transaction is already aborted server-side. Continue to
-                // restore the session role and dispose.
+                // Best-effort: a broken connection means the transaction is
+                // already aborted server-side. Continue to restore the role.
             }
             finally
             {
-                await tx.DisposeAsync();
+                await _tx.DisposeAsync();
             }
             try
             {
-                await using var cmd = new NpgsqlCommand("SET session_replication_role = DEFAULT", conn);
+                await using var cmd = new NpgsqlCommand("SET session_replication_role = DEFAULT", _conn);
                 await cmd.ExecuteNonQueryAsync();
             }
             catch
             {
-                // Same reasoning as the transaction dispose above.
+                // Same reasoning as above.
             }
-            await conn.DisposeAsync();
+            await _conn.DisposeAsync();
         }
+
+        private static async Task SetReplicaRoleAsync(NpgsqlConnection conn, CancellationToken ct)
+        {
+            await using var cmd = new NpgsqlCommand("SET session_replication_role = 'replica'", conn);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+
+        // Is this a lost/unusable connection (reconnect + replay is right) or a
+        // deterministic server rejection (replay won't help — let it abort)?
+        // A dropped connection reaches us two ways: as a raw transport error
+        // (NpgsqlException "Exception while reading from stream" / socket / IO),
+        // OR as a PostgresException whose SQLSTATE is a connection-failure class
+        // — e.g. 57P01 when a firewall/idle reaper or `pg_terminate_backend`
+        // tears down the backend, or a class-08 connection exception. Everything
+        // else (constraint violations, bad SQL) is deterministic and must NOT
+        // retry, or we'd burn the retry budget masking a real error.
+        private static bool IsTransient(Exception ex)
+        {
+            for (Exception? e = ex; e is not null; e = e.InnerException)
+            {
+                if (e is PostgresException pg) return IsConnectionFailureState(pg.SqlState);
+                if (e is NpgsqlException or System.Net.Sockets.SocketException or System.IO.IOException or TimeoutException)
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool IsConnectionFailureState(string? sqlState) => sqlState switch
+        {
+            // Class 08 — connection exception.
+            "08000" or "08003" or "08006" or "08001" or "08004" or "08007" or "08P01"
+            // Class 57 — operator intervention that tears down the connection
+            // (admin terminate, crash shutdown, cannot-connect-now).
+            or "57P01" or "57P02" or "57P03" => true,
+            _ => false,
+        };
     }
 
     // Runs a transactional operation with bounded retry on PG 40P01 (deadlock
@@ -181,6 +282,15 @@ public sealed class Db(IOptions<DmartSettings> settings)
             Timeout = s.DatabasePoolTimeout,
             ConnectionIdleLifetime = s.DatabasePoolRecycle,
         };
+        // Protocol keepalive (an idle-time SELECT 1) keeps NAT/firewall flow
+        // state warm and surfaces a dead peer quickly; TcpKeepAlive adds the
+        // OS-level SO_KEEPALIVE so a half-open socket during a long COPY is
+        // detected too. Both off when DatabaseKeepalive is 0.
+        if (s.DatabaseKeepalive > 0)
+        {
+            csb.KeepAlive = s.DatabaseKeepalive;
+            csb.TcpKeepAlive = true;
+        }
         return csb.ConnectionString;
     }
 }

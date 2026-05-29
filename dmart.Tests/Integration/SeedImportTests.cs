@@ -18,10 +18,31 @@ namespace Dmart.Tests.Integration;
 // command builds, runs ImportZipAsync, and asserts every shipped sample
 // space landed in the spaces table — together with surfacing per-record
 // failures so the fix can target the actual cause.
-public class SeedImportTests : IClassFixture<DmartFactory>
+public class SeedImportTests : IClassFixture<DmartFactory>, IAsyncLifetime
 {
     private readonly DmartFactory _factory;
     public SeedImportTests(DmartFactory factory) => _factory = factory;
+
+    // GUID-named scratch spaces created by the tests below. The suite shares
+    // one live DB with no per-run reset, so a test that imports a throwaway
+    // space MUST delete it — otherwise the spaces table accumulates hundreds
+    // of leftovers that push real spaces past the QuerySpaces Limit=100 page
+    // and break unrelated tests. Registered here, dropped in DisposeAsync
+    // (which xunit runs after every test, even on assertion failure).
+    private readonly List<string> _scratchSpaces = new();
+
+    public Task InitializeAsync() => Task.CompletedTask;
+
+    public async Task DisposeAsync()
+    {
+        if (_scratchSpaces.Count == 0) return;
+        var spaceRepo = _factory.Services.GetRequiredService<SpaceRepository>();
+        foreach (var space in _scratchSpaces)
+        {
+            try { await spaceRepo.DeleteAsync(space); }
+            catch { /* best-effort cleanup — never fail a passing test on teardown */ }
+        }
+    }
 
     [FactIfPg]
     public async Task Seed_Imports_All_Three_Sample_Spaces_Including_Personal()
@@ -90,6 +111,7 @@ public class SeedImportTests : IClassFixture<DmartFactory>
         // run keeps this independent of the shipped seed/ tree and of any
         // concurrent test that might be touching `applications` etc.
         var spaceName = $"force_upsert_{Guid.NewGuid():N}";
+        _scratchSpaces.Add(spaceName);
         const string entryName = "thing";
         const string originalDesc = "original-description";
         const string updatedDesc = "updated-description";
@@ -143,6 +165,7 @@ public class SeedImportTests : IClassFixture<DmartFactory>
         var entryRepo = sp.GetRequiredService<EntryRepository>();
 
         var spaceName = $"fast_bulk_{Guid.NewGuid():N}";
+        _scratchSpaces.Add(spaceName);
         const string entryName = "thing";
         const string description = "fast-bulk-test-description";
 
@@ -189,6 +212,9 @@ public class SeedImportTests : IClassFixture<DmartFactory>
         var spaceA = $"fast_par_a_{stamp}";
         var spaceB = $"fast_par_b_{stamp}";
         var spaceC = $"fast_par_c_{stamp}";
+        _scratchSpaces.Add(spaceA);
+        _scratchSpaces.Add(spaceB);
+        _scratchSpaces.Add(spaceC);
 
         var ms = new MemoryStream();
         using (var ar = new ZipArchive(ms, ZipArchiveMode.Create, leaveOpen: true))
