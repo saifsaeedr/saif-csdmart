@@ -505,7 +505,7 @@ public sealed class ImportExportService(
     /// stripped, <c>""</c> or <c>"/"</c> means "directly under the space
     /// root". Required when <paramref name="targetSpace"/> is set.
     /// </param>
-    public async Task<Response> ImportFolderAsync(string folderPath, string? actor, bool preserveExisting, bool fastUnsafeNoFkCheck, int fastParallelism, int batchSize = DefaultBatchSize, string? targetSpace = null, string? targetSubpath = null, bool resume = false, string? checkpointPath = null, DateTime? sinceUtc = null, bool validate = true, string? issuesFilePath = null, bool skipHistory = false, IReadOnlyList<string>? importTags = null, string? fromListPath = null, string? saveListPath = null, CancellationToken ct = default)
+    public async Task<Response> ImportFolderAsync(string folderPath, string? actor, bool preserveExisting, bool fastUnsafeNoFkCheck, int fastParallelism, int batchSize = DefaultBatchSize, string? targetSpace = null, string? targetSubpath = null, bool resume = false, string? checkpointPath = null, DateTime? sinceUtc = null, bool validate = true, string? issuesFilePath = null, bool skipHistory = false, IReadOnlyList<string>? importTags = null, string? fromListPath = null, string? saveListPath = null, IReadOnlyList<string>? includeSpaces = null, CancellationToken ct = default)
     {
         _ = actor;
         if (!Directory.Exists(folderPath))
@@ -603,6 +603,18 @@ public sealed class ImportExportService(
         // working set ~3x and, under --since, stats only metas (the correct
         // mtime, fewer inode reads). The downstream inline/history/attachment
         // points derive + open those siblings directly when AbsolutePath is set.
+        // --spaces: keep only entries whose top-level space folder (the first
+        // path segment, relative to the spaces-root we're walking) is selected.
+        // The source root must be the parent that holds {space}/… dirs, so the
+        // first segment IS the space name. Applied during the walk / list read
+        // so unselected spaces are never stat'd or added. matchedSpaces lets us
+        // warn about a requested space that matched nothing (typo / wrong root).
+        var spaceFilter = includeSpaces is { Count: > 0 }
+            ? new HashSet<string>(includeSpaces, StringComparer.Ordinal) : null;
+        var matchedSpaces = spaceFilter is not null ? new HashSet<string>(StringComparer.Ordinal) : null;
+        if (spaceFilter is not null)
+            log.LogInformation("import: --spaces filter active — keeping only [{Spaces}]", string.Join(", ", spaceFilter));
+
         var entries = new List<ImportEntryRef>();
         if (!string.IsNullOrEmpty(fromListPath))
         {
@@ -617,6 +629,12 @@ public sealed class ImportExportService(
                 log.LogInformation("import: --from-list supplied — ignoring --since (the list is the decided set)");
             foreach (var rel in ImportWorkList.Read(fromListPath))
             {
+                if (spaceFilter is not null)
+                {
+                    var sp = FirstPathSegment(rel);
+                    if (!spaceFilter.Contains(sp)) continue;
+                    matchedSpaces!.Add(sp);
+                }
                 var abs = Path.Combine(folderPath, rel.Replace('/', Path.DirectorySeparatorChar));
                 entries.Add(ImportEntryRef.FromFile(prefix + rel, abs));
             }
@@ -630,6 +648,15 @@ public sealed class ImportExportService(
             {
                 var rel = Path.GetRelativePath(folderPath, abs).Replace(Path.DirectorySeparatorChar, '/');
                 if (ShouldSkip(rel)) continue;
+
+                // --spaces: skip entries outside the selected top-level spaces
+                // (before the stat below, so unselected spaces cost nothing).
+                if (spaceFilter is not null)
+                {
+                    var sp = FirstPathSegment(rel);
+                    if (!spaceFilter.Contains(sp)) continue;
+                    matchedSpaces!.Add(sp);
+                }
 
                 // --since: drop entries whose file mtime is older than the cutoff.
                 // One stat() per surviving path; no file read. Uses mtime as a
@@ -671,6 +698,19 @@ public sealed class ImportExportService(
                 log.LogInformation(
                     "import: --since kept {Kept} entries, skipped {MtimeSkipped} by mtime",
                     entries.Count, mtimeSkipped);
+        }
+
+        if (spaceFilter is not null)
+        {
+            // Warn loudly when a requested space matched nothing — almost always
+            // a typo or the wrong import root (e.g. pointing at a space folder
+            // instead of the spaces-root parent), which would otherwise be a
+            // silent no-op.
+            var missing = spaceFilter.Where(s => !matchedSpaces!.Contains(s)).ToList();
+            if (missing.Count > 0)
+                log.LogWarning("import: --spaces found no entries for [{Missing}] — check the name and that the import path is the parent spaces-root",
+                    string.Join(", ", missing));
+            log.LogInformation("import: --spaces kept {Count} entries across {Matched} space(s)", entries.Count, matchedSpaces!.Count);
         }
 
         // --skip-history is enforced in Pass 5 (RunTailPassesAsync), NOT here:
@@ -1091,6 +1131,15 @@ public sealed class ImportExportService(
     {
         var first = ze.FullName.IndexOf('/');
         return first <= 0 ? "" : ze.FullName[..first];
+    }
+
+    // First path segment of a source-relative path — the top-level space folder
+    // (e.g. "galleon/.dm/meta.space.json" → "galleon"). Used by the --spaces
+    // filter, where the import root is the parent holding {space}/… dirs.
+    private static string FirstPathSegment(string relativePath)
+    {
+        var slash = relativePath.IndexOf('/');
+        return slash < 0 ? relativePath : relativePath[..slash];
     }
 
     // Runs one shard and records its outcome, isolating real failures from
