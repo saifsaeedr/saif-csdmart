@@ -130,11 +130,20 @@ public sealed class Db(IOptions<DmartSettings> settings)
                     _tx = await _conn.BeginTransactionAsync(ct);
                     return result;
                 }
-                catch (Exception ex) when (attempt < maxAttempts && IsTransient(ex) && !ct.IsCancellationRequested)
+                // Retry on either an explicitly transient exception OR a dead
+                // connection (State != Open). The latter catches the case where
+                // a prior reconnect's connection later broke and Npgsql surfaces
+                // it as `InvalidOperationException("Connection is not open")` on
+                // the next command — IsTransient doesn't recognize that flavor,
+                // but the state check is authoritative: if the connection isn't
+                // open, the only path forward is a fresh one + replay.
+                catch (Exception ex) when (attempt < maxAttempts
+                                           && (IsTransient(ex) || _conn.State != System.Data.ConnectionState.Open)
+                                           && !ct.IsCancellationRequested)
                 {
                     log?.LogWarning(ex,
-                        "import: transport error on batch (attempt {Attempt}/{Max}); reconnecting",
-                        attempt, maxAttempts);
+                        "import: transport error on batch (attempt {Attempt}/{Max}, conn state {State}); reconnecting",
+                        attempt, maxAttempts, _conn.State);
                     // Exponential backoff capped at 5s — a NAT reaper or a
                     // restarting server may need a beat before a fresh
                     // connection is accepted.
