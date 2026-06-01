@@ -38,9 +38,9 @@ public class TrustedProxiesTests
     {
         var (proxies, networks) = new DmartSettings
         {
-            // not-an-ip → dropped; 10.0.0.0/999 → invalid prefix; 10.0.0.5/24 →
-            // non-canonical (host bits set) → dropped; only 1.2.3.4 survives.
-            TrustedProxies = "not-an-ip, 1.2.3.4, 10.0.0.0/999, 10.0.0.5/24",
+            // not-an-ip → dropped; 10.0.0.0/999 → prefix out of range → dropped;
+            // 999.0.0.0/8 → invalid address → dropped; only 1.2.3.4 survives.
+            TrustedProxies = "not-an-ip, 1.2.3.4, 10.0.0.0/999, 999.0.0.0/8",
         }.ParseTrustedProxies();
 
         proxies.Select(p => p.ToString()).ShouldBe(new[] { "1.2.3.4" });
