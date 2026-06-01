@@ -22,10 +22,6 @@ namespace Dmart.Models.Api;
 // but field-level handler↔DTO drift is not automatically detected —
 // spot-check against the handler when editing either side.
 
-// /user/reset — admin invokes against a target user; mints a fresh
-// invitation and resets failed-login counters.
-public sealed record ResetUserBody(string Shortname);
-
 // /user/validate_password — verify the current user's password without
 // mutating anything. Used by UIs gating sensitive flows.
 public sealed record ValidatePasswordBody(string Password);

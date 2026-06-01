@@ -31,7 +31,6 @@ public static class RequestHandler
                                   AccessRepository access, SpaceRepository spaces,
                                   AttachmentRepository attachments, PasswordHasher hasher,
                                   Plugins.PluginManager plugins, PermissionService perms,
-                                  InvitationService invitations,
                                   UniquenessValidator uniqueness,
                                   HistoryRepository history,
                                   IOptions<DmartSettings> dmartSettings,
@@ -162,7 +161,7 @@ public static class RequestHandler
                         {
                             RequestType.Create =>
                                 await DispatchCreateAsync(rec, req.SpaceName, actor,
-                                    entries, users, access, spaces, attachments, hasher, perms, invitations, uniqueness, ct),
+                                    entries, users, access, spaces, attachments, hasher, perms, uniqueness, ct),
                             RequestType.Delete =>
                                 await DispatchDeleteAsync(rec, req.SpaceName, actor, managementSpace,
                                     entries, users, access, spaces, attachments, perms, ct),
@@ -307,7 +306,7 @@ public static class RequestHandler
         Record rec, string space, string actor,
         EntryService entries, UserRepository users, AccessRepository access,
         SpaceRepository spaces, AttachmentRepository attachments, PasswordHasher hasher,
-        PermissionService perms, InvitationService invitations,
+        PermissionService perms,
         UniquenessValidator uniqueness, CancellationToken ct)
     {
         rec = ResolveAutoShortname(rec);
@@ -347,7 +346,7 @@ public static class RequestHandler
         switch (rec.ResourceType)
         {
             case ResourceType.User:
-                return await CreateUserAsync(rec, space, actor, users, hasher, invitations, uniqueness, ct);
+                return await CreateUserAsync(rec, space, actor, users, hasher, uniqueness, ct);
             case ResourceType.Role:
                 return await CreateRoleAsync(rec, space, actor, access, uniqueness, ct);
             case ResourceType.Permission:
@@ -388,7 +387,7 @@ public static class RequestHandler
 
     private static async Task<(Response Response, Record UpdatedRecord)> CreateUserAsync(
         Record rec, string space, string actor, UserRepository users, PasswordHasher hasher,
-        InvitationService invitations, UniquenessValidator uniqueness, CancellationToken ct)
+        UniquenessValidator uniqueness, CancellationToken ct)
     {
         var attrs = rec.Attributes ?? new();
         var existing = await users.GetByShortnameAsync(rec.Shortname, ct);
@@ -450,17 +449,6 @@ public static class RequestHandler
             UpdatedAt = TimeUtils.Now(),
         };
         await users.UpsertAsync(user, ct);
-
-        // Python parity: api/managed/utils.py::send_sms_email_invitation runs
-        // after db.save when the resource is a User. Mint an invitation per
-        // unverified channel that has an identifier set. MintAsync swallows
-        // and logs gateway/db failures internally so a downed SMS/SMTP
-        // gateway never rolls back the already-persisted user row;
-        // OperationCanceledException still propagates so request abort works.
-        if (!user.IsMsisdnVerified && !string.IsNullOrEmpty(user.Msisdn))
-            await invitations.MintAsync(user, InvitationChannel.Sms, ct);
-        if (!user.IsEmailVerified && !string.IsNullOrEmpty(user.Email))
-            await invitations.MintAsync(user, InvitationChannel.Email, ct);
 
         return (Response.Ok(),
             WithCreatedMetaAttributes(rec, user.Uuid, user.CreatedAt, user.UpdatedAt, user.OwnerShortname));

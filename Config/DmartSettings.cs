@@ -19,10 +19,6 @@ public sealed class DmartSettings
     // the same thing in Python dmart and csdmart.
     public int JwtAccessExpires { get; set; } = 30 * 86400;
     public int JwtRefreshDays { get; set; } = 30;
-    // Invitation tokens (minted via /user/reset or on user creation) live for
-    // this many days. Python's jwt_access_expires default is 30 days for the
-    // same payload, so we match.
-    public int JwtInvitationDays { get; set; } = 30;
 
     // Full Npgsql connection string. If unset, Db builds one from the
     // individual DATABASE_* components below (matching Python's behavior
@@ -139,13 +135,6 @@ public sealed class DmartSettings
     public bool MockSmppApi { get; set; }
 
     // ---- External SMS gateway (Python parity) ----
-    // Base URL the CXB front-end uses to assemble invitation links that are
-    // delivered via SMS/email. Python substitutes this into the template
-    //   {invitation_link}/auth/invitation?invitation={token}&lang={lang}&user-type={type}
-    // Leave empty to disable invitation-URL assembly (C# still returns the
-    // raw JWT on the HTTP response when delivery is not configured).
-    public string InvitationLink { get; set; } = "";
-
     // HTTP "auth-key" header value sent on every call to the SMS gateway
     // endpoints below. Mirrors Python's `smpp_auth_key` — gateway-specific.
     public string SmppAuthKey { get; set; } = "";
@@ -165,9 +154,8 @@ public sealed class DmartSettings
     // server logs (dev) or via MOCK_OTP_CODE (when MOCK_SMPP_API=true).
     public string SendSmsOtpApi { get; set; } = "";
 
-    // POST endpoint the general SMS flow calls (e.g. to deliver invitation
-    // links to msisdn users). Python: `send_sms_api`. Same request shape as
-    // `SendSmsOtpApi`. Empty disables outbound SMS for invitation delivery.
+    // POST endpoint the general SMS flow calls. Python: `send_sms_api`. Same
+    // request shape as `SendSmsOtpApi`. Empty disables outbound general SMS.
     public string SendSmsApi { get; set; } = "";
 
     // ---- Embeddings (for semantic search) ----
@@ -344,8 +332,8 @@ public sealed class DmartSettings
     public string CatUrl { get; set; } = "/cat";
 
     // ---- SMTP email gateway (Python parity) ----
-    // Used by OtpProvider to deliver email OTP codes and by InvitationService
-    // once email channels are enabled. When MailHost is empty the sender logs
+    // Used by OtpProvider to deliver email OTP codes. When MailHost is empty
+    // the sender logs
     // a warning and falls back to the on-server log (same failure mode as the
     // SMS sender). MockSmtpApi short-circuits delivery for dev/CI.
     //

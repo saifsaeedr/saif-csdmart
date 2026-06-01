@@ -15,7 +15,6 @@ public static class InternalErrorCode
     public const int USER_ACCOUNT_LOCKED          = 110;
     public const int USER_ISNT_VERIFIED           = 11;
     public const int USERNAME_NOT_EXIST           = 18;
-    public const int INVALID_INVITATION           = 125;
     public const int INVALID_PASSWORD_RULES       = 17;
     public const int PASSWORD_NOT_VALIDATED       = 13;
     public const int PASSWORD_RESET_ERROR         = 102;

@@ -1603,7 +1603,6 @@ builder.Services.AddSingleton<HistoryRepository>();
 builder.Services.AddSingleton<LockRepository>();
 builder.Services.AddSingleton<LinkRepository>();
 builder.Services.AddSingleton<OtpRepository>();
-builder.Services.AddSingleton<InvitationRepository>();
 builder.Services.AddSingleton<HealthCheckRepository>();
 builder.Services.AddSingleton<SpaceRepository>();
 
@@ -1669,7 +1668,6 @@ builder.Services.AddHttpContextAccessor();
 builder.Services.AddSingleton<SpaceEventLogger>();
 builder.Services.AddSingleton<PluginManager>();
 builder.Services.AddSingleton<LanguageLoader>();
-builder.Services.AddSingleton<ActivationTemplateLoader>();
 builder.Services.AddSingleton<LockService>();
 builder.Services.AddSingleton<ShortLinkService>();
 builder.Services.AddSingleton<CsvService>();
@@ -1679,10 +1677,8 @@ builder.Services.AddSingleton<WsConnectionManager>();
 
 // Auth
 builder.Services.AddSingleton<JwtIssuer>();
-builder.Services.AddSingleton<InvitationJwt>();
 builder.Services.AddSingleton<SmsSender>();
 builder.Services.AddSingleton<SmtpSender>();
-builder.Services.AddSingleton<InvitationService>();
 builder.Services.AddSingleton<PasswordHasher>();
 builder.Services.AddSingleton<SessionTokenHasher>(sp =>
     new SessionTokenHasher(sp.GetRequiredService<IOptions<DmartSettings>>().Value));
@@ -2118,12 +2114,8 @@ Dmart.Api.Mcp.McpEndpoint.MapMcp(app);
 app.MapWebSocket();
 
 // Load embedded translation files once at startup (LanguageLoader is the
-// single source of truth for invitation/reset SMS bodies).
+// single source of truth for OTP/SMS message bodies).
 app.Services.GetRequiredService<LanguageLoader>().Load();
-// Activation-email body template (Scriban). Embedded default with optional
-// ~/.dmart/ActivationEmailContent.txt override; parsed once here so renders
-// inside the invitation hot path don't pay the parse cost.
-app.Services.GetRequiredService<ActivationTemplateLoader>().Load();
 
 // Load plugins + mount API plugin routes
 {

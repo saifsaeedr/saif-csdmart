@@ -16,8 +16,6 @@ public sealed class UserService(
     OtpRepository otp,
     PasswordHasher hasher,
     JwtIssuer jwt,
-    InvitationJwt invitationJwt,
-    InvitationRepository invitations,
     HistoryRepository history,
     PluginManager plugins,
     IOptions<DmartSettings> settings,
@@ -363,87 +361,11 @@ public sealed class UserService(
         return await ProcessLoginAsync(user, req, requestHeaders, ct);
     }
 
-    // Invitation-token login. Mirrors Python's login() PATH A (invitation).
-    //
-    // Wire contract (Python parity):
-    //   * Body carries `invitation` = full JWT string minted earlier. No password.
-    //   * JWT payload is `{data:{shortname, channel}, expires:<unix>}` — see
-    //     InvitationJwt for the exact encoding.
-    //   * The JWT MUST correspond to a live row in the invitations table —
-    //     replays after consumption fail with INVALID_INVITATION.
-    //   * If the body includes shortname/email/msisdn cross-checks, at least
-    //     one must match the user record resolved from the JWT's shortname claim.
-    //   * On success: set ForcePasswordChange=true; set IsEmailVerified or
-    //     IsMsisdnVerified based on the JWT's channel claim; delete the
-    //     invitation row; issue access/refresh tokens via ProcessLoginAsync.
-    public async Task<Result<(string Access, string Refresh, User User)>> LoginWithInvitationAsync(
-        UserLoginRequest req, Dictionary<string, string>? requestHeaders = null, CancellationToken ct = default)
-    {
-        // Python emits `type=jwtauth` for every invitation failure so clients
-        // can distinguish token problems from plain auth failures.
-        if (string.IsNullOrWhiteSpace(req.Invitation))
-            return Result<(string, string, User)>.Fail(
-                InternalErrorCode.INVALID_INVITATION, "Expired or invalid invitation", ErrorTypes.JwtAuth);
-
-        if (!invitationJwt.TryVerify(req.Invitation, out var shortname, out var channel))
-            return Result<(string, string, User)>.Fail(
-                InternalErrorCode.INVALID_INVITATION, "Expired or invalid invitation", ErrorTypes.JwtAuth);
-
-        // DB row is the single-use enforcement — a consumed or never-minted
-        // JWT is rejected even if the signature and expiry check out.
-        var storedValue = await invitations.GetValueAsync(req.Invitation, ct);
-        if (storedValue is null)
-            return Result<(string, string, User)>.Fail(
-                InternalErrorCode.INVALID_INVITATION, "Expired or invalid invitation", ErrorTypes.JwtAuth);
-
-        var user = await users.GetByShortnameAsync(shortname, ct);
-        if (user is null)
-            return Result<(string, string, User)>.Fail(
-                InternalErrorCode.INVALID_INVITATION, "Expired or invalid invitation", ErrorTypes.JwtAuth);
-        if (RejectIfNotActive(user) is { } inactiveReject) return inactiveReject;
-
-        // Optional body-level cross-check: if the client passed shortname/email/msisdn
-        // alongside the JWT, at least one must line up with the resolved user.
-        var anyMatch =
-               (req.Shortname is not null && string.Equals(req.Shortname, user.Shortname, StringComparison.Ordinal))
-            || (req.Email is not null && string.Equals(req.Email, user.Email, StringComparison.OrdinalIgnoreCase))
-            || (req.Msisdn is not null && string.Equals(req.Msisdn, user.Msisdn, StringComparison.Ordinal));
-        var anyProvided = req.Shortname is not null || req.Email is not null || req.Msisdn is not null;
-        if (anyProvided && !anyMatch)
-            return Result<(string, string, User)>.Fail(
-                InternalErrorCode.INVALID_INVITATION, "Invalid invitation or data provided", ErrorTypes.JwtAuth);
-
-        // Device lock checks — same enforcement as password login.
-        if (user.LockedToDevice && !string.IsNullOrEmpty(user.DeviceId)
-            && (string.IsNullOrEmpty(req.DeviceId) || req.DeviceId != user.DeviceId))
-        {
-            return Result<(string, string, User)>.Fail(
-                InternalErrorCode.USER_ACCOUNT_LOCKED,
-                "This account is locked to a unique device !", ErrorTypes.Auth);
-        }
-
-        var updated = user with
-        {
-            ForcePasswordChange = true,
-            IsEmailVerified = channel == InvitationChannel.Email ? true : user.IsEmailVerified,
-            IsMsisdnVerified = channel == InvitationChannel.Sms   ? true : user.IsMsisdnVerified,
-            UpdatedAt = TimeUtils.Now(),
-        };
-        await users.UpsertAsync(updated, ct);
-
-        // Single-use — delete BEFORE ProcessLoginAsync so a crash in session
-        // setup still consumes the invitation (safer to re-auth with a new
-        // invitation than to allow a replay).
-        await invitations.DeleteAsync(req.Invitation, ct);
-
-        return await ProcessLoginAsync(updated, req, requestHeaders, ct);
-    }
-
-    // Shared inactive-user gate for LoginAsync / LoginWithOtpAsync /
-    // LoginWithInvitationAsync. Returns a pre-built rejection Result when
+    // Shared inactive-user gate for LoginAsync / LoginWithOtpAsync.
+    // Returns a pre-built rejection Result when
     // the account is deactivated (user was never verified, or was manually
     // disabled), null when the user can proceed. Centralizing the message
-    // prevents drift between the three login paths — clients branch on
+    // prevents drift between the two login paths — clients branch on
     // the exact string via tsdmart.
     // Python parity: `api/user/router.py::login` raises
     // USER_ACCOUNT_LOCKED(110) "Account has been locked." when is_active=false
@@ -504,7 +426,7 @@ public sealed class UserService(
     // Shared post-authentication flow. Mirrors Python's process_user_login().
     // Internal rather than private: OAuth handlers (GoogleProvider / Facebook /
     // Apple) resolve a User on their own, then need to issue session + JWT
-    // through the same code path as password/OTP/invitation login. Keeping it
+    // through the same code path as password/OTP login. Keeping it
     // internal localizes exposure to the assembly while allowing reuse.
     internal async Task<Result<(string Access, string Refresh, User User)>> ProcessLoginAsync(
         User user, UserLoginRequest req,
@@ -638,7 +560,7 @@ public sealed class UserService(
             //     first without prior-secret knowledge
             //   * force_password_change is NOT set — an admin-reset user
             //     mid-flow bypasses the old-password check so they can pick
-            //     a fresh password using only the invitation/reset token.
+            //     a fresh password without proving the old one.
             //     A side-effect of this gate: force_password_change=true users
             //     can't trip the lockout counter via /user/profile because
             //     the wrong-old_password branch never runs for them.

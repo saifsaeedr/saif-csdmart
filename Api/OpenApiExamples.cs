@@ -1,6 +1,6 @@
 using System.Text.Json.Nodes;
 using Dmart.Models.Api;
-// Docs-only request DTOs (ResetUserBody, SemanticSearchBody, …) live in
+// Docs-only request DTOs (SemanticSearchBody, ProfileUpdateBody, …) live in
 // Dmart.Models.Api as well; the explicit using above already covers them.
 
 namespace Dmart.Api;
@@ -13,7 +13,7 @@ namespace Dmart.Api;
 //
 // Adding a new request body type? Drop a (typeof(T), JsonNode) entry here
 // and the OpenAPI schema transformer will surface it. The docs-only
-// request DTOs (ResetUserBody, SemanticSearchBody, ...) live in DocsDtos.cs.
+// request DTOs (SemanticSearchBody, ProfileUpdateBody, ...) live in DocsDtos.cs.
 internal static class OpenApiExamples
 {
     // Built lazily and cached: JsonNode is mutable and the OpenAPI
@@ -81,12 +81,6 @@ internal static class OpenApiExamples
                 "displayname": { "en": "New User" },
                 "roles": []
               }
-            }
-            """)!,
-
-        [typeof(ResetUserBody)] = JsonNode.Parse("""
-            {
-              "shortname": "alibaba"
             }
             """)!,
 

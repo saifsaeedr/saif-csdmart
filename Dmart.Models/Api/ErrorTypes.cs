@@ -16,8 +16,8 @@ public static class ErrorTypes
     // Login/session/token failures — reserved for the authentication layer.
     public const string Auth = "auth";
 
-    // JWT-specific failure (invitation tokens, malformed bearer tokens,
-    // old_password mismatch on profile updates) — Python distinguishes
+    // JWT-specific failure (malformed bearer tokens, old_password mismatch
+    // on profile updates) — Python distinguishes
     // this from "auth" because different clients route it differently.
     public const string JwtAuth = "jwtauth";
 

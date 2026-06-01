@@ -50,7 +50,6 @@ namespace Dmart.Models.Json;
 // exist so the OpenAPI generator can emit a stable schema, and the
 // source-gen resolver (used as the default TypeInfoResolver in
 // Program.cs) needs to know them.
-[JsonSerializable(typeof(ResetUserBody))]
 [JsonSerializable(typeof(ValidatePasswordBody))]
 [JsonSerializable(typeof(ProfileUpdateBody))]
 [JsonSerializable(typeof(SemanticSearchBody))]

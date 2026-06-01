@@ -232,7 +232,7 @@ public static class OAuthHandlers
         // last_login tracking, and max_sessions enforcement.
         var req = new UserLoginRequest(
             Shortname: user.Shortname,
-            Email: null, Msisdn: null, Password: null, Invitation: null);
+            Email: null, Msisdn: null, Password: null);
 
         var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var h in http.Request.Headers)

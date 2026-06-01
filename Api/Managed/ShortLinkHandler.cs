@@ -11,11 +11,11 @@ public static class ShortLinkHandler
     {
         // Resolver: GET /managed/s/{token} → 302 redirect.
         // Python parity: api/managed/router.py::shoting_url has no JWTBearer
-        // dependency — invitation/reset SMS recipients follow this link before
+        // dependency — short-link recipients follow this link before
         // they have a session, so the /managed group's RequireAuthorization()
         // must be opted out of here. The auth-by-ip limiter (Program.cs:1126)
         // is reused: this endpoint sits on the same anti-abuse surface as the
-        // auth endpoints (anonymous, used by invitation/reset flows), so a
+        // auth endpoints (anonymous), so a
         // separate budget would just duplicate the policy.
         g.MapGet("/s/{token}", async (string token, ShortLinkService svc, CancellationToken ct) =>
         {
