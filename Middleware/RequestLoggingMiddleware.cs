@@ -23,7 +23,10 @@ public static class RequestLoggingMiddleware
     // Header names that never belong in a log (case-insensitive).
     private static readonly HashSet<string> RedactedHeaders = new(StringComparer.OrdinalIgnoreCase)
     {
-        "authorization", "cookie", "set-cookie", "x-api-key",
+        // `location` is here because OAuth redirect callbacks (e.g. Apple web)
+        // put a session JWT in the redirect URL — without redaction the
+        // long-lived token would be captured verbatim in the access log.
+        "authorization", "cookie", "set-cookie", "x-api-key", "location",
     };
 
     // Body field names that carry secrets — redacted at any nesting level.
@@ -157,10 +160,10 @@ public static class RequestLoggingMiddleware
                 ["user_shortname"] = user,
                 ["request"] = new Dictionary<string, object?>
                 {
-                    ["url"] = $"{ctx.Request.Scheme}://{ctx.Request.Host.Value}{ctx.Request.Path}{ctx.Request.QueryString}",
+                    ["url"] = $"{ctx.Request.Scheme}://{ctx.Request.Host.Value}{ctx.Request.Path}{RedactedQueryString(ctx.Request.Query)}",
                     ["verb"] = ctx.Request.Method,
                     ["path"] = ctx.Request.Path.Value ?? "",
-                    ["query_params"] = ctx.Request.Query.ToDictionary(kv => kv.Key, kv => (object?)kv.Value.ToString()),
+                    ["query_params"] = RedactQueryParams(ctx.Request.Query),
                     ["headers"] = RedactHeaders(ctx.Request.Headers),
                     ["body"] = RedactBody(requestBody),
                 },
@@ -239,7 +242,7 @@ public static class RequestLoggingMiddleware
         _ => e.ToString(),
     };
 
-    private static Dictionary<string, object?> RedactHeaders(IHeaderDictionary headers)
+    internal static Dictionary<string, object?> RedactHeaders(IHeaderDictionary headers)
     {
         var result = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
         foreach (var h in headers)
@@ -247,6 +250,24 @@ public static class RequestLoggingMiddleware
             result[h.Key] = RedactedHeaders.Contains(h.Key) ? "******" : (object?)h.Value.ToString();
         }
         return result;
+    }
+
+    // Query strings carry secrets too — OAuth provider `code`, and any
+    // `?access_token=`/`?token=` callback param. The body-field redaction set
+    // is reused so a key like `code` is masked wherever it appears.
+    internal static Dictionary<string, object?> RedactQueryParams(IQueryCollection query)
+    {
+        var result = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var kv in query)
+            result[kv.Key] = RedactedBodyFields.Contains(kv.Key) ? "******" : (object?)kv.Value.ToString();
+        return result;
+    }
+
+    internal static string RedactedQueryString(IQueryCollection query)
+    {
+        if (query.Count == 0) return "";
+        return "?" + string.Join("&", query.Select(kv =>
+            $"{kv.Key}={(RedactedBodyFields.Contains(kv.Key) ? "******" : kv.Value.ToString())}"));
     }
 
     private static object? RedactBody(object? body) => body switch
