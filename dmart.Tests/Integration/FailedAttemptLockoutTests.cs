@@ -44,7 +44,7 @@ public sealed class FailedAttemptLockoutTests : IClassFixture<DmartFactory>
         try
         {
             var (type, code, _) = await ExpectLoginFailureAsync(
-                new UserLoginRequest(shortname, null, null, null, null, Otp: "000000"));
+                new UserLoginRequest(shortname, null, null, null, Otp: "000000"));
             type.ShouldBe("auth");
             code.ShouldBe(InternalErrorCode.OTP_INVALID);
 
@@ -70,7 +70,7 @@ public sealed class FailedAttemptLockoutTests : IClassFixture<DmartFactory>
             await SetAttemptCountAsync(shortname, max - 1);
 
             var (type, code, msg) = await ExpectLoginFailureAsync(
-                new UserLoginRequest(shortname, null, null, null, null, Otp: "000000"));
+                new UserLoginRequest(shortname, null, null, null, Otp: "000000"));
             type.ShouldBe("auth");
             code.ShouldBe(InternalErrorCode.USER_ACCOUNT_LOCKED);
             msg.ShouldBe(LockoutMessage);
@@ -94,7 +94,7 @@ public sealed class FailedAttemptLockoutTests : IClassFixture<DmartFactory>
             await SetAttemptCountAsync(shortname, max);
 
             var (type, code, msg) = await ExpectLoginFailureAsync(
-                new UserLoginRequest(shortname, null, null, null, null, Otp: "000000"));
+                new UserLoginRequest(shortname, null, null, null, Otp: "000000"));
             type.ShouldBe("auth");
             code.ShouldBe(InternalErrorCode.USER_ACCOUNT_LOCKED);
             msg.ShouldBe(LockoutMessage);
@@ -125,7 +125,7 @@ public sealed class FailedAttemptLockoutTests : IClassFixture<DmartFactory>
             await SetAttemptCountAsync(shortname, max - 1);
 
             var (type, code, msg) = await ExpectLoginFailureAsync(
-                new UserLoginRequest(shortname, null, null, "WrongPassword1", null, Otp: otp));
+                new UserLoginRequest(shortname, null, null, "WrongPassword1", Otp: otp));
             type.ShouldBe("auth");
             code.ShouldBe(InternalErrorCode.USER_ACCOUNT_LOCKED);
             msg.ShouldBe(LockoutMessage);

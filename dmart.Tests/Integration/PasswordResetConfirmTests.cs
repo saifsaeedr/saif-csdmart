@@ -95,7 +95,7 @@ public sealed class PasswordResetConfirmTests : IClassFixture<DmartFactory>
             // calls VerifyAndConsumeAsync(bareMsisdn, code) — that key has no
             // row, so login must fail.
             var loginResp = await client.PostAsJsonAsync("/user/login",
-                new UserLoginRequest(null, null, msisdn, null, null, code),
+                new UserLoginRequest(null, null, msisdn, null, code),
                 DmartJsonContext.Default.UserLoginRequest);
             loginResp.IsSuccessStatusCode.ShouldBeFalse(
                 "reset OTP at pwd-reset:{msisdn} must not authenticate a login");
