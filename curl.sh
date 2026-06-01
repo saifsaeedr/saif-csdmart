@@ -543,9 +543,6 @@ RESP=$(curl -s -H "$AUTH_HEADER" -H "$CT" \
     "$API_URL/managed/request")
 expect_success "Verify user email/msisdn:" "$RESP"
 
-RESP=$(curl -s -H "$AUTH_HEADER" -H "$CT" -d '{"shortname":"distributor"}' "$API_URL/user/reset")
-expect_success "Reset user (admin /user/reset):" "$RESP"
-
 RESP=$(curl -s -H "$AUTH_HEADER" -H "$CT" \
     -d "{\"space_name\":\"management\",\"request_type\":\"delete\",\"records\":[{\"resource_type\":\"user\",\"subpath\":\"users\",\"shortname\":\"distributor\",\"attributes\":{}}]}" \
     "$API_URL/managed/request")

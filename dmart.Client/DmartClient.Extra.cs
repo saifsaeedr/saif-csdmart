@@ -88,14 +88,6 @@ public sealed partial class DmartClient
         return await SendEnvelopeAsync(req, ct).ConfigureAwait(false);
     }
 
-    // POST /user/reset — admin action: force-reset user status.
-    public async Task<Response> UserResetAsync(string shortname, CancellationToken ct = default)
-    {
-        var body = new Dictionary<string, object?> { ["shortname"] = shortname };
-        using var req = BuildRequest(HttpMethod.Post, "/user/reset", Json(body));
-        return await SendEnvelopeAsync(req, ct).ConfigureAwait(false);
-    }
-
     // POST /user/validate_password — server-side password-policy check.
     public async Task<Response> ValidatePasswordAsync(string password, CancellationToken ct = default)
     {
