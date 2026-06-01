@@ -26,7 +26,7 @@ install/run/CLI — this folder goes into the **how** and **why**.
 - **`Services/`** — Domain layer. One service per concern (`UserService`, `QueryService`, `PermissionService`, `EntryService`, `WorkflowService`, `ImportExportService`, etc.). No HTTP, no SQL — just orchestration.
 - **`DataAdapters/Sql/`** — Npgsql repositories, one per table. `QueryHelper.cs` is shared search/sort/ACL/aggregation SQL generation.
 - **`Models/`** — Flat records. `Api/` = wire DTOs, `Core/` = domain entities, `Enums/` = `[EnumMember]`-tagged enums, `Json/` = source-gen `DmartJsonContext`.
-- **`Auth/`** — Password hashing (Argon2id), JWT issuer, invitation JWT, OAuth providers (Google/Facebook/Apple), JwtBearer setup, OTP provider, password rules.
+- **`Auth/`** — Password hashing (Argon2id), JWT issuer, OAuth providers (Google/Facebook/Apple), JwtBearer setup, OTP provider, password rules.
 - **`Middleware/`** — Custom ASP.NET middleware (CXB SPA + static, request logging, response headers, WebSocket).
 - **`Plugins/`** — `PluginManager`, `IHookPlugin`/`IApiPlugin` interfaces, built-in plugins in `BuiltIn/`, native `.so` loader in `Native/`.
 - **`Config/`** — `DmartSettings`, strict dotenv validator, `SettingsSerializer` (redacts secrets for `/info/settings`).

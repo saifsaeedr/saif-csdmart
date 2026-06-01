@@ -77,7 +77,6 @@ flowchart TD
         EntrySvc[EntryService]
         WorkflowSvc[WorkflowService]
         SchemaVal[SchemaValidator]
-        Invitation[InvitationService]
         ImportExport[ImportExportService]
         Embedding[EmbeddingService]
     end
@@ -91,7 +90,6 @@ flowchart TD
         HistRepo[HistoryRepository]
         LockRepo[LockRepository]
         OtpRepo[OtpRepository]
-        InvRepo[InvitationRepository]
         CntRepo[CountHistoryRepository]
         LinkRepo[LinkRepository]
         Cache[AuthzCacheRefresher<br/>in-memory]
@@ -99,7 +97,7 @@ flowchart TD
     end
 
     subgraph PG["PostgreSQL 13+"]
-        Tables[("entries · users · roles · permissions · spaces · attachments · histories · sessions · invitations · locks · otp · urlshorts · count_history")]
+        Tables[("entries · users · roles · permissions · spaces · attachments · histories · sessions · locks · otp · urlshorts · count_history")]
     end
 
     Middleware --> Routing
@@ -210,11 +208,10 @@ dmart/
 ├── Services/                           ← domain (no HTTP, no SQL)
 │   ├── QueryService.cs                 /managed/query + /public/query dispatch
 │   ├── PermissionService.cs            the walk; see permissions.md
-│   ├── UserService.cs                  login/create/profile/reset
+│   ├── UserService.cs                  login/create/profile
 │   ├── EntryService.cs                 Create/Update/Delete entries + plugin hooks
 │   ├── WorkflowService.cs              progress-ticket state machine
 │   ├── SchemaValidator.cs              JSON Schema on payload.body
-│   ├── InvitationService.cs            JWT invitations + delivery
 │   ├── WebSocketManager.cs             channel broadcasts
 │   ├── ImportExportService.cs          zip ↔ entries
 │   ├── EmbeddingService.cs             semantic-indexer companion
@@ -237,7 +234,6 @@ dmart/
 │   ├── HistoryRepository.cs            histories (change log)
 │   ├── LockRepository.cs               locks
 │   ├── OtpRepository.cs                otp
-│   ├── InvitationRepository.cs         invitations
 │   ├── CountHistoryRepository.cs       count_history (periodic snapshots)
 │   ├── LinkRepository.cs               urlshorts (short links)
 │   ├── HealthCheckRepository.cs        health-check queries
@@ -248,13 +244,12 @@ dmart/
 ├── Models/
 │   ├── Api/                            Query, Request, Record, Response, Error, InternalErrorCode
 │   ├── Core/                           User, Role, Permission, Space, Entry, Attachment, Locator, Payload, Translation, AclEntry, Event
-│   ├── Enums/                          ResourceType, QueryType, RequestType, ContentType, ActionType, Language, Status, UserType, InvitationChannel, SortType, etc.
+│   ├── Enums/                          ResourceType, QueryType, RequestType, ContentType, ActionType, Language, Status, UserType, SortType, etc.
 │   └── Json/                           DmartJsonContext, EnumMemberConverter
 │
 ├── Auth/
 │   ├── JwtBearerSetup.cs               JwtBearer lazy-config + cookie fallback
 │   ├── JwtIssuer.cs                    HS256 access/refresh token mint
-│   ├── InvitationJwt.cs                {data, expires} payload shape
 │   ├── PasswordHasher.cs               Argon2id wrapper
 │   ├── PasswordRules.cs                PASSWORD regex — source-gen
 │   ├── OtpProvider.cs                  Generate + dispatch (SMS/email/log)

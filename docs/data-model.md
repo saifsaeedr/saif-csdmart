@@ -84,7 +84,6 @@ codes. Selected values:
 | 48 | `EXPIRED_TOKEN` | jwtauth |
 | 49 | `NOT_AUTHENTICATED` | jwtauth |
 | 110 | `USER_ACCOUNT_LOCKED` | auth |
-| 125 | `INVALID_INVITATION` | jwtauth |
 | 204 | `CANNT_DELETE` | request |
 | 220 | `OBJECT_NOT_FOUND` | db / request |
 | 230 | `INVALID_ROUTE` | request |
@@ -121,7 +120,6 @@ This is the one that rescues mismatched-slash permission rows.
 ```mermaid
 erDiagram
     users ||--o{ sessions : "created by"
-    users ||--o{ invitations : "targets"
     users ||--o{ entries : "owner_shortname FK"
     users ||--o{ attachments : "owner_shortname FK"
     users ||--o{ permissions : "owner_shortname FK"
@@ -231,11 +229,6 @@ One row per (user, access token) pair. Columns: `shortname`, `access_token`
 (stored verbatim for `session_inactivity_ttl` checks), `last_used_at`,
 `firebase_token`. Used by JwtBearerSetup for session-based inactivity
 enforcement.
-
-### `invitations`
-
-Single-use JWT-backed invitations. Columns: `shortname`, `invitation`
-(the JWT), `expires_at`. See [auth.md](./auth.md).
 
 ### `histories`
 

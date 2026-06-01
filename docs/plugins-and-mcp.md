@@ -222,7 +222,7 @@ Non-obvious:
   deployments (e.g. `https://host.example/dmart`).
 - `OAuthClientStore` is currently in-memory — DCR registrations are lost
   on restart. Deferred hardening: port to a `DataAdapters/Sql` table
-  (pattern exists in `InvitationRepository`).
+  (pattern exists in `OtpRepository`).
 
 ### SSE bridge for notifications
 

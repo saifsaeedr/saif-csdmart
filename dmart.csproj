@@ -185,8 +185,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Embed languages/*.json as the single source of truth for invitation /
-         reset SMS bodies and state-label translations. LanguageLoader reads
+    <!-- Embed languages/*.json as the single source of truth for OTP/SMS
+         message bodies and state-label translations. LanguageLoader reads
          these via ManifestEmbeddedFileProvider at startup. Keeping them
          embedded (not Content) means the AOT single-binary release ships
          them inside dmart itself — no separate languages/ dir to deploy. -->
