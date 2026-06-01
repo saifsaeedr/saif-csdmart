@@ -340,6 +340,12 @@ public static class RequestHandler
                 if (!await perms.CanCreateAsync(actor, gateLocator, rec.Attributes, ct))
                     return (Response.Fail(InternalErrorCode.NOT_ALLOWED,
                         $"not allowed to create {rec.ResourceType}", ErrorTypes.Request), rec);
+                // Privilege-assignment floor: even with a scoped create grant
+                // (and no restricted_fields configured) a non-global-admin must
+                // not be able to mint a super_admin user or author an
+                // all-powerful permission. See EnforcePrivilegeFloorAsync.
+                var floor = await EnforcePrivilegeFloorAsync(rec.ResourceType, rec.Attributes, actor, perms, users, ct);
+                if (floor is not null) return (floor, rec);
                 break;
             }
         }
@@ -646,6 +652,8 @@ public static class RequestHandler
                 var userLocator = new Locator(ResourceType.User, existing.SpaceName, existing.Subpath, existing.Shortname);
                 if (!await perms.CanUpdateAsync(actor, userLocator, PermissionService.FromUser(existing), attrs, ct))
                     return (Response.Fail(InternalErrorCode.NOT_ALLOWED, "not allowed to update user", ErrorTypes.Request), rec, null);
+                var userFloor = await EnforcePrivilegeFloorAsync(ResourceType.User, attrs, actor, perms, users, ct);
+                if (userFloor is not null) return (userFloor, rec, null);
                 var userUniq = await uniqueness.ValidateRawAsync(
                     existing.SpaceName, existing.Subpath, existing.Shortname,
                     ResourceType.User, attrs, ActionType.Update, ct);
@@ -783,6 +791,8 @@ public static class RequestHandler
                 var roleLocator = new Locator(ResourceType.Role, existing.SpaceName, existing.Subpath, existing.Shortname);
                 if (!await perms.CanUpdateAsync(actor, roleLocator, PermissionService.FromRole(existing), attrs, ct))
                     return (Response.Fail(InternalErrorCode.NOT_ALLOWED, "not allowed to update role", ErrorTypes.Request), rec, null);
+                var roleFloor = await EnforcePrivilegeFloorAsync(ResourceType.Role, attrs, actor, perms, users, ct);
+                if (roleFloor is not null) return (roleFloor, rec, null);
                 var roleUniq = await uniqueness.ValidateRawAsync(
                     existing.SpaceName, existing.Subpath, existing.Shortname,
                     ResourceType.Role, attrs, ActionType.Update, ct);
@@ -817,6 +827,8 @@ public static class RequestHandler
                 var permLocator = new Locator(ResourceType.Permission, existing.SpaceName, existing.Subpath, existing.Shortname);
                 if (!await perms.CanUpdateAsync(actor, permLocator, PermissionService.FromPermission(existing), attrs, ct))
                     return (Response.Fail(InternalErrorCode.NOT_ALLOWED, "not allowed to update permission", ErrorTypes.Request), rec, null);
+                var permFloor = await EnforcePrivilegeFloorAsync(ResourceType.Permission, attrs, actor, perms, users, ct);
+                if (permFloor is not null) return (permFloor, rec, null);
                 var permUniq = await uniqueness.ValidateRawAsync(
                     existing.SpaceName, existing.Subpath, existing.Shortname,
                     ResourceType.Permission, attrs, ActionType.Update, ct);
@@ -1337,6 +1349,53 @@ public static class RequestHandler
                 return new Translation(En: el.GetString());
         }
         return new Translation(En: value.ToString());
+    }
+
+    // Privilege-assignment floor for the managed user/role/permission write
+    // paths. The per-resource CanCreate/CanUpdate gate already ran; this adds a
+    // hard floor that a deployment's restricted_fields config can't accidentally
+    // omit — a non-global-admin cannot grant authority they don't themselves
+    // hold. Returns an error Response to reject, or null to allow.
+    //   * User.roles / User.groups → must be a subset of the actor's own.
+    //   * Role.permissions / Permission.{subpaths,resource_types,actions,
+    //     conditions} → global admin only (no safe "subset" for authoring scope).
+    private static async Task<Response?> EnforcePrivilegeFloorAsync(
+        ResourceType resourceType, Dictionary<string, object>? attrs,
+        string actor, PermissionService perms, UserRepository users, CancellationToken ct)
+    {
+        if (attrs is null) return null;
+        bool Touches(params string[] keys) => keys.Any(attrs.ContainsKey);
+
+        var setsUserAuthority = resourceType == ResourceType.User && Touches("roles", "groups");
+        var setsRolePerms     = resourceType == ResourceType.Role && attrs.ContainsKey("permissions");
+        var setsPermScope     = resourceType == ResourceType.Permission
+                                && Touches("subpaths", "resource_types", "actions", "conditions");
+        if (!setsUserAuthority && !setsRolePerms && !setsPermScope) return null;
+
+        // A global admin (an __all_spaces__/__all_subpaths__ grant) may set anything.
+        if (await perms.IsGlobalAdminAsync(actor, ct)) return null;
+
+        if (setsRolePerms || setsPermScope)
+            return Response.Fail(InternalErrorCode.NOT_ALLOWED,
+                $"assigning {(setsRolePerms ? "role permissions" : "permission scope")} requires a global admin",
+                ErrorTypes.Request);
+
+        // User roles/groups: a non-admin may only assign values they themselves
+        // hold — enough to delegate within their own authority, never to
+        // escalate (e.g. to super_admin, which they don't hold).
+        var self = await users.GetByShortnameAsync(actor, ct);
+        var ownRoles  = self?.Roles  ?? new List<string>();
+        var ownGroups = self?.Groups ?? new List<string>();
+        var disallowed = (ExtractStringList(attrs, "roles") ?? new())
+                .Where(r => !ownRoles.Contains(r, StringComparer.Ordinal))
+            .Concat((ExtractStringList(attrs, "groups") ?? new())
+                .Where(g => !ownGroups.Contains(g, StringComparer.Ordinal)))
+            .ToList();
+        if (disallowed.Count > 0)
+            return Response.Fail(InternalErrorCode.NOT_ALLOWED,
+                $"cannot assign a role/group you do not hold: {string.Join(", ", disallowed)}",
+                ErrorTypes.Request);
+        return null;
     }
 
     private static List<string>? ExtractStringList(Dictionary<string, object> attrs, string key)
