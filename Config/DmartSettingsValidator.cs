@@ -33,6 +33,11 @@ internal sealed class DmartSettingsValidator : IValidateOptions<DmartSettings>
             failures.Add($"JwtRefreshDays must be > 0 (got {s.JwtRefreshDays})");
         if (string.IsNullOrWhiteSpace(s.JwtSecret) || s.JwtSecret.Length < 32)
             failures.Add("JwtSecret must be at least 32 bytes (HS256 signing key)");
+        else if (s.JwtSecret.Contains("change-me", StringComparison.OrdinalIgnoreCase))
+            // The built-in default and config.env.sample placeholder are long
+            // enough to pass the length floor but are publicly known — booting
+            // on them means anyone can forge an admin JWT. Refuse to start.
+            failures.Add("JwtSecret is the built-in placeholder ('change-me-…') — set a real random JWT_SECRET (e.g. `openssl rand -hex 32`); a known signing key lets anyone forge admin tokens");
         if (s.MaxFailedLoginAttempts < 0)
             failures.Add($"MaxFailedLoginAttempts must be >= 0 (got {s.MaxFailedLoginAttempts})");
         if (s.AuthRateLimitPerMinute < 1)

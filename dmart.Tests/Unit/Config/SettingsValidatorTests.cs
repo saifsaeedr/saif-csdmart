@@ -89,6 +89,36 @@ public class SettingsValidatorTests
     }
 
     [Fact]
+    public void JwtSecret_KnownPlaceholder_Fails()
+    {
+        // Long enough to clear the 32-byte floor, but a publicly-known string —
+        // booting on it lets anyone forge an admin JWT, so it must be rejected.
+        var s = Valid();
+        s.JwtSecret = "change-me-change-me-change-me-32b";
+        var r = new DmartSettingsValidator().Validate(null, s);
+        r.Failed.ShouldBeTrue();
+        r.FailureMessage!.ShouldContain("JwtSecret");
+    }
+
+    [Fact]
+    public void JwtSecret_SamplePlaceholder_Fails()
+    {
+        var s = Valid();
+        s.JwtSecret = "change-me-change-me-change-me-32b-minimum-length";
+        new DmartSettingsValidator().Validate(null, s).Failed.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void JwtSecret_CompiledDefault_Fails()
+    {
+        // A DmartSettings with no operator-provided secret carries the built-in
+        // placeholder default — it must not be allowed to boot.
+        var r = new DmartSettingsValidator().Validate(null, new DmartSettings());
+        r.Failed.ShouldBeTrue();
+        r.FailureMessage!.ShouldContain("JwtSecret");
+    }
+
+    [Fact]
     public void Negative_DatabasePort_Fails()
     {
         var s = Valid();
