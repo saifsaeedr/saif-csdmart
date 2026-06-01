@@ -15,10 +15,9 @@ namespace Dmart.Services;
 // Two overloads:
 //   * SendEmailAsync(to, subject, htmlBody, ct) — legacy single-body path
 //     used by OtpProvider and the plugin-callback path. Stays HTML-only.
-//   * SendEmailAsync(to, subject, htmlBody, textBody, ct) — used by the
-//     activation-email flow in InvitationService. Sends multipart/alternative
-//     when both bodies are non-empty; degrades to whichever side is present
-//     otherwise; refuses the send when both are empty.
+//   * SendEmailAsync(to, subject, htmlBody, textBody, ct) — multipart/alternative
+//     send: emits both parts when non-empty; degrades to whichever side is
+//     present otherwise; refuses the send when both are empty.
 public sealed class SmtpSender(IOptions<DmartSettings> settings, ILogger<SmtpSender> log)
 {
     public Task<bool> SendEmailAsync(string to, string subject, string htmlBody, CancellationToken ct = default)
@@ -38,9 +37,7 @@ public sealed class SmtpSender(IOptions<DmartSettings> settings, ILogger<SmtpSen
             return false;
         }
         // Empty bodies are spam-filter bait. If a template rendering upstream
-        // (ActivationTemplateLoader, etc.) degraded to "" — usually because
-        // the operator overrides at ~/.dmart/ActivationEmailContent.{html,txt}
-        // failed to load — drop the send so the caller's existing "email not
+        // degraded to "" — drop the send so the caller's existing "email not
         // delivered → fall back" branch engages instead of a blank email
         // landing in the recipient's spam folder.
         var hasHtml = !string.IsNullOrWhiteSpace(htmlBody);

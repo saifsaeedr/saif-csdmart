@@ -8,8 +8,8 @@ namespace Dmart.Services;
 
 // Port of dmart Python's backend/languages/loader.py.
 //
-// Single source of truth for translated strings (invitation_message,
-// reset_message, otp_message, state labels, ...). Loads from three sources:
+// Single source of truth for translated strings (otp_message, state
+// labels, ...). Loads from three sources:
 //   1. Embedded resources whose name matches "*.languages.*.json" inside
 //      this assembly — always present in the AOT release binary because
 //      dmart.csproj does <EmbeddedResource Include="languages/*.json" />.
