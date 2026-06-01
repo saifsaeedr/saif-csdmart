@@ -21,14 +21,15 @@ public sealed class JwtIssuer(IOptions<DmartSettings> settings)
 
     public string IssueAccess(string subject, IEnumerable<string>? roles = null,
         UserType userType = UserType.Web)
-        => Sign(subject, roles, userType, TimeSpan.FromSeconds(_s.JwtAccessExpires));
+        => Sign(subject, roles, userType, TimeSpan.FromSeconds(_s.JwtAccessExpires), tokenUse: "access");
 
     public string IssueRefresh(string subject, UserType userType = UserType.Web,
         long? originalIatUnix = null)
-        => Sign(subject, null, userType, TimeSpan.FromDays(_s.JwtRefreshDays), originalIatUnix);
+        => Sign(subject, null, userType, TimeSpan.FromDays(_s.JwtRefreshDays), tokenUse: "refresh",
+                originalIatUnix: originalIatUnix);
 
     private string Sign(string subject, IEnumerable<string>? roles,
-        UserType userType, TimeSpan lifetime, long? originalIatUnix = null)
+        UserType userType, TimeSpan lifetime, string tokenUse, long? originalIatUnix = null)
     {
         var now = DateTimeOffset.UtcNow;
         // If the caller preserved an original iat from a prior refresh, anchor
@@ -49,6 +50,9 @@ public sealed class JwtIssuer(IOptions<DmartSettings> settings)
             writer.WriteString("aud", _s.JwtAudience);
             writer.WriteNumber("iat", iat);
             writer.WriteNumber("exp", expiresUnix);
+            // Distinguishes an access token from a refresh token so the refresh
+            // grant can reject a (stolen) access token presented as a refresh.
+            writer.WriteString("token_use", tokenUse);
             writer.WriteString("jti", Guid.NewGuid().ToString("n"));
             if (roles is not null)
             {
