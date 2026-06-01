@@ -12,7 +12,7 @@ namespace Dmart.DataAdapters.Sql;
 //   * `OTP.value` uses HSTORE — requires the `hstore` extension.
 //   * `users.type` and `users.language` use PostgreSQL ENUM types `usertype` and
 //     `language`. We pre-create them so dmart Python can hot-swap.
-//   * Histories, Locks, Sessions, Invitations, URLShorts, OTP, UserPermissionsCache
+//   * Histories, Locks, Sessions, URLShorts, OTP, UserPermissionsCache
 //     do NOT inherit from Metas — they're flat tables.
 public static class SqlSchema
 {
@@ -299,16 +299,6 @@ public static class SqlSchema
     );
 
     -- ============================================================
-    -- INVITATIONS
-    -- ============================================================
-    CREATE TABLE IF NOT EXISTS invitations (
-        uuid              UUID PRIMARY KEY,
-        invitation_token  TEXT NOT NULL UNIQUE,
-        invitation_value  TEXT NOT NULL,
-        timestamp         TIMESTAMP NOT NULL DEFAULT NOW()
-    );
-
-    -- ============================================================
     -- URL SHORTS
     -- ============================================================
     CREATE TABLE IF NOT EXISTS urlshorts (
@@ -395,6 +385,12 @@ public static class SqlSchema
     -- equivalent of running Alembic's upgrade head — safe to re-run, no effect
     -- when the column already exists. Add new columns to this list when you
     -- extend a SQL SELECT/INSERT so older DBs get patched automatically.
+
+    -- Security: the invitation feature was removed (it minted single-use
+    -- login tokens and returned them in API responses — an account-takeover
+    -- vector). Drop the table on existing deployments so any outstanding
+    -- tokens are purged on upgrade. Idempotent.
+    DROP TABLE IF EXISTS invitations;
     ALTER TABLE users       ADD COLUMN IF NOT EXISTS device_id             TEXT;
     ALTER TABLE users       ADD COLUMN IF NOT EXISTS google_id             TEXT;
     ALTER TABLE users       ADD COLUMN IF NOT EXISTS facebook_id           TEXT;
@@ -419,18 +415,6 @@ public static class SqlSchema
     ALTER TABLE spaces      ADD COLUMN IF NOT EXISTS hide_space            BOOLEAN;
     ALTER TABLE spaces      ADD COLUMN IF NOT EXISTS ordinal               INTEGER;
     ALTER TABLE spaces      ADD COLUMN IF NOT EXISTS mirrors               JSONB;
-
-    -- Ensure invitations.invitation_token is UNIQUE even on DBs created
-    -- before the constraint was added to the CREATE TABLE above.
-    DO $$ BEGIN
-        IF NOT EXISTS (
-            SELECT 1 FROM pg_constraint
-            WHERE conname = 'invitations_invitation_token_key'
-        ) THEN
-            ALTER TABLE invitations ADD CONSTRAINT invitations_invitation_token_key
-                UNIQUE (invitation_token);
-        END IF;
-    END $$;
 
     -- Identifier uniqueness on users — provider-issued IDs only.
     -- NULLs are distinct under Postgres' default, so multiple rows missing

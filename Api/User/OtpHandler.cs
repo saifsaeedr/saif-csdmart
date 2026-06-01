@@ -145,8 +145,7 @@ public static class OtpHandler
             // or not. All silent-no-op branches below also fall through to Ok().
             if (user is null) return Response.Ok();
 
-            // Pick the destination using the same routing rules the prior
-            // invitation flow applied:
+            // Pick the destination using these routing rules:
             //   - Email-direct path: only when the request was email-only AND
             //     the supplied email matches the user record (case-insensitive
             //     equality guards against a mismatched email leaking through).

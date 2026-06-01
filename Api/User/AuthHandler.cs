@@ -27,13 +27,11 @@ public static class AuthHandler
                 headers[h.Key] = h.Value.ToString();
             }
 
-            // Route dispatch — invitation takes precedence over OTP over password.
+            // Route dispatch — OTP takes precedence over password.
             // Matches Python's `/user/login` path-selection order in user/router.py.
-            var result = !string.IsNullOrEmpty(req.Invitation)
-                ? await svc.LoginWithInvitationAsync(req, headers, ct)
-                : !string.IsNullOrEmpty(req.Otp)
-                    ? await svc.LoginWithOtpAsync(req, headers, ct)
-                    : await svc.LoginAsync(req, headers, ct);
+            var result = !string.IsNullOrEmpty(req.Otp)
+                ? await svc.LoginWithOtpAsync(req, headers, ct)
+                : await svc.LoginAsync(req, headers, ct);
 
             if (!result.IsOk)
                 return Results.Json(

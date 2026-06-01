@@ -35,11 +35,10 @@ public class SmtpSenderTests
         ok.ShouldBeFalse();
     }
 
-    // ActivationTemplateLoader (and any future template renderer) returns
-    // empty string when its source template fails to parse or is missing.
-    // SmtpSender must refuse to ship a blank-body email so the upstream
-    // caller's "email not delivered → fall back to in-response token"
-    // branch engages, instead of an empty message landing in spam.
+    // A template renderer returns empty string when its source template
+    // fails to parse or is missing. SmtpSender must refuse to ship a
+    // blank-body email so the upstream caller's fallback branch engages,
+    // instead of an empty message landing in spam.
     [Theory]
     [InlineData("")]
     [InlineData(" ")]

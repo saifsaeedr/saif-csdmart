@@ -16,8 +16,7 @@ namespace Dmart.Tests.Integration;
 
 // Confirms firebase_token flows through the login + /user/profile paths
 // (Python parity). Each test provisions a throwaway user so cross-class
-// parallelism can't step on the admin row, matching InvitationLoginTests'
-// pattern.
+// parallelism can't step on the admin row.
 public sealed class FirebaseTokenTests : IClassFixture<DmartFactory>
 {
     private readonly DmartFactory _factory;
@@ -30,7 +29,7 @@ public sealed class FirebaseTokenTests : IClassFixture<DmartFactory>
         try
         {
             var client = _factory.CreateClient();
-            var login = new UserLoginRequest(shortname, null, null, password, null,
+            var login = new UserLoginRequest(shortname, null, null, password,
                 Otp: null, DeviceId: null, FirebaseToken: "fcm-login-token");
             var resp = await client.PostAsJsonAsync("/user/login", login, DmartJsonContext.Default.UserLoginRequest);
             resp.StatusCode.ShouldBe(HttpStatusCode.OK);
@@ -78,13 +77,13 @@ public sealed class FirebaseTokenTests : IClassFixture<DmartFactory>
             // Two independent login sessions for the same user.
             var client = _factory.CreateClient();
             var loginA = await client.PostAsJsonAsync("/user/login",
-                new UserLoginRequest(shortname, null, null, password, null,
+                new UserLoginRequest(shortname, null, null, password,
                     Otp: null, DeviceId: null, FirebaseToken: "fcm-A"),
                 DmartJsonContext.Default.UserLoginRequest);
             var tokenA = (await ExtractAccessTokenAsync(loginA))!;
 
             var loginB = await client.PostAsJsonAsync("/user/login",
-                new UserLoginRequest(shortname, null, null, password, null,
+                new UserLoginRequest(shortname, null, null, password,
                     Otp: null, DeviceId: null, FirebaseToken: "fcm-B"),
                 DmartJsonContext.Default.UserLoginRequest);
             var tokenB = (await ExtractAccessTokenAsync(loginB))!;
@@ -111,7 +110,7 @@ public sealed class FirebaseTokenTests : IClassFixture<DmartFactory>
             var client = _factory.CreateClient();
             // Two sessions: one with a token, one without.
             await client.PostAsJsonAsync("/user/login",
-                new UserLoginRequest(shortname, null, null, password, null,
+                new UserLoginRequest(shortname, null, null, password,
                     Otp: null, DeviceId: null, FirebaseToken: "fcm-list-1"),
                 DmartJsonContext.Default.UserLoginRequest);
             await client.PostAsJsonAsync("/user/login",

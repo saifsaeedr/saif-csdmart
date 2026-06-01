@@ -31,8 +31,6 @@ internal sealed class DmartSettingsValidator : IValidateOptions<DmartSettings>
             failures.Add($"JwtAccessExpires must be > 0 (got {s.JwtAccessExpires})");
         if (s.JwtRefreshDays <= 0)
             failures.Add($"JwtRefreshDays must be > 0 (got {s.JwtRefreshDays})");
-        if (s.JwtInvitationDays <= 0)
-            failures.Add($"JwtInvitationDays must be > 0 (got {s.JwtInvitationDays})");
         if (string.IsNullOrWhiteSpace(s.JwtSecret) || s.JwtSecret.Length < 32)
             failures.Add("JwtSecret must be at least 32 bytes (HS256 signing key)");
         if (s.MaxFailedLoginAttempts < 0)

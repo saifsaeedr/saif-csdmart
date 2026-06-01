@@ -13,16 +13,15 @@ public sealed class ShortLinkService(LinkRepository links, IOptions<DmartSetting
 
         // The resolver runs anonymously (ShortLinkHandler.cs:21 .AllowAnonymous),
         // so it must refuse to redirect anywhere that wasn't written by a
-        // server-controlled path. Two such writers exist:
+        // server-controlled path. The only such writer is
         //   * ShortLinkHandler /managed/shortening/... stores {AppUrl}/managed/entry/...
-        //   * InvitationService.ShortenAsync stores {InvitationLink}/auth/invitation?...
-        // Allow either; reject everything else so the public endpoint can
+        // Allow that base; reject everything else so the public endpoint can
         // never become an open redirect.
         var s = settings.Value;
-        if (string.IsNullOrWhiteSpace(s.AppUrl) && string.IsNullOrWhiteSpace(s.InvitationLink))
+        if (string.IsNullOrWhiteSpace(s.AppUrl))
             return url;
         if (!Uri.TryCreate(url, UriKind.Absolute, out var stored)) return null;
-        if (MatchesBase(stored, s.AppUrl) || MatchesBase(stored, s.InvitationLink))
+        if (MatchesBase(stored, s.AppUrl))
             return url;
         return null;
     }

@@ -59,7 +59,7 @@ public sealed class LoginErrorCodesTests : IClassFixture<DmartFactory>
         try
         {
             var (type, code, msg) = await ExpectLoginFailureAsync(
-                new UserLoginRequest(shortname, null, null, pw, null,
+                new UserLoginRequest(shortname, null, null, pw,
                     Otp: null, DeviceId: "new-dev"));
             type.ShouldBe("auth");
             code.ShouldBe(InternalErrorCode.OTP_NEEDED);
@@ -79,7 +79,7 @@ public sealed class LoginErrorCodesTests : IClassFixture<DmartFactory>
         try
         {
             var (type, code, msg) = await ExpectLoginFailureAsync(
-                new UserLoginRequest(shortname, null, null, pw, null,
+                new UserLoginRequest(shortname, null, null, pw,
                     Otp: null, DeviceId: "stranger-dev"));
             type.ShouldBe("auth");
             code.ShouldBe(InternalErrorCode.USER_ACCOUNT_LOCKED);
@@ -95,7 +95,7 @@ public sealed class LoginErrorCodesTests : IClassFixture<DmartFactory>
         try
         {
             var (type, code, msg) = await ExpectLoginFailureAsync(
-                new UserLoginRequest(shortname, null, null, null, null, Otp: "000000"));
+                new UserLoginRequest(shortname, null, null, null, Otp: "000000"));
             type.ShouldBe("auth");
             code.ShouldBe(InternalErrorCode.OTP_INVALID);
             msg.ShouldBe("Wrong OTP");
@@ -107,7 +107,7 @@ public sealed class LoginErrorCodesTests : IClassFixture<DmartFactory>
     public async Task OtpLogin_MultipleIdentifiers_Returns_OTP_ISSUE()
     {
         var (type, code, msg) = await ExpectLoginFailureAsync(
-            new UserLoginRequest("u", "u@x.com", null, null, null, Otp: "123456"));
+            new UserLoginRequest("u", "u@x.com", null, null, Otp: "123456"));
         type.ShouldBe("auth");
         code.ShouldBe(InternalErrorCode.OTP_ISSUE);
         msg.ShouldBe("Provide either msisdn, email or shortname, not both.");
@@ -117,30 +117,10 @@ public sealed class LoginErrorCodesTests : IClassFixture<DmartFactory>
     public async Task OtpLogin_NoIdentifier_Returns_OTP_ISSUE()
     {
         var (type, code, msg) = await ExpectLoginFailureAsync(
-            new UserLoginRequest(null, null, null, null, null, Otp: "123456"));
+            new UserLoginRequest(null, null, null, null, Otp: "123456"));
         type.ShouldBe("auth");
         code.ShouldBe(InternalErrorCode.OTP_ISSUE);
         msg.ShouldBe("Either msisdn, email or shortname must be provided.");
-    }
-
-    [FactIfPg]
-    public async Task Invitation_UnknownToken_Returns_INVALID_INVITATION_jwtauth()
-    {
-        // A JWT with a valid signature but no DB row — the repo lookup fails,
-        // so invitation login rejects with type=jwtauth code=INVALID_INVITATION.
-        var (shortname, _) = await CreateUserAsync(password: null);
-        try
-        {
-            var jwt = _factory.Services.GetRequiredService<InvitationJwt>();
-            var token = jwt.Mint(shortname, InvitationChannel.Email);
-
-            var (type, code, msg) = await ExpectLoginFailureAsync(
-                new UserLoginRequest(null, null, null, null, token));
-            type.ShouldBe("jwtauth");
-            code.ShouldBe(InternalErrorCode.INVALID_INVITATION);
-            msg.ShouldBe("Expired or invalid invitation");
-        }
-        finally { await DeleteUserAsync(shortname); }
     }
 
     // ---- helpers ----

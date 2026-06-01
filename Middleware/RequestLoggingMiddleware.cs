@@ -33,7 +33,6 @@ public static class RequestLoggingMiddleware
         "jwt_secret", "database_password", "admin_password", "smpp_auth_key",
         "otp", "email_otp", "msisdn_otp", "code",
         "access_token", "refresh_token", "firebase_token", "auth_token", "token",
-        "invitation",
         "apple_client_secret", "google_client_secret", "facebook_client_secret",
         "mail_password",
     };

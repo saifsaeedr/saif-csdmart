@@ -216,7 +216,7 @@ public static class OAuthEndpoints
 
         var loginReq = new UserLoginRequest(
             Shortname: shortname, Email: null, Msisdn: null,
-            Password: password, Invitation: null);
+            Password: password);
         var result = await users.LoginAsync(loginReq, requestHeaders: null, ct);
         if (!result.IsOk)
             return HtmlLoginForm(p, error: "invalid credentials");

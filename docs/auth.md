@@ -2,13 +2,11 @@
 
 ## Overview
 
-Three login paths, all landing on the same `sessions` row + signed JWT:
+Two login paths, all landing on the same `sessions` row + signed JWT:
 
 1. **Password** (`POST /user/login` with shortname/email/msisdn + password).
 2. **OTP** (`POST /user/login` with an identifier + `otp`, pre-requested via
    `POST /user/otp-request`).
-3. **Invitation JWT** (`POST /user/login` with the single-use token minted
-   by `POST /user/reset` or user creation).
 
 Plus three OAuth callbacks (Google / Facebook / Apple) for web + mobile flows.
 
@@ -17,10 +15,8 @@ flowchart TD
     A[client] --> B{"/user/login body"}
     B -->|password+identifier| P[UserService.LoginAsync]
     B -->|otp+identifier| O[UserService.LoginWithOtpAsync]
-    B -->|invitation JWT| I[UserService.LoginWithInvitationAsync]
     P --> X[validate → issue access+refresh → create session]
     O --> X
-    I --> X
     X --> R["response: records[{access_token, refresh_token, ...}]"]
     X -.-> C["Set-Cookie: auth_token=...; HttpOnly"]
 ```
@@ -153,7 +149,6 @@ Pinned by `dmart.Tests/Integration/LoginErrorCodesTests.cs` and
 | OTP login multi-identifier | auth | 100 (`OTP_ISSUE`) | "Provide either msisdn, email or shortname, not both." |
 | OTP login no identifier | auth | 100 (`OTP_ISSUE`) | "Either msisdn, email or shortname must be provided." |
 | Wrong OTP | auth | 307 (`OTP_INVALID`) | "Wrong OTP" |
-| Bad invitation JWT | jwtauth | 125 (`INVALID_INVITATION`) | "Expired or invalid invitation" |
 | Missing/expired JWT on `/managed/*` | jwtauth | 49 (`NOT_AUTHENTICATED`) | "Not authenticated" |
 | Expired signature | jwtauth | 48 (`EXPIRED_TOKEN`) | "..." |
 | Bad signature | jwtauth | 47 (`INVALID_TOKEN`) | "..." |
@@ -180,37 +175,6 @@ reaches `settings.MaxFailedLoginAttempts` (default 5), login returns
 ```sql
 UPDATE users SET attempt_count = 0 WHERE shortname = '...';
 ```
-
-Or `POST /user/reset` which flips `force_password_change=true` and mints a
-fresh invitation (admin-only endpoint).
-
-## Invitation flow
-
-Used for passwordless login and password resets. Single-use JWT, plus a DB
-row enforcing single-use even if the JWT's `exp` hasn't elapsed.
-
-```mermaid
-sequenceDiagram
-    actor Admin
-    participant API as dmart
-    participant DB as invitations
-    participant U as user
-
-    Admin->>API: POST /user/reset {shortname: "alice"}
-    API->>API: InvitationJwt.Mint(alice, Email)
-    API->>DB: INSERT (shortname=alice, invitation=<jwt>, expires_at=+30d)
-    API->>Admin: {invitations: {email: "<jwt>"}}  ← CXB no SMTP
-    Admin-->>U: send link/SMS out-of-band
-    U->>API: POST /user/login {invitation: <jwt>}
-    API->>API: InvitationJwt.Verify + invitations.GetValueAsync
-    API->>DB: DELETE FROM invitations WHERE invitation = <jwt>  (single-use)
-    API->>API: issue access/refresh, create session
-    API->>U: records[{access_token, refresh_token, ...}] + Set-Cookie
-```
-
-`InvitationJwt` payload shape: `{data, expires}`.
-`InvitationRepository` is the DB side; the row is the single-use
-enforcement even if the JWT is still within `exp`.
 
 ## OAuth providers (Google / Facebook / Apple)
 
@@ -278,14 +242,13 @@ the `/user/*` surface (OTP request, register, reset).
 |---|---|
 | JwtBearer config + cookie fallback | `Auth/JwtBearerSetup.cs` |
 | JWT minting | `Auth/JwtIssuer.cs` |
-| Invitation JWT shape | `Auth/InvitationJwt.cs` |
 | Password verify/hash | `Auth/PasswordHasher.cs` |
 | Password regex | `Auth/PasswordRules.cs` |
 | OTP generation + dispatch | `Auth/OtpProvider.cs` |
 | Google / Facebook / Apple | `Auth/OAuth/*.cs` |
 | Login endpoints | `Api/User/AuthHandler.cs` |
 | OTP endpoints | `Api/User/OtpHandler.cs` |
-| Profile (GET / PATCH / reset / delete) | `Api/User/ProfileHandler.cs` |
+| Profile (GET / PATCH / delete) | `Api/User/ProfileHandler.cs` |
 | User creation + auto-login | `Api/User/RegistrationHandler.cs` + `Services/UserService.CreateAsync` |
 | Session DB ops | `DataAdapters/Sql/UserRepository.cs` (Create/UpdateSession*) |
 | First-boot seeding | `DataAdapters/Sql/AdminBootstrap.cs` |

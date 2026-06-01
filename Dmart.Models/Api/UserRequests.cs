@@ -5,9 +5,6 @@ public sealed record UserLoginRequest(
     string? Email,
     string? Msisdn,
     string? Password,
-    // Invitation JWT — Python wire format: `"invitation"` in the JSON body.
-    // When non-null, LoginWithInvitationAsync is used instead of password/OTP.
-    string? Invitation,
     // OTP code — when non-null, LoginWithOtpAsync is used instead of password auth.
     string? Otp = null,
     // Mobile clients: device identifier + push token.

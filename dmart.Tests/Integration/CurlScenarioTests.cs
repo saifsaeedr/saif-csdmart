@@ -303,27 +303,20 @@ public class CurlScenarioTests : IClassFixture<DmartFactory>
             .Status.ShouldBe(Status.Success);
 
         // ---------------------------------------------------------------------
-        // 26. Reset user (admin /user/reset)
-        // ---------------------------------------------------------------------
-        (await PostJsonAsResponse(client, "/user/reset",
-            """{"shortname":"distributor"}"""))
-            .Status.ShouldBe(Status.Success);
-
-        // ---------------------------------------------------------------------
-        // 27. Delete user
+        // 26. Delete user
         // ---------------------------------------------------------------------
         (await PostJsonAsResponse(client, "/managed/request",
             """{"space_name":"management","request_type":"delete","records":[{"resource_type":"user","subpath":"users","shortname":"distributor","attributes":{}}]}"""))
             .Status.ShouldBe(Status.Success);
 
         // ---------------------------------------------------------------------
-        // 28. Cleanup test space
+        // 27. Cleanup test space
         // ---------------------------------------------------------------------
         (await PostJsonAsResponse(client, "/managed/request", DeleteSpaceBody))
             .Status.ShouldBe(Status.Success);
 
         // ---------------------------------------------------------------------
-        // 29. Server manifest
+        // 28. Server manifest
         // ---------------------------------------------------------------------
         (await GetResponse(client, "/info/manifest")).Status.ShouldBe(Status.Success);
     }

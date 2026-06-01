@@ -277,7 +277,7 @@ diagrams:
 - [`docs/README.md`](./docs/README.md) — navigation for the rest of the docs tree
 - [`docs/data-model.md`](./docs/data-model.md) — ER diagram, wire-format rules, repositories
 - [`docs/permissions.md`](./docs/permissions.md) — the permission walk, anonymous + world, ACL, conditions
-- [`docs/auth.md`](./docs/auth.md) — login / JWT / session flows, OAuth providers, invitations
+- [`docs/auth.md`](./docs/auth.md) — login / JWT / session flows, OAuth providers
 - [`docs/plugins-and-mcp.md`](./docs/plugins-and-mcp.md) — plugin lifecycle + MCP protocol + OAuth discovery
 - [`docs/query.md`](./docs/query.md) — query types, search syntax, sort_by, ACL filtering
 - [`docs/testing.md`](./docs/testing.md) — xUnit + curl.sh + parallelism + common recipes

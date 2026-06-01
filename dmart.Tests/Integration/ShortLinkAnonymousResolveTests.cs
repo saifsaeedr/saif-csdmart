@@ -39,7 +39,6 @@ public sealed class ShortLinkAnonymousResolveTests
     }
 
     private const string AppUrl = "http://localhost:8282";
-    private const string InvitationLink = "https://app.example.com/web";
 
     [FactIfPg]
     public async Task AnonymousGet_OnHostStoredUrl_Returns_302()
@@ -57,26 +56,6 @@ public sealed class ShortLinkAnonymousResolveTests
             AllowAutoRedirect = false,
         });
         // Critically: NO Authorization header — proves AllowAnonymous() works.
-        var resp = await client.GetAsync($"/managed/s/{token}");
-        resp.StatusCode.ShouldBe(HttpStatusCode.Redirect);
-        resp.Headers.Location!.ToString().ShouldBe(target);
-    }
-
-    [FactIfPg]
-    public async Task AnonymousGet_InvitationLinkStoredUrl_Returns_302()
-    {
-        // InvitationService.ShortenAsync stores {InvitationLink}/auth/invitation?...
-        // (not {AppUrl}-prefixed). The resolver must accept InvitationLink as a
-        // trusted base or the public invitation flow 404s on every recipient.
-        var target = $"{InvitationLink}/auth/invitation?invitation=tok&lang=en&user-type=web";
-
-        var links = _onHost.Services.GetRequiredService<LinkRepository>();
-        var token = await links.CreateAsync(target);
-
-        using var client = _onHost.CreateClient(new WebApplicationFactoryClientOptions
-        {
-            AllowAutoRedirect = false,
-        });
         var resp = await client.GetAsync($"/managed/s/{token}");
         resp.StatusCode.ShouldBe(HttpStatusCode.Redirect);
         resp.Headers.Location!.ToString().ShouldBe(target);
@@ -139,7 +118,6 @@ public sealed class ShortLinkAnonymousResolveTests
         overrides["Dmart:AdminPassword"] = "admin-password-123";
         overrides["Dmart:AdminEmail"] = "admin@test.local";
         overrides["Dmart:AppUrl"] = AppUrl;
-        overrides["Dmart:InvitationLink"] = InvitationLink;
         overrides["Dmart:AuthRateLimitPerMinute"] = authRateLimit.ToString();
         if (!string.IsNullOrEmpty(DmartFactory.PgConn))
         {
