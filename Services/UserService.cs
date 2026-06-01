@@ -124,8 +124,15 @@ public sealed class UserService(
             emailVerified = true;
         }
 
-        var rolesList = ExtractStringList(attrs, "roles");
-        var groupsList = ExtractStringList(attrs, "groups");
+        // Self-registration must not let a user grant themselves access: the
+        // `roles`/`groups` attributes in the request body are deliberately
+        // ignored here. A user cannot set nor change their own role/group.
+        // Instead, when configured, every self-created user gets exactly the
+        // single default role/group from settings; otherwise the list starts
+        // empty. (The managed/admin create path is unaffected — an authorized
+        // admin may still assign roles/groups there.)
+        var rolesList = DefaultAccessOrEmpty(s.UserCreateDefaultRole);
+        var groupsList = DefaultAccessOrEmpty(s.UserCreateDefaultGroup);
         var language = ParseLanguage(ConvertToString(attrs.GetValueOrDefault("language")));
         var displayname = attrs.TryGetValue("displayname", out var dn) ? ParseTranslation(dn) : null;
         var description = attrs.TryGetValue("description", out var desc) ? ParseTranslation(desc) : null;
@@ -149,8 +156,8 @@ public sealed class UserService(
             Displayname = displayname,
             Description = description,
             Payload = payload,
-            Roles = rolesList ?? new(),
-            Groups = groupsList ?? new(),
+            Roles = rolesList,
+            Groups = groupsList,
             Type = UserType.Web,
             IsActive = true,
             IsEmailVerified = emailVerified,
@@ -193,21 +200,14 @@ public sealed class UserService(
         _ => v.ToString(),
     };
 
-    private static List<string>? ExtractStringList(Dictionary<string, object> attrs, string key)
-    {
-        if (!attrs.TryGetValue(key, out var raw) || raw is null) return null;
-        if (raw is JsonElement el && el.ValueKind == JsonValueKind.Array)
-        {
-            var list = new List<string>();
-            foreach (var item in el.EnumerateArray())
-                if (item.ValueKind == JsonValueKind.String) list.Add(item.GetString()!);
-            return list;
-        }
-        if (raw is List<string> stringList) return stringList;
-        if (raw is IEnumerable<object> objs)
-            return objs.Select(o => o?.ToString() ?? "").ToList();
-        return null;
-    }
+    // Translate a configured default role/group into the new user's access
+    // list: a configured value becomes the sole entry, a blank/whitespace
+    // setting means "no default" → empty list. Trimmed so a stray-space config
+    // value (e.g. "viewer ") doesn't mint a role name that never resolves.
+    private static List<string> DefaultAccessOrEmpty(string? configured)
+        => string.IsNullOrWhiteSpace(configured)
+            ? new List<string>()
+            : new List<string> { configured.Trim() };
 
     private static Translation? ParseTranslation(object? value)
     {
@@ -703,6 +703,11 @@ public sealed class UserService(
             resolvedPayload = resolvedPayload with { Body = mergedBody };
         }
 
+        // Roles and Groups are intentionally absent from this `with` block: a
+        // user can never change their own access via self-service
+        // /user/profile, so any `roles`/`groups` in the patch body is ignored
+        // and the stored values carry through unchanged. Mirrors the create
+        // path, which also refuses client-supplied roles/groups.
         var updated = user with
         {
             Email = resolvedEmail,

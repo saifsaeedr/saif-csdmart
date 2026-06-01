@@ -96,6 +96,18 @@ public sealed class DmartSettings
     // Python's `is_otp_for_create_required`.
     public bool IsOtpForCreateRequired { get; set; } = true;
 
+    // Self-service registration (POST /user/create) NEVER trusts the caller
+    // for access: any `roles`/`groups` in the request body is ignored so a
+    // user can't grant themselves privileges. When one of these is set, every
+    // newly self-created user instead receives exactly that single role and/or
+    // group; when unset (the default) the corresponding list starts empty.
+    // These apply ONLY to the self-service create path — the managed/admin
+    // create path (/managed/request) still assigns roles/groups from the body,
+    // because an authorized admin is allowed to set them. POST /user/profile
+    // likewise ignores roles/groups, so neither setting affects updates.
+    public string? UserCreateDefaultRole { get; set; }
+    public string? UserCreateDefaultGroup { get; set; }
+
     // Global TTL (seconds) for one-time passwords. OtpRepository enforces
     // this when verifying a code — entries older than OtpTokenTtl seconds
     // are treated as expired regardless of the per-endpoint "expires" value
