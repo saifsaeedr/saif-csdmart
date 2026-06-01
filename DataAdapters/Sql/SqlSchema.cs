@@ -385,6 +385,12 @@ public static class SqlSchema
     -- equivalent of running Alembic's upgrade head — safe to re-run, no effect
     -- when the column already exists. Add new columns to this list when you
     -- extend a SQL SELECT/INSERT so older DBs get patched automatically.
+
+    -- Security: the invitation feature was removed (it minted single-use
+    -- login tokens and returned them in API responses — an account-takeover
+    -- vector). Drop the table on existing deployments so any outstanding
+    -- tokens are purged on upgrade. Idempotent.
+    DROP TABLE IF EXISTS invitations;
     ALTER TABLE users       ADD COLUMN IF NOT EXISTS device_id             TEXT;
     ALTER TABLE users       ADD COLUMN IF NOT EXISTS google_id             TEXT;
     ALTER TABLE users       ADD COLUMN IF NOT EXISTS facebook_id           TEXT;
