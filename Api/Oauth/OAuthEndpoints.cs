@@ -58,7 +58,10 @@ public static class OAuthEndpoints
         // is issued — public clients prove themselves at token time via PKCE.
         g.MapPost("/register", HandleRegisterAsync)
             .Accepts<RegisterRequest>("application/json")
-            .Produces<RegisterResponse>(201);
+            .Produces<RegisterResponse>(201)
+            // Dynamic client registration is unauthenticated — throttle per IP
+            // so it can't be flooded with junk client records.
+            .RequireRateLimiting("auth-by-ip");
 
         // ---- Authorization endpoint (RFC 6749 §3.1) ----
         //
@@ -303,6 +306,14 @@ public static class OAuthEndpoints
         if (principal?.Identity?.Name is not string shortname)
             return OAuthError(400, "invalid_grant", "invalid refresh token");
 
+        // token_use guard: a stolen ACCESS token must not be redeemable here as
+        // a refresh token. Reject anything explicitly minted as "access";
+        // tolerate a missing claim (pre-upgrade tokens) so existing sessions
+        // keep refreshing until their own expiry, after which only
+        // "refresh"-tagged tokens are accepted.
+        if (string.Equals(ExtractTokenUse(refreshToken), "access", StringComparison.Ordinal))
+            return OAuthError(400, "invalid_grant", "not a refresh token");
+
         var user = await users.GetByShortnameAsync(shortname, ct);
         if (user is null)
             return OAuthError(400, "invalid_grant", "user no longer exists");
@@ -349,6 +360,24 @@ public static class OAuthEndpoints
             var payload = Convert.FromBase64String(padded);
             using var doc = System.Text.Json.JsonDocument.Parse(payload);
             return doc.RootElement.TryGetProperty("iat", out var iat) ? iat.GetInt64() : null;
+        }
+        catch { return null; }
+    }
+
+    // Reads the (unverified) `token_use` claim — the caller has already verified
+    // the signature via jwt.Validate before consulting this, so a plain payload
+    // decode is sufficient. Returns null when the claim is absent.
+    private static string? ExtractTokenUse(string jwtToken)
+    {
+        var parts = jwtToken.Split('.');
+        if (parts.Length != 3) return null;
+        try
+        {
+            var padded = parts[1].Replace('-', '+').Replace('_', '/');
+            padded += (padded.Length % 4) switch { 2 => "==", 3 => "=", _ => "" };
+            var payload = Convert.FromBase64String(padded);
+            using var doc = System.Text.Json.JsonDocument.Parse(payload);
+            return doc.RootElement.TryGetProperty("token_use", out var tu) ? tu.GetString() : null;
         }
         catch { return null; }
     }

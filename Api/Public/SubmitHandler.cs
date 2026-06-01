@@ -34,7 +34,9 @@ public static class SubmitHandler
             // into the created entry's payload.body). Documented as Record
             // for a familiar starting shape; the handler accepts any object.
             .Accepts<Record>("application/json")
-            .Produces<Response>();
+            .Produces<Response>()
+            // Anonymous write endpoint — throttle per IP so it can't be flooded.
+            .RequireRateLimiting("auth-by-ip");
     }
 
     private static async Task<Response> SubmitAsync(

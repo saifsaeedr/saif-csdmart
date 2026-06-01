@@ -455,6 +455,29 @@ public sealed class ImportExportService(
         // (which is guaranteed to exist via AdminBootstrap).
         _ = actor;
         using var archive = new ZipArchive(zip, ZipArchiveMode.Read);
+
+        // Decompression-bomb guard: reject before processing if the archive
+        // declares an absurd entry count or total uncompressed size. The
+        // central directory is bounded by the (50 MB) upload cap, so reading
+        // entry metadata here is safe; expanding the bodies would not be.
+        var importLimits = settingsOpt.Value;
+        if (importLimits.ImportMaxEntries > 0 && archive.Entries.Count > importLimits.ImportMaxEntries)
+            return Response.Fail(InternalErrorCode.INVALID_DATA,
+                $"import archive declares too many entries ({archive.Entries.Count} > {importLimits.ImportMaxEntries})",
+                ErrorTypes.Request);
+        if (importLimits.ImportMaxUncompressedBytes > 0)
+        {
+            long declaredTotal = 0;
+            foreach (var z in archive.Entries)
+            {
+                declaredTotal += z.Length;
+                if (declaredTotal > importLimits.ImportMaxUncompressedBytes)
+                    return Response.Fail(InternalErrorCode.INVALID_DATA,
+                        $"import archive uncompressed size exceeds the {importLimits.ImportMaxUncompressedBytes}-byte limit",
+                        ErrorTypes.Request);
+            }
+        }
+
         var entries = archive.Entries
             .Where(z => !string.IsNullOrEmpty(z.FullName) && !z.FullName.EndsWith("/"))
             .Select(ImportEntryRef.FromZip)

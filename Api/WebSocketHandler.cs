@@ -36,12 +36,14 @@ public static class WebSocketHandler
             // Authenticate via query string token (Python: ?token=...)
             var token = ctx.Request.Query["token"].ToString();
             string? userShortname = null;
+            string? authedToken = null;
             if (!string.IsNullOrEmpty(token))
             {
                 try
                 {
                     var principal = jwt.Validate(token);
                     userShortname = principal?.Identity?.Name;
+                    if (!string.IsNullOrEmpty(userShortname)) authedToken = token;
                 }
                 catch { /* invalid token */ }
             }
@@ -55,16 +57,46 @@ public static class WebSocketHandler
                     {
                         var principal = jwt.Validate(cookieToken);
                         userShortname = principal?.Identity?.Name;
+                        if (!string.IsNullOrEmpty(userShortname)) authedToken = cookieToken;
                     }
                     catch { /* invalid cookie */ }
                 }
             }
 
-            if (string.IsNullOrEmpty(userShortname))
+            if (string.IsNullOrEmpty(userShortname) || string.IsNullOrEmpty(authedToken))
             {
                 ctx.Response.StatusCode = 401;
                 await ctx.Response.WriteAsync("Invalid token");
                 return;
+            }
+
+            // jwt.Validate only proves signature + exp. Mirror the HTTP path
+            // (JwtBearerSetup.OnTokenValidated): the user must exist and be
+            // active, and — for non-bot users — the session row must still be
+            // live. Otherwise a logged-out / deactivated / idle-expired token
+            // could keep opening a /ws socket until its (default 30-day) exp,
+            // bypassing logout and revocation that the HTTP API enforces.
+            var wsUsers = ctx.RequestServices.GetRequiredService<DataAdapters.Sql.UserRepository>();
+            var wsSettings = ctx.RequestServices
+                .GetRequiredService<Microsoft.Extensions.Options.IOptions<Config.DmartSettings>>().Value;
+            var wsUser = await wsUsers.GetByShortnameAsync(userShortname, ctx.RequestAborted);
+            if (wsUser is null || !wsUser.IsActive)
+            {
+                ctx.Response.StatusCode = 401;
+                await ctx.Response.WriteAsync("Invalid token");
+                return;
+            }
+            if (wsUser.Type != Models.Enums.UserType.Bot)
+            {
+                var liveSession = wsSettings.SessionInactivityTtl > 0
+                    ? await wsUsers.TouchSessionAsync(userShortname, authedToken, wsSettings.SessionInactivityTtl, ctx.RequestAborted)
+                    : await wsUsers.IsSessionValidAsync(userShortname, authedToken, ctx.RequestAborted);
+                if (!liveSession)
+                {
+                    ctx.Response.StatusCode = 401;
+                    await ctx.Response.WriteAsync("Invalid token");
+                    return;
+                }
             }
 
             var ws = await ctx.WebSockets.AcceptWebSocketAsync();

@@ -100,4 +100,39 @@ public class UserCreateErrorCodesTests : IClassFixture<DmartFactory>
         // shortname from the first response.
         await TestUserCleanup.DeleteUserAndOwnedAsync(factory.Services, firstShortname);
     }
+
+    [FactIfPg]
+    public async Task Duplicate_Email_Without_Valid_Otp_Does_Not_Leak_Existence()
+    {
+        // Set up an existing user (OTP disabled for the setup factory).
+        var setup = _factory.WithWebHostBuilder(b => b.ConfigureServices(svcs =>
+            svcs.Configure<Dmart.Config.DmartSettings>(s => s.IsOtpForCreateRequired = false)));
+        var email = "enum_" + Guid.NewGuid().ToString("N")[..6] + "@x.y";
+        var createBody = "{\"attributes\":{\"email\":\"" + email + "\",\"password\":\"Testtest1234\"}}";
+        var first = await setup.CreateClient().PostAsync("/user/create",
+            new StringContent(createBody, Encoding.UTF8, "application/json"));
+        first.IsSuccessStatusCode.ShouldBeTrue();
+        var firstShortname = (await first.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response))!
+            .Records![0].Shortname;
+
+        try
+        {
+            // Probe the SAME email on the default factory (OTP REQUIRED) with a
+            // junk OTP. Pre-fix this returned DATA_SHOULD_BE_UNIQUE (an existence
+            // oracle) before the OTP was even checked; now the uniqueness check
+            // runs only after OTP verification, so an attacker without the real
+            // OTP just gets the generic OTP error.
+            var probe = "{\"attributes\":{\"email\":\"" + email + "\",\"password\":\"Testtest1234\",\"email_otp\":\"000000\"}}";
+            var resp = await _factory.CreateClient().PostAsync("/user/create",
+                new StringContent(probe, Encoding.UTF8, "application/json"));
+            var result = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
+            result!.Status.ShouldBe(Status.Failed);
+            result.Error!.Code.ShouldBe(InternalErrorCode.SESSION);             // "Invalid Email OTP"
+            result.Error.Code.ShouldNotBe(InternalErrorCode.DATA_SHOULD_BE_UNIQUE);
+        }
+        finally
+        {
+            await TestUserCleanup.DeleteUserAndOwnedAsync(setup.Services, firstShortname);
+        }
+    }
 }

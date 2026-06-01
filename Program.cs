@@ -1612,6 +1612,23 @@ builder.Services.Configure<Microsoft.AspNetCore.Builder.ForwardedHeadersOptions>
 {
     opts.ForwardedHeaders = Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedFor
                           | Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedProto;
+
+    // Trust X-Forwarded-For ONLY from configured proxies, and only the
+    // configured number of hops. This is what makes per-IP rate limiting work
+    // behind nginx: ASP.NET walks the XFF chain right-to-left across exactly
+    // ForwardLimit trusted hops and sets Connection.RemoteIpAddress to the real
+    // client. A direct attacker (not coming via a trusted proxy) has their XFF
+    // ignored, and one coming THROUGH the proxy can't extend the trusted-hop
+    // count, so neither can spoof their rate-limit / log identity. Loopback
+    // stays trusted by default (same-host nginx). See DmartSettings.TrustedProxies.
+    var fwdSettings = new DmartSettings();
+    builder.Configuration.GetSection("Dmart").Bind(fwdSettings);
+    opts.ForwardLimit = Math.Max(1, fwdSettings.ForwardedForHopCount);
+    var (trustedProxies, trustedNetworks) = fwdSettings.ParseTrustedProxies();
+    foreach (var proxy in trustedProxies)
+        opts.KnownProxies.Add(proxy);
+    foreach (var network in trustedNetworks)
+        opts.KnownIPNetworks.Add(network);
 });
 
 // Schema bootstrapper runs once on startup. AdminBootstrap MUST be registered AFTER

@@ -58,9 +58,12 @@ public sealed class OtpProvider(
             if (sent) return;
         }
 
-        // Fallback: log so developers can retrieve the code from server logs.
-        log.LogInformation("OTP for {Destination}: {Code} (delivery not implemented or gateway unavailable)",
-            destination, code);
+        // Delivery failed or no gateway is configured. Record that at Warning
+        // (no secret), and emit the code ONLY at Debug — production runs at
+        // Information+ so the live OTP never lands in production logs, while a
+        // dev with no gateway can still retrieve it by enabling Debug logging.
+        log.LogWarning("OTP for {Destination} not delivered (no gateway configured or send failed)", destination);
+        log.LogDebug("OTP code for {Destination}: {Code}", destination, code);
     }
 
     // Resolves `otp_message` from the loaded languages and substitutes the

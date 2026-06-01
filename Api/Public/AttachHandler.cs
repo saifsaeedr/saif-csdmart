@@ -26,6 +26,8 @@ public static class AttachHandler
                 await ResourceWithPayloadHandler.HandleAsync(req, entries, attachments,
                     perms, "anonymous", log, ct))
           .Produces<Response>()
+          // Anonymous upload endpoint — throttle per IP against attachment floods.
+          .RequireRateLimiting("auth-by-ip")
           .DisableAntiforgery();
 
         g.MapPost("/attach/{space_name}",
@@ -35,6 +37,8 @@ public static class AttachHandler
                                   ILogger<ResourceWithPayloadMarker> log, CancellationToken ct) =>
                 await HandleAttachAsync(space_name, req, entries, attachments, perms, settings.Value, log, ct))
           .Produces<Response>()
+          // Anonymous upload endpoint — throttle per IP against attachment floods.
+          .RequireRateLimiting("auth-by-ip")
           .DisableAntiforgery();
     }
 

@@ -87,8 +87,70 @@ public sealed class DmartSettings
     // immediately with HTTP 429 (no queue).
     public int AuthRateLimitPerMinute { get; set; } = 10;
 
+    // CSRF defense for cookie-borne auth. When true (default), the auth_token
+    // cookie is only accepted as a credential for requests that are NOT
+    // cross-site (judged by the browser-sent Sec-Fetch-Site header, or an
+    // explicit X-Requested-With for legacy clients) — a cross-site form POST or
+    // navigation can't forge either, so it can't ride a victim's cookie.
+    // Bearer-header (Authorization) callers are never affected. Set false only
+    // if a first-party browser client genuinely can't send those signals.
+    public bool CsrfProtectCookieAuth { get; set; } = true;
+
+    // ---- reverse proxy / real client IP ----
+    // When dmart runs behind nginx (or any L7 proxy / load balancer),
+    // X-Forwarded-For is how the real client IP reaches the app — and it is
+    // what the per-IP rate limiter and the access log key on. List the proxy's
+    // address(es) here so X-Forwarded-For is trusted ONLY from those hops:
+    //   * UNSET (default): X-Forwarded-For from a non-loopback peer is ignored,
+    //     so a direct attacker can't spoof their IP — BUT every client behind a
+    //     non-loopback proxy collapses into ONE rate-limit bucket (effectively
+    //     no per-client limiting). Set this whenever dmart is not the edge.
+    //   * OVER-BROAD: anyone inside the range can spoof their client IP via
+    //     X-Forwarded-For. Use the exact proxy address(es).
+    // Comma-separated IPs and/or CIDR networks, e.g. "10.0.0.5" or
+    // "10.0.0.0/24,172.16.0.0/12". Loopback stays trusted regardless.
+    public string TrustedProxies { get; set; } = "";
+
+    // Number of proxy hops in front of dmart — how many right-most
+    // X-Forwarded-For entries to trust. Match your topology (1 for a single
+    // nginx; 2 for e.g. CDN → nginx → dmart). Clamped to >= 1 when applied.
+    public int ForwardedForHopCount { get; set; } = 1;
+
+    // Parse TrustedProxies into individual proxy addresses and CIDR networks.
+    // Returns plain System.Net types so the trust list (the security-relevant
+    // bit) is unit-testable without standing up the ForwardedHeaders middleware.
+    // Unparseable / out-of-range entries are dropped rather than trusted; CIDR
+    // entries must be the canonical network address (e.g. 10.0.0.0/24).
+    public (List<System.Net.IPAddress> Proxies, List<System.Net.IPNetwork> Networks) ParseTrustedProxies()
+    {
+        var proxies = new List<System.Net.IPAddress>();
+        var networks = new List<System.Net.IPNetwork>();
+        foreach (var raw in (TrustedProxies ?? "")
+            .Split(',', System.StringSplitOptions.RemoveEmptyEntries | System.StringSplitOptions.TrimEntries))
+        {
+            if (raw.Contains('/'))
+            {
+                if (System.Net.IPNetwork.TryParse(raw, out var net)) networks.Add(net);
+            }
+            else if (System.Net.IPAddress.TryParse(raw, out var ip))
+            {
+                proxies.Add(ip);
+            }
+        }
+        return (proxies, networks);
+    }
+
     public int UrlShorterExpires { get; set; } = 60 * 60;
     public bool IsRegistrable { get; set; } = true;
+
+    // Decompression-bomb guards for the zip import path (POST /managed/import).
+    // A 50 MB upload can expand to many GB; reject archives whose central
+    // directory declares more than this many entries or this much total
+    // uncompressed data, BEFORE any of it is processed. Large migrations should
+    // use the filesystem import path (it streams from disk, no archive to
+    // expand). 0 disables the check.
+    public int ImportMaxEntries { get; set; } = 500_000;
+    public long ImportMaxUncompressedBytes { get; set; } = 2L * 1024 * 1024 * 1024; // 2 GiB
 
     // When true, POST /user/create requires a valid email_otp / msisdn_otp
     // attribute that was previously obtained via /user/otp-request. When

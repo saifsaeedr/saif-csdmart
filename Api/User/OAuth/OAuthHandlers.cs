@@ -53,7 +53,10 @@ public static class OAuthHandlers
             var info = await provider.ValidateIdTokenAsync(idToken, ct);
             if (info is null) return ProviderError("invalid google id token");
             return await CompleteLoginAsync(info, resolver, users, settings, http, ct);
-        });
+        })
+        // OAuth provider redirect callback — throttle per IP so it can't be
+        // hammered to amplify outbound code-exchange calls to the provider.
+        .RequireRateLimiting("auth-by-ip");
 
         g.MapPost("/google/mobile-login", async (HttpRequest req,
             GoogleProvider provider, OAuthUserResolver resolver,
@@ -87,7 +90,10 @@ public static class OAuthHandlers
             var info = await provider.ValidateAccessTokenAsync(access, ct);
             if (info is null) return ProviderError("invalid facebook access token");
             return await CompleteLoginAsync(info, resolver, users, settings, http, ct);
-        });
+        })
+        // OAuth provider redirect callback — throttle per IP so it can't be
+        // hammered to amplify outbound code-exchange calls to the provider.
+        .RequireRateLimiting("auth-by-ip");
 
         g.MapPost("/facebook/mobile-login", async (HttpRequest req,
             FacebookProvider provider, OAuthUserResolver resolver,
@@ -189,7 +195,10 @@ public static class OAuthHandlers
 
             var target = QueryHelpers.AddQueryString(redirect, "access_token", access);
             return Results.Redirect(target);
-        });
+        })
+        // Apple web sign-in callback — throttle per IP (does an outbound token
+        // exchange per hit) like the other provider callbacks.
+        .RequireRateLimiting("auth-by-ip");
 
         g.MapPost("/apple/mobile-login", async (HttpRequest req,
             AppleProvider provider, OAuthUserResolver resolver,

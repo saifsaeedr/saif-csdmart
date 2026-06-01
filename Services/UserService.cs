@@ -74,22 +74,11 @@ public sealed class UserService(
             return Result<(User, string, string)>.Fail(
                 InternalErrorCode.SESSION, validationMessage, ErrorTypes.Create);
 
-        // Split the duplicate check so the surfaced error code matches Python:
-        //   - email/msisdn conflict → DATA_SHOULD_BE_UNIQUE (415), type=request,
-        //     message "Entry properties should be unique: @<field>:<value>"
-        //     (Python adapter.py:validate_uniqueness, line 3276-3284)
-        //   - shortname conflict → SHORTNAME_ALREADY_EXIST (400), type=create,
-        //     message "already exists"
-        //     (Python adapter.py:create, line 2195-2202)
-        // Ordering matches Python: validate_uniqueness runs before db.create.
-        if (!string.IsNullOrEmpty(email) && await users.GetByEmailAsync(email, ct) is not null)
-            return Result<(User, string, string)>.Fail(
-                InternalErrorCode.DATA_SHOULD_BE_UNIQUE,
-                $"Entry properties should be unique: @email:{email} ", ErrorTypes.Request);
-        if (!string.IsNullOrEmpty(msisdn) && await users.GetByMsisdnAsync(msisdn, ct) is not null)
-            return Result<(User, string, string)>.Fail(
-                InternalErrorCode.DATA_SHOULD_BE_UNIQUE,
-                $"Entry properties should be unique: @msisdn:{msisdn} ", ErrorTypes.Request);
+        // Shortname conflict → SHORTNAME_ALREADY_EXIST (400). Self-registration
+        // server-allocates the shortname (RegistrationHandler sends "auto") so
+        // this never trips here; kept for any caller that supplies one. The
+        // email/msisdn uniqueness check is deliberately deferred until AFTER OTP
+        // verification below — see the anti-enumeration note there.
         if (!string.IsNullOrWhiteSpace(rec.Shortname)
             && await users.GetByShortnameAsync(rec.Shortname, ct) is not null)
             return Result<(User, string, string)>.Fail(
@@ -123,6 +112,23 @@ public sealed class UserService(
             }
             emailVerified = true;
         }
+
+        // Anti-enumeration: the email/msisdn uniqueness check runs ONLY after
+        // OTP verification. A caller who doesn't control the address can't
+        // produce its OTP, so they get the generic "Invalid OTP" error instead
+        // of a "@email:<value> already exists" existence oracle; a caller who
+        // does control it only learns about their own address. (Python ran this
+        // before OTP — we intentionally diverge to close the enumeration.) When
+        // is_otp_for_create_required=false the OTP gate is a no-op, so the
+        // surfaced DATA_SHOULD_BE_UNIQUE error is unchanged for that config.
+        if (!string.IsNullOrEmpty(email) && await users.GetByEmailAsync(email, ct) is not null)
+            return Result<(User, string, string)>.Fail(
+                InternalErrorCode.DATA_SHOULD_BE_UNIQUE,
+                $"Entry properties should be unique: @email:{email} ", ErrorTypes.Request);
+        if (!string.IsNullOrEmpty(msisdn) && await users.GetByMsisdnAsync(msisdn, ct) is not null)
+            return Result<(User, string, string)>.Fail(
+                InternalErrorCode.DATA_SHOULD_BE_UNIQUE,
+                $"Entry properties should be unique: @msisdn:{msisdn} ", ErrorTypes.Request);
 
         // Self-registration must not let a user grant themselves access: the
         // `roles`/`groups` attributes in the request body are deliberately

@@ -64,7 +64,9 @@ public static class JwtBearerSetup
                         if (string.IsNullOrEmpty(ctx.Token))
                         {
                             var fromCookie = ctx.Request.Cookies["auth_token"];
-                            if (!string.IsNullOrEmpty(fromCookie))
+                            // CSRF: only let the cookie act as a credential when
+                            // the request isn't cross-site (see CookieAuthAllowed).
+                            if (!string.IsNullOrEmpty(fromCookie) && CookieAuthAllowed(ctx.HttpContext))
                                 ctx.Token = fromCookie;
                         }
                         return Task.CompletedTask;
@@ -173,5 +175,25 @@ public static class JwtBearerSetup
 
         services.AddAuthorization();
         return services;
+    }
+
+    // CSRF defense for cookie-borne auth. The auth_token cookie is promoted to a
+    // bearer credential only when the request is NOT cross-site. Modern browsers
+    // send Sec-Fetch-Site automatically (same-origin/same-site/none for
+    // first-party use; cross-site for a forged request), and an explicit
+    // X-Requested-With is accepted for legacy clients — a cross-site form POST
+    // or top-level navigation can forge neither, so it can't ride a victim's
+    // cookie. Bearer-header (Authorization) callers never reach this path.
+    private static bool CookieAuthAllowed(Microsoft.AspNetCore.Http.HttpContext http)
+    {
+        var settings = http.RequestServices.GetRequiredService<IOptions<DmartSettings>>().Value;
+        if (!settings.CsrfProtectCookieAuth) return true;
+
+        var fetchSite = http.Request.Headers["Sec-Fetch-Site"].ToString();
+        if (fetchSite is "same-origin" or "same-site" or "none") return true;
+        if (string.Equals(fetchSite, "cross-site", StringComparison.OrdinalIgnoreCase)) return false;
+        // No Fetch-Metadata (older browser / non-browser client): fall back to
+        // requiring the custom header, which a cross-site form cannot set.
+        return http.Request.Headers.ContainsKey("X-Requested-With");
     }
 }
