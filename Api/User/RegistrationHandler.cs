@@ -125,6 +125,9 @@ public static class RegistrationHandler
                 DmartJsonContext.Default.Response);
         })
         .Accepts<UserCreateBody>("application/json")
-        .Produces<Response>();
+        .Produces<Response>()
+        // Self-registration is an unauthenticated, OTP-/email-spending,
+        // account-minting endpoint — throttle per IP like the other auth routes.
+        .RequireRateLimiting("auth-by-ip");
     }
 }

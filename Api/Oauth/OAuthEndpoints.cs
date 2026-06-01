@@ -58,7 +58,10 @@ public static class OAuthEndpoints
         // is issued — public clients prove themselves at token time via PKCE.
         g.MapPost("/register", HandleRegisterAsync)
             .Accepts<RegisterRequest>("application/json")
-            .Produces<RegisterResponse>(201);
+            .Produces<RegisterResponse>(201)
+            // Dynamic client registration is unauthenticated — throttle per IP
+            // so it can't be flooded with junk client records.
+            .RequireRateLimiting("auth-by-ip");
 
         // ---- Authorization endpoint (RFC 6749 §3.1) ----
         //
