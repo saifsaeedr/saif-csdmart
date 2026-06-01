@@ -87,6 +87,15 @@ public sealed class DmartSettings
     // immediately with HTTP 429 (no queue).
     public int AuthRateLimitPerMinute { get; set; } = 10;
 
+    // CSRF defense for cookie-borne auth. When true (default), the auth_token
+    // cookie is only accepted as a credential for requests that are NOT
+    // cross-site (judged by the browser-sent Sec-Fetch-Site header, or an
+    // explicit X-Requested-With for legacy clients) — a cross-site form POST or
+    // navigation can't forge either, so it can't ride a victim's cookie.
+    // Bearer-header (Authorization) callers are never affected. Set false only
+    // if a first-party browser client genuinely can't send those signals.
+    public bool CsrfProtectCookieAuth { get; set; } = true;
+
     // ---- reverse proxy / real client IP ----
     // When dmart runs behind nginx (or any L7 proxy / load balancer),
     // X-Forwarded-For is how the real client IP reaches the app — and it is
