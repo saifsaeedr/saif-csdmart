@@ -35,9 +35,6 @@ public sealed class ShortLinkService(LinkRepository links, IOptions<DmartSetting
             && stored.Port == b.Port;
     }
 
-    public Task<string> CreateAsync(string targetUrl, CancellationToken ct = default)
-        => links.CreateAsync(targetUrl, ct);
-
     public async Task CreateAsync(string token, string targetUrl, TimeSpan expires, CancellationToken ct = default)
     {
         await links.CreateWithTokenAsync(token, targetUrl, TimeUtils.Now().Add(expires), ct);

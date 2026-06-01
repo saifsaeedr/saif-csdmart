@@ -35,7 +35,10 @@ public static class ShortLinkHandler
                 return Response.Fail(InternalErrorCode.MISSING_DATA, "shortname required", ErrorTypes.Request);
             var shortname = parts[^1];
             var subpath = parts.Length > 1 ? string.Join("/", parts[..^1]) : "/";
-            var token = Guid.NewGuid().ToString("N")[..8];
+            // 128-bit CSPRNG token (32 hex) — the old 8-hex (32-bit) token was
+            // brute-force enumerable by the anonymous resolver.
+            var token = System.Convert.ToHexString(
+                System.Security.Cryptography.RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
             var appUrl = settings.Value.AppUrl;
             var fullUrl = $"{appUrl}/managed/entry/content/{space}/{subpath}/{shortname}";
             var expires = settings.Value.UrlShorterExpires;

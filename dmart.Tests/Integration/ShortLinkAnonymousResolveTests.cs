@@ -62,6 +62,23 @@ public sealed class ShortLinkAnonymousResolveTests
     }
 
     [FactIfPg]
+    public async Task AnonymousGet_ExpiredLink_Returns_404()
+    {
+        // A link whose expiry is already in the past must NOT resolve — the
+        // resolver enforces `timestamp > now`, so expired short links 404.
+        var target = $"{AppUrl}/managed/entry/content/management/users/dmart";
+        var links = _onHost.Services.GetRequiredService<LinkRepository>();
+        var token = await links.CreateAsync(target, ttl: TimeSpan.FromSeconds(-60));
+
+        using var client = _onHost.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false,
+        });
+        var resp = await client.GetAsync($"/managed/s/{token}");
+        resp.StatusCode.ShouldBe(HttpStatusCode.NotFound);
+    }
+
+    [FactIfPg]
     public async Task AnonymousGet_OffHostStoredUrl_Returns_404()
     {
         // Stored URL points at a different host than AppUrl: the resolver's
