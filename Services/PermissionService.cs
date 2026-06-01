@@ -307,6 +307,28 @@ public sealed class PermissionService(UserRepository users, AccessRepository acc
     public Task<bool> CanDeleteAsync(string? actor, Locator l, ResourceContext? r, CancellationToken ct = default)
         => CanAsync(actor, "delete", l, r, null, ct);
 
+    // Cross-space bulk operations (POST /managed/import, /managed/export) write
+    // or read rows in EVERY space and bypass per-row ACLs (the importer trusts
+    // each row's own owner_shortname). Gating them on mere authentication would
+    // let any logged-in user — including a freshly self-registered, role-less
+    // one — import management/users|roles|permissions rows and escalate to
+    // super_admin. So they require an EFFECTIVE super-admin: an active
+    // permission spanning __all_spaces__ → __all_subpaths__ with write
+    // authority (the bootstrap `super_manager` grant). Anonymous is never one.
+    public async Task<bool> IsGlobalAdminAsync(string? actorShortname, CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(actorShortname) || actorShortname == AnonymousUser)
+            return false;
+        var (user, perms) = await ResolvePermissionsAsync(actorShortname, ct);
+        if (user is null || !user.IsActive) return false;
+        return perms.Any(p =>
+            p.IsActive
+            && p.Subpaths.TryGetValue(AllSpacesMw, out var subs)
+            && subs.Contains(AllSubpathsMw, StringComparer.Ordinal)
+            && p.Actions.Contains("create", StringComparer.Ordinal)
+            && p.Actions.Contains("update", StringComparer.Ordinal));
+    }
+
     // Mirrors Python's utils/query_policies_helper.py:get_user_query_policies.
     // Builds the list of LIKE-capable patterns (owner-aware) that restrict
     // which entries.query_policies rows an actor may read. Returns empty
