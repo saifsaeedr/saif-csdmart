@@ -124,57 +124,58 @@ public static class ProfileHandler
         // the response body since the C# port has no SMTP/SMS delivery.
         // Flips ForcePasswordChange=true so the target must set a new
         // password on first /profile update after invitation login.
-        g.MapPost("/reset", async (HttpRequest req, HttpContext http,
-            UserRepository users, InvitationService invitationService,
-            CancellationToken ct) =>
-        {
-            var actor = http.Actor();
-            if (actor is null)
-                return Response.Fail(InternalErrorCode.NOT_AUTHENTICATED, "login required", ErrorTypes.Auth);
 
-            Dictionary<string, object>? body;
-            try
-            {
-                body = await JsonSerializer.DeserializeAsync(req.Body, DmartJsonContext.Default.DictionaryStringObject, ct);
-            }
-            catch (JsonException ex)
-            {
-                return Response.Fail(InternalErrorCode.INVALID_DATA, ex.Message, ErrorTypes.Request);
-            }
-            var target = body?.TryGetValue("shortname", out var sn) == true ? sn?.ToString() : null;
-            if (string.IsNullOrEmpty(target))
-                return Response.Fail(InternalErrorCode.MISSING_DATA, "shortname required", ErrorTypes.Request);
-
-            var existing = await users.GetByShortnameAsync(target, ct);
-            if (existing is null)
-                return Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "user not found", ErrorTypes.Request);
-
-            await users.ResetAttemptsAsync(target, ct);
-            // Flip the flag so the next login forces a fresh password choice.
-            await users.UpsertAsync(existing with
-            {
-                ForcePasswordChange = true,
-                UpdatedAt = TimeUtils.Now(),
-            }, ct);
-
-            var minted = new Dictionary<string, string>();
-            if (!string.IsNullOrWhiteSpace(existing.Email))
-            {
-                var t = await invitationService.MintAsync(existing, Dmart.Models.Enums.InvitationChannel.Email, ct);
-                if (t is not null) minted["email"] = t;
-            }
-            if (!string.IsNullOrWhiteSpace(existing.Msisdn))
-            {
-                var t = await invitationService.MintAsync(existing, Dmart.Models.Enums.InvitationChannel.Sms, isReset: true, ct);
-                if (t is not null) minted["msisdn"] = t;
-            }
-
-            var attrs = new Dictionary<string, object> { ["shortname"] = target };
-            if (minted.Count > 0) attrs["invitations"] = minted;
-            return Response.Ok(attributes: attrs);
-        })
-        .Accepts<ResetUserBody>("application/json")
-        .Produces<Response>();
+        // g.MapPost("/reset", async (HttpRequest req, HttpContext http,
+        //     UserRepository users, InvitationService invitationService,
+        //     CancellationToken ct) =>
+        // {
+        //     var actor = http.Actor();
+        //     if (actor is null)
+        //         return Response.Fail(InternalErrorCode.NOT_AUTHENTICATED, "login required", ErrorTypes.Auth);
+        //
+        //     Dictionary<string, object>? body;
+        //     try
+        //     {
+        //         body = await JsonSerializer.DeserializeAsync(req.Body, DmartJsonContext.Default.DictionaryStringObject, ct);
+        //     }
+        //     catch (JsonException ex)
+        //     {
+        //         return Response.Fail(InternalErrorCode.INVALID_DATA, ex.Message, ErrorTypes.Request);
+        //     }
+        //     var target = body?.TryGetValue("shortname", out var sn) == true ? sn?.ToString() : null;
+        //     if (string.IsNullOrEmpty(target))
+        //         return Response.Fail(InternalErrorCode.MISSING_DATA, "shortname required", ErrorTypes.Request);
+        //
+        //     var existing = await users.GetByShortnameAsync(target, ct);
+        //     if (existing is null)
+        //         return Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "user not found", ErrorTypes.Request);
+        //
+        //     await users.ResetAttemptsAsync(target, ct);
+        //     // Flip the flag so the next login forces a fresh password choice.
+        //     await users.UpsertAsync(existing with
+        //     {
+        //         ForcePasswordChange = true,
+        //         UpdatedAt = TimeUtils.Now(),
+        //     }, ct);
+        //
+        //     var minted = new Dictionary<string, string>();
+        //     if (!string.IsNullOrWhiteSpace(existing.Email))
+        //     {
+        //         var t = await invitationService.MintAsync(existing, Dmart.Models.Enums.InvitationChannel.Email, ct);
+        //         if (t is not null) minted["email"] = t;
+        //     }
+        //     if (!string.IsNullOrWhiteSpace(existing.Msisdn))
+        //     {
+        //         var t = await invitationService.MintAsync(existing, Dmart.Models.Enums.InvitationChannel.Sms, isReset: true, ct);
+        //         if (t is not null) minted["msisdn"] = t;
+        //     }
+        //
+        //     var attrs = new Dictionary<string, object> { ["shortname"] = target };
+        //     if (minted.Count > 0) attrs["invitations"] = minted;
+        //     return Response.Ok(attributes: attrs);
+        // })
+        // .Accepts<ResetUserBody>("application/json")
+        // .Produces<Response>();
 
         // POST /user/validate_password — Python verifies against stored hash,
         // requires authentication. Returns {valid: bool}.
