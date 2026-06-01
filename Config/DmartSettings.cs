@@ -134,6 +134,15 @@ public sealed class DmartSettings
     public int UrlShorterExpires { get; set; } = 60 * 60;
     public bool IsRegistrable { get; set; } = true;
 
+    // Decompression-bomb guards for the zip import path (POST /managed/import).
+    // A 50 MB upload can expand to many GB; reject archives whose central
+    // directory declares more than this many entries or this much total
+    // uncompressed data, BEFORE any of it is processed. Large migrations should
+    // use the filesystem import path (it streams from disk, no archive to
+    // expand). 0 disables the check.
+    public int ImportMaxEntries { get; set; } = 500_000;
+    public long ImportMaxUncompressedBytes { get; set; } = 2L * 1024 * 1024 * 1024; // 2 GiB
+
     // When true, POST /user/create requires a valid email_otp / msisdn_otp
     // attribute that was previously obtained via /user/otp-request. When
     // false, registration proceeds without OTP verification. Mirrors
