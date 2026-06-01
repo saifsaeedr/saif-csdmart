@@ -13,8 +13,18 @@ public static class ImportExportHandler
         // an optional path prefix; we accept it but currently ignore it (not used by
         // most clients).
         g.MapPost("/import",
-            async (HttpRequest req, ImportExportService io, HttpContext http, CancellationToken ct) =>
+            async (HttpRequest req, ImportExportService io, PermissionService perms, HttpContext http, CancellationToken ct) =>
             {
+                // Import writes arbitrary rows across every space and bypasses
+                // per-row ACLs (each row keeps its own owner_shortname), so the
+                // /managed group's bare RequireAuthorization() is not enough —
+                // require an effective super-admin, else any logged-in user
+                // could upload management/users|roles|permissions rows and
+                // escalate to super_admin.
+                if (!await perms.IsGlobalAdminAsync(http.Actor(), ct))
+                    return Response.Fail(InternalErrorCode.NOT_ALLOWED,
+                        "not allowed to import — global admin required", ErrorTypes.Request);
+
                 Stream zipStream;
                 if (req.HasFormContentType)
                 {
@@ -42,8 +52,17 @@ public static class ImportExportHandler
         // on the query string — clients sending a Query body always got
         // "space required" because `space` was unbound.
         g.MapPost("/export",
-            async (HttpRequest req, ImportExportService io, HttpContext http, CancellationToken ct) =>
+            async (HttpRequest req, ImportExportService io, PermissionService perms, HttpContext http, CancellationToken ct) =>
             {
+                // Export streams every matched row regardless of per-row ACLs,
+                // so — like import — it must be gated to an effective
+                // super-admin, not merely an authenticated user.
+                if (!await perms.IsGlobalAdminAsync(http.Actor(), ct))
+                    return Results.Json(
+                        Response.Fail(InternalErrorCode.NOT_ALLOWED,
+                            "not allowed to export — global admin required", ErrorTypes.Request),
+                        DmartJsonContext.Default.Response, statusCode: 401);
+
                 Query? query;
                 try
                 {
