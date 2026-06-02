@@ -328,12 +328,12 @@ public sealed class PluginManager(
         // declares schemas. Empty list = "match every schema" (mirrors the
         // permission engine's empty-list-means-all convention).
         if (e.ResourceType == ResourceType.Content
-            && filters.SchemaShortnames.Count > 0
+            && filters.SchemaShortnames is { Count: > 0 }
             && (e.SchemaShortname is null || !filters.SchemaShortnames.Contains(e.SchemaShortname, StringComparer.Ordinal)))
             return false;
 
         // Empty resource_types = match every resource_type.
-        if (filters.ResourceTypes.Count > 0
+        if (filters.ResourceTypes is { Count: > 0 }
             && e.ResourceType is not null
             && !filters.ResourceTypes.Contains(JsonbHelpers.EnumMember(e.ResourceType.Value), StringComparer.Ordinal))
             return false;
@@ -346,9 +346,9 @@ public sealed class PluginManager(
     // OR the __all_spaces__ wildcard entry. Within each entry, an empty
     // patterns list is treated as "no patterns ⇒ no match" so authors must
     // explicitly opt in to "everything" via __all_subpaths__.
-    private static bool MatchSpaceAndSubpath(Dictionary<string, List<string>> subpathDict, Event e)
+    private static bool MatchSpaceAndSubpath(Dictionary<string, List<string>>? subpathDict, Event e)
     {
-        if (subpathDict.Count == 0) return false;
+        if (subpathDict is null || subpathDict.Count == 0) return false;
         var normalizedEventSubpath = NormalizeEventSubpath(e.Subpath);
 
         if (subpathDict.TryGetValue(e.SpaceName, out var perSpace)
