@@ -200,13 +200,9 @@ public sealed class PluginManager(
                     }
                     var loaded = new LoadedHook(w, hookInstance);
                     var targetDict = w.ListenTime == EventListenTime.Before ? _before : _after;
-                    // Null or empty Actions ⇒ "every action" (mirrors the
-                    // empty-list convention for resource_types and
-                    // schema_shortnames). Actions can deserialize null when
-                    // config.json sends "actions": null, so guard with the same
-                    // null-safe pattern MatchedFilters uses — an NRE here has no
-                    // surrounding try/catch and would abort the whole Register loop.
-                    var actionsToRegister = w.Filters.Actions is not { Count: > 0 }
+                    // Empty Actions list ⇒ "every action" (mirrors the empty-list
+                    // convention for resource_types and schema_shortnames).
+                    var actionsToRegister = w.Filters.Actions.Count == 0
                         ? Enum.GetValues<ActionType>().Select(JsonbHelpers.EnumMember).ToList()
                         : w.Filters.Actions;
                     foreach (var actionStr in actionsToRegister)
@@ -332,12 +328,12 @@ public sealed class PluginManager(
         // declares schemas. Empty list = "match every schema" (mirrors the
         // permission engine's empty-list-means-all convention).
         if (e.ResourceType == ResourceType.Content
-            && filters.SchemaShortnames is { Count: > 0 }
+            && filters.SchemaShortnames.Count > 0
             && (e.SchemaShortname is null || !filters.SchemaShortnames.Contains(e.SchemaShortname, StringComparer.Ordinal)))
             return false;
 
         // Empty resource_types = match every resource_type.
-        if (filters.ResourceTypes is { Count: > 0 }
+        if (filters.ResourceTypes.Count > 0
             && e.ResourceType is not null
             && !filters.ResourceTypes.Contains(JsonbHelpers.EnumMember(e.ResourceType.Value), StringComparer.Ordinal))
             return false;
@@ -350,9 +346,9 @@ public sealed class PluginManager(
     // OR the __all_spaces__ wildcard entry. Within each entry, an empty
     // patterns list is treated as "no patterns ⇒ no match" so authors must
     // explicitly opt in to "everything" via __all_subpaths__.
-    private static bool MatchSpaceAndSubpath(Dictionary<string, List<string>>? subpathDict, Event e)
+    private static bool MatchSpaceAndSubpath(Dictionary<string, List<string>> subpathDict, Event e)
     {
-        if (subpathDict is null || subpathDict.Count == 0) return false;
+        if (subpathDict.Count == 0) return false;
         var normalizedEventSubpath = NormalizeEventSubpath(e.Subpath);
 
         if (subpathDict.TryGetValue(e.SpaceName, out var perSpace)

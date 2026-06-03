@@ -199,45 +199,16 @@ public class PluginManagerTests
         PluginManager.HasLegacySubpathsShape(apiOnly).ShouldBeFalse();
     }
 
-    // ==================== Null filter members (deserialized null) ====================
-    // EventFilter's list/dict members carry default initializers, but a config.json
-    // with a present-but-null key ("schema_shortnames": null) makes System.Text.Json
-    // source-gen overwrite that default with null. Matching/registration must treat
-    // null exactly like the empty default — "match all" — rather than throw an NRE.
+    // ==================== Registration: null/empty Actions ⇒ all actions ====================
 
     [Fact]
-    public void Null_SchemaShortnames_Matches_All_Schemas()
+    public void Register_NullActions_Registers_Hook_For_All_Actions()
     {
-        var f = AllFilter("create") with { SchemaShortnames = null! };
-        PluginManager.MatchedFilters(f, Evt("/", ResourceType.Content, schema: "anything"))
-            .ShouldBeTrue();
-    }
-
-    [Fact]
-    public void Null_ResourceTypes_Matches_All()
-    {
-        var f = AllFilter("create") with { ResourceTypes = null! };
-        PluginManager.MatchedFilters(f, Evt("/", ResourceType.Ticket)).ShouldBeTrue();
-    }
-
-    [Fact]
-    public void Null_Subpaths_Matches_Nothing()
-    {
-        // Mirrors Empty_Subpaths_Dict_Matches_Nothing: a null subpaths dict is
-        // "no opt-in ⇒ no match", not an NRE.
-        var f = AllFilter("create") with { Subpaths = null! };
-        PluginManager.MatchedFilters(f, Evt("/x")).ShouldBeFalse();
-    }
-
-    [Fact]
-    public void Register_NullActions_DoesNotThrow_And_Registers_Hook()
-    {
-        // The registration path (PluginManager.Register) reads Filters.Actions to
-        // decide which ActionType buckets the hook subscribes to. A null Actions
-        // (from "actions": null in config.json) must mean "every action", same as
-        // the empty-list default. Register() has no per-wrapper try/catch, so an
-        // NRE here would abort registration of every remaining plugin — this pins
-        // that it doesn't.
+        // Registration reads Filters.Actions to pick which ActionType buckets a
+        // hook subscribes to. EventFilter normalizes a null Actions (from
+        // "actions": null in config.json) to empty, and empty ⇒ "every action".
+        // Register() has no per-wrapper try/catch, so this also pins that a
+        // null-ish Actions can't take down the whole registration loop.
         var pm = new PluginManager(
             new IHookPlugin[] { new NoopHook() },
             Array.Empty<IApiPlugin>(),
