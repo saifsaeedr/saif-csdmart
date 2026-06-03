@@ -533,6 +533,50 @@ public class PermissionServiceIntegrationTests : IClassFixture<DmartFactory>
     }
 
     [FactIfPg]
+    public async Task NonGrantableRolesAsync_Flags_Roles_Not_Delegated_To_Actor()
+    {
+        var (perms, _, access) = Resolve();
+        var editor = $"gb_ed_{Guid.NewGuid():N}"[..18];
+        var secret = $"gb_se_{Guid.NewGuid():N}"[..18];
+        var inactive = $"gb_in_{Guid.NewGuid():N}"[..18];
+        try
+        {
+            // editor is delegated to anyone holding "user_manager"; secret is not delegated.
+            await access.UpsertRoleAsync(BuildRole(editor) with { GrantableBy = new() { "user_manager" } });
+            await access.UpsertRoleAsync(BuildRole(secret)); // GrantableBy == null
+            await access.UpsertRoleAsync(
+                BuildRole(inactive) with { GrantableBy = new() { "user_manager" }, IsActive = false });
+            await access.InvalidateAllCachesAsync();
+
+            // Actor holds user_manager → may grant editor, may NOT grant secret.
+            (await perms.NonGrantableRolesAsync(new[] { editor, secret }, new[] { "user_manager" }))
+                .ShouldBe(new[] { secret });
+
+            // Actor holds something unrelated → may grant neither.
+            (await perms.NonGrantableRolesAsync(new[] { editor }, new[] { "nobody" }))
+                .ShouldBe(new[] { editor });
+
+            // Holding the role itself no longer implies grant rights (own-roles removed).
+            (await perms.NonGrantableRolesAsync(new[] { editor }, new[] { editor }))
+                .ShouldBe(new[] { editor });
+
+            // An inactive grantee role is non-grantable even though its grantable_by matches.
+            (await perms.NonGrantableRolesAsync(new[] { inactive }, new[] { "user_manager" }))
+                .ShouldBe(new[] { inactive });
+
+            // Empty request → empty result.
+            (await perms.NonGrantableRolesAsync(Array.Empty<string>(), new[] { "user_manager" }))
+                .ShouldBeEmpty();
+        }
+        finally
+        {
+            try { await access.DeleteRoleAsync(editor); } catch { }
+            try { await access.DeleteRoleAsync(secret); } catch { }
+            try { await access.DeleteRoleAsync(inactive); } catch { }
+        }
+    }
+
+    [FactIfPg]
     public async Task GrantableBy_RoundTrips_Through_Upsert_And_Hydrate()
     {
         var (_, _, access) = Resolve();
