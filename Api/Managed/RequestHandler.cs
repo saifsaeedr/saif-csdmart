@@ -1414,6 +1414,9 @@ public static class RequestHandler
     // JsonElement, identical to AccessRepository's read path). Absent or JSON
     // null → null (clears the column); `{}` → empty dict. Mirrors the source-gen
     // landing form: HTTP callers arrive as JsonElement, in-process as a dict.
+    // A non-object value (array/string/number) is lenient-coerced to null —
+    // i.e. treated as "clear" rather than rejected, matching the other Extract*
+    // helpers; structural validation of this field is not done here.
     private static Dictionary<string, object>? ExtractDictStringObject(Dictionary<string, object> attrs, string key)
     {
         if (!attrs.TryGetValue(key, out var raw) || raw is null) return null;

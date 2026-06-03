@@ -209,7 +209,6 @@
         try {
             if (formData) formData.allowed_fields_values = JSON.parse(jsonEditorContent);
         } catch (e) {
-            console.log(e)
             showToast(Level.warn, 'Invalid JSON format in Allowed Fields Values', 'Please correct the JSON syntax.');
         }
 
