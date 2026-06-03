@@ -315,6 +315,22 @@ public sealed class PermissionService(UserRepository users, AccessRepository acc
     // super_admin. So they require an EFFECTIVE super-admin: an active
     // permission spanning __all_spaces__ → __all_subpaths__ with write
     // authority (the bootstrap `super_manager` grant). Anonymous is never one.
+    // Returns the union of allowed_roles from all active permissions the actor holds.
+    // Used by EnforcePrivilegeFloorAsync so a permission can explicitly grant
+    // role-assignment authority beyond the actor's own held roles.
+    public async Task<HashSet<string>> GetAllowedRolesAsync(string? actorShortname, CancellationToken ct = default)
+    {
+        actorShortname ??= AnonymousUser;
+        var (_, perms) = await ResolvePermissionsAsync(actorShortname, ct);
+        var result = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var p in perms)
+        {
+            if (!p.IsActive || p.AllowedRoles is not { Count: > 0 }) continue;
+            foreach (var role in p.AllowedRoles) result.Add(role);
+        }
+        return result;
+    }
+
     public async Task<bool> IsGlobalAdminAsync(string? actorShortname, CancellationToken ct = default)
     {
         if (string.IsNullOrEmpty(actorShortname) || actorShortname == AnonymousUser)

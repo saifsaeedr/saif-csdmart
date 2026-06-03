@@ -23,7 +23,7 @@ public sealed class AccessRepository(Db db, AuthzCacheRefresher refresher, UserR
                owner_shortname, owner_group_shortname, acl, payload, relationships,
                last_checksum_history, resource_type, subpaths, resource_types,
                actions, conditions, restricted_fields, allowed_fields_values,
-               filter_fields_values, query_policies
+               filter_fields_values, query_policies, allowed_roles
         FROM permissions
         """;
 
@@ -177,8 +177,8 @@ public sealed class AccessRepository(Db db, AuthzCacheRefresher refresher, UserR
                                      owner_shortname, owner_group_shortname, acl, payload, relationships,
                                      last_checksum_history, resource_type, subpaths, resource_types,
                                      actions, conditions, restricted_fields, allowed_fields_values,
-                                     filter_fields_values, query_policies)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
+                                     filter_fields_values, query_policies, allowed_roles)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
             ON CONFLICT (shortname, space_name, subpath) DO UPDATE SET
                 is_active = EXCLUDED.is_active,
                 slug = EXCLUDED.slug,
@@ -199,7 +199,8 @@ public sealed class AccessRepository(Db db, AuthzCacheRefresher refresher, UserR
                 restricted_fields = EXCLUDED.restricted_fields,
                 allowed_fields_values = EXCLUDED.allowed_fields_values,
                 filter_fields_values = EXCLUDED.filter_fields_values,
-                query_policies = EXCLUDED.query_policies
+                query_policies = EXCLUDED.query_policies,
+                allowed_roles = EXCLUDED.allowed_roles
             """, conn);
 
         cmd.Parameters.Add(new() { Value = Guid.Parse(p.Uuid) });
@@ -232,6 +233,7 @@ public sealed class AccessRepository(Db db, AuthzCacheRefresher refresher, UserR
             Value = p.QueryPolicies.ToArray(),
             NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text,
         });
+        AddJsonb(cmd, JsonbHelpers.ToJsonb(p.AllowedRoles));
 
         await cmd.ExecuteNonQueryAsync(ct);
         // permission shape changed → invalidate cached resolutions.
@@ -449,6 +451,7 @@ public sealed class AccessRepository(Db db, AuthzCacheRefresher refresher, UserR
             AllowedFieldsValues = JsonbHelpers.FromDictStringObject(r.IsDBNull(23) ? null : r.GetString(23)),
             FilterFieldsValues = r.IsDBNull(24) ? null : r.GetString(24),
             QueryPolicies = r.IsDBNull(25) ? new() : ((string[])r.GetValue(25)).ToList(),
+            AllowedRoles = JsonbHelpers.FromListString(r.IsDBNull(26) ? null : r.GetString(26)),
         };
     }
 }

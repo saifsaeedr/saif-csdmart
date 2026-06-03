@@ -1397,13 +1397,13 @@ public static class RequestHandler
                 ErrorTypes.Request);
 
         // User roles/groups: a non-admin may only assign values they themselves
-        // hold — enough to delegate within their own authority, never to
-        // escalate (e.g. to super_admin, which they don't hold).
+        // hold, OR roles that appear in their permissions' allowed_roles list.
         var self = await users.GetByShortnameAsync(actor, ct);
         var ownRoles  = self?.Roles  ?? new List<string>();
         var ownGroups = self?.Groups ?? new List<string>();
+        var allowedRoles = await perms.GetAllowedRolesAsync(actor, ct);
         var disallowed = (ExtractStringList(attrs, "roles") ?? new())
-                .Where(r => !ownRoles.Contains(r, StringComparer.Ordinal))
+                .Where(r => !ownRoles.Contains(r, StringComparer.Ordinal) && !allowedRoles.Contains(r))
             .Concat((ExtractStringList(attrs, "groups") ?? new())
                 .Where(g => !ownGroups.Contains(g, StringComparer.Ordinal)))
             .ToList();

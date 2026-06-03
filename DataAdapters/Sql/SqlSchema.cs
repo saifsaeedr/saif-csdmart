@@ -149,6 +149,7 @@ public static class SqlSchema
         restricted_fields       JSONB,
         allowed_fields_values   JSONB,
         filter_fields_values    TEXT,
+        allowed_roles           JSONB,
         query_policies          TEXT[] NOT NULL DEFAULT '{}',
 
         UNIQUE (shortname, space_name, subpath)
@@ -405,6 +406,7 @@ public static class SqlSchema
     ALTER TABLE roles       ADD COLUMN IF NOT EXISTS last_checksum_history TEXT;
     ALTER TABLE roles       ADD COLUMN IF NOT EXISTS query_policies        TEXT[] NOT NULL DEFAULT '{}';
     ALTER TABLE permissions ADD COLUMN IF NOT EXISTS last_checksum_history TEXT;
+    ALTER TABLE permissions ADD COLUMN IF NOT EXISTS allowed_roles         JSONB;
     ALTER TABLE permissions ADD COLUMN IF NOT EXISTS query_policies        TEXT[] NOT NULL DEFAULT '{}';
     ALTER TABLE entries     ADD COLUMN IF NOT EXISTS last_checksum_history TEXT;
     ALTER TABLE entries     ADD COLUMN IF NOT EXISTS query_policies        TEXT[] NOT NULL DEFAULT '{}';

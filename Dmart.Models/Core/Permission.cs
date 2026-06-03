@@ -35,6 +35,7 @@ public sealed record Permission
     public List<string>? RestrictedFields { get; init; }
     public Dictionary<string, object>? AllowedFieldsValues { get; init; }
     public string? FilterFieldsValues { get; init; }
+    public List<string>? AllowedRoles { get; init; }
     [JsonIgnore]
     public List<string> QueryPolicies { get; init; } = new();
 }
