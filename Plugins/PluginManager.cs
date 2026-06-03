@@ -200,9 +200,13 @@ public sealed class PluginManager(
                     }
                     var loaded = new LoadedHook(w, hookInstance);
                     var targetDict = w.ListenTime == EventListenTime.Before ? _before : _after;
-                    // Empty Actions list ⇒ "every action" (mirrors the empty-list
-                    // convention for resource_types and schema_shortnames).
-                    var actionsToRegister = w.Filters.Actions.Count == 0
+                    // Null or empty Actions ⇒ "every action" (mirrors the
+                    // empty-list convention for resource_types and
+                    // schema_shortnames). Actions can deserialize null when
+                    // config.json sends "actions": null, so guard with the same
+                    // null-safe pattern MatchedFilters uses — an NRE here has no
+                    // surrounding try/catch and would abort the whole Register loop.
+                    var actionsToRegister = w.Filters.Actions is not { Count: > 0 }
                         ? Enum.GetValues<ActionType>().Select(JsonbHelpers.EnumMember).ToList()
                         : w.Filters.Actions;
                     foreach (var actionStr in actionsToRegister)
