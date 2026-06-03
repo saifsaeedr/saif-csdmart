@@ -537,6 +537,99 @@ public sealed class AuthzRegressionTests : IClassFixture<DmartFactory>
         return (client, token);
     }
 
+    [FactIfPg]
+    public async Task GrantableBy_Governs_Role_Assignment_On_Managed_User_Create()
+    {
+        _factory.CreateClient();
+        var users  = _factory.Services.GetRequiredService<UserRepository>();
+        var access = _factory.Services.GetRequiredService<AccessRepository>();
+        var hasher = _factory.Services.GetRequiredService<PasswordHasher>();
+
+        var mgr      = Unique("gb_mgr");
+        var mgrRole  = Unique("gb_mgrrole");
+        var mgrPerm  = Unique("gb_mgrperm");
+        var editor   = Unique("gb_editor");
+        var secret   = Unique("gb_secret");
+        var newUserOk   = Unique("gb_newok");
+        var newUserDeny = Unique("gb_newdeny");
+        var now = DateTime.UtcNow;
+
+        await access.UpsertPermissionAsync(new Permission
+        {
+            Uuid = Guid.NewGuid().ToString(), Shortname = mgrPerm,
+            SpaceName = "management", Subpath = "/permissions", OwnerShortname = "dmart", IsActive = true,
+            Subpaths = new() { ["management"] = new() { "users" } },
+            ResourceTypes = new() { "user" },
+            Actions = new() { "create", "update" },
+            CreatedAt = now, UpdatedAt = now,
+        });
+        await access.UpsertRoleAsync(new Role
+        {
+            Uuid = Guid.NewGuid().ToString(), Shortname = mgrRole,
+            SpaceName = "management", Subpath = "/roles", OwnerShortname = "dmart", IsActive = true,
+            Permissions = new() { mgrPerm }, CreatedAt = now, UpdatedAt = now,
+        });
+        await access.UpsertRoleAsync(new Role
+        {
+            Uuid = Guid.NewGuid().ToString(), Shortname = editor,
+            SpaceName = "management", Subpath = "/roles", OwnerShortname = "dmart", IsActive = true,
+            GrantableBy = new() { mgrRole }, CreatedAt = now, UpdatedAt = now,
+        });
+        await access.UpsertRoleAsync(new Role
+        {
+            Uuid = Guid.NewGuid().ToString(), Shortname = secret,
+            SpaceName = "management", Subpath = "/roles", OwnerShortname = "dmart", IsActive = true,
+            CreatedAt = now, UpdatedAt = now,
+        });
+        await CreateUserAsync(users, hasher, mgr, new List<string> { mgrRole });
+        await access.InvalidateAllCachesAsync();
+
+        try
+        {
+            var (client, _) = await LoginAsAsync(mgr);
+
+            // ALLOW: editor is grantable to mgrRole holders.
+            var ok = await PostManaged(client, RequestType.Create, ResourceType.User, "/users", newUserOk,
+                new() { ["roles"] = new List<string> { editor }, ["is_active"] = true });
+            ok.StatusCode.ShouldBe(HttpStatusCode.OK, await ok.Content.ReadAsStringAsync());
+
+            // DENY: secret is not delegated to the manager → aggregate failure → HTTP 400.
+            var deny = await PostManaged(client, RequestType.Create, ResourceType.User, "/users", newUserDeny,
+                new() { ["roles"] = new List<string> { secret }, ["is_active"] = true });
+            deny.StatusCode.ShouldBe(HttpStatusCode.BadRequest, await deny.Content.ReadAsStringAsync());
+
+            // GATE: a non-global-admin may not set grantable_by on a role.
+            var gate = await PostManaged(client, RequestType.Update, ResourceType.Role, "/roles", editor,
+                new() { ["grantable_by"] = new List<string> { mgrRole, secret } });
+            gate.StatusCode.ShouldBe(HttpStatusCode.BadRequest, await gate.Content.ReadAsStringAsync());
+        }
+        finally
+        {
+            try { await users.DeleteAllSessionsAsync(mgr); } catch { }
+            try { await users.DeleteAsync(mgr); } catch { }
+            try { await users.DeleteAsync(newUserOk); } catch { }
+            try { await users.DeleteAsync(newUserDeny); } catch { }
+            try { await access.DeleteRoleAsync(mgrRole); } catch { }
+            try { await access.DeleteRoleAsync(editor); } catch { }
+            try { await access.DeleteRoleAsync(secret); } catch { }
+            try { await access.DeletePermissionAsync(mgrPerm); } catch { }
+            await access.InvalidateAllCachesAsync();
+        }
+    }
+
+    private static Task<HttpResponseMessage> PostManaged(
+        HttpClient client, RequestType rt, ResourceType resource, string subpath,
+        string shortname, Dictionary<string, object> attrs)
+    {
+        var req = new Request
+        {
+            RequestType = rt,
+            SpaceName = "management",
+            Records = new() { new() { ResourceType = resource, Subpath = subpath, Shortname = shortname, Attributes = attrs } },
+        };
+        return client.PostAsJsonAsync("/managed/request", req, DmartJsonContext.Default.Request);
+    }
+
     private static Entry BuildContent(
         string space,
         string subpath,

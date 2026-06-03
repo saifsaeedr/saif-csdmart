@@ -483,6 +483,7 @@ public static class RequestHandler
             Tags = ExtractStringList(attrs, "tags") ?? new(),
             Payload = ParsePayloadFromAttrs(attrs),
             Permissions = ExtractStringList(attrs, "permissions") ?? new(),
+            GrantableBy = ExtractStringList(attrs, "grantable_by"),
             IsActive = !attrs.TryGetValue("is_active", out var ia) || !IsExplicitlyFalse(ia),
             CreatedAt = TimeUtils.Now(),
             UpdatedAt = TimeUtils.Now(),
@@ -806,6 +807,9 @@ public static class RequestHandler
                 var updated = existing with
                 {
                     Permissions = ExtractStringList(attrs, "permissions") ?? existing.Permissions,
+                    GrantableBy = attrs.ContainsKey("grantable_by")
+                        ? ExtractStringList(attrs, "grantable_by")
+                        : existing.GrantableBy,
                     Tags = ExtractStringList(attrs, "tags") ?? existing.Tags,
                     Slug = attrs.TryGetValue("slug", out var sl) ? ConvertToString(sl) : existing.Slug,
                     Displayname = attrs.TryGetValue("displayname", out var dn) ? ParseTranslation(dn) : existing.Displayname,
@@ -1370,11 +1374,12 @@ public static class RequestHandler
     // Privilege-assignment floor for the managed user/role/permission write
     // paths. The per-resource CanCreate/CanUpdate gate already ran; this adds a
     // hard floor that a deployment's restricted_fields config can't accidentally
-    // omit — a non-global-admin cannot grant authority they don't themselves
-    // hold. Returns an error Response to reject, or null to allow.
-    //   * User.roles / User.groups → must be a subset of the actor's own.
-    //   * Role.permissions / Permission.{subpaths,resource_types,actions,
-    //     conditions} → global admin only (no safe "subset" for authoring scope).
+    // omit. A global admin may set anything; otherwise, for a non-global-admin:
+    //   * User.groups → must be a subset of the actor's own.
+    //   * User.roles  → only roles whose grantable_by lists a role the actor
+    //     holds (holding a role no longer implies you may assign it).
+    //   * Role.permissions / Role.grantable_by / Permission.{subpaths,
+    //     resource_types,actions,conditions} → global admin only.
     private static async Task<Response?> EnforcePrivilegeFloorAsync(
         ResourceType resourceType, Dictionary<string, object>? attrs,
         string actor, PermissionService perms, UserRepository users, CancellationToken ct)
@@ -1383,7 +1388,8 @@ public static class RequestHandler
         bool Touches(params string[] keys) => keys.Any(attrs.ContainsKey);
 
         var setsUserAuthority = resourceType == ResourceType.User && Touches("roles", "groups");
-        var setsRolePerms     = resourceType == ResourceType.Role && attrs.ContainsKey("permissions");
+        var setsRolePerms     = resourceType == ResourceType.Role
+                                && (attrs.ContainsKey("permissions") || attrs.ContainsKey("grantable_by"));
         var setsPermScope     = resourceType == ResourceType.Permission
                                 && Touches("subpaths", "resource_types", "actions", "conditions");
         if (!setsUserAuthority && !setsRolePerms && !setsPermScope) return null;
@@ -1396,20 +1402,22 @@ public static class RequestHandler
                 $"assigning {(setsRolePerms ? "role permissions" : "permission scope")} requires a global admin",
                 ErrorTypes.Request);
 
-        // User roles/groups: a non-admin may only assign values they themselves
-        // hold — enough to delegate within their own authority, never to
-        // escalate (e.g. to super_admin, which they don't hold).
+        // Roles: the "assign a role you already hold" allowance is intentionally
+        // gone — a non-admin may assign a role ONLY when the role's grantable_by
+        // lists a role the actor holds (see PermissionService.NonGrantableRolesAsync).
+        // Groups: unchanged — a non-admin may still assign groups they belong to.
         var self = await users.GetByShortnameAsync(actor, ct);
         var ownRoles  = self?.Roles  ?? new List<string>();
         var ownGroups = self?.Groups ?? new List<string>();
-        var disallowed = (ExtractStringList(attrs, "roles") ?? new())
-                .Where(r => !ownRoles.Contains(r, StringComparer.Ordinal))
-            .Concat((ExtractStringList(attrs, "groups") ?? new())
-                .Where(g => !ownGroups.Contains(g, StringComparer.Ordinal)))
-            .ToList();
+
+        var requestedRoles = ExtractStringList(attrs, "roles") ?? new();
+        var disallowed = await perms.NonGrantableRolesAsync(requestedRoles, ownRoles, ct);
+        disallowed.AddRange((ExtractStringList(attrs, "groups") ?? new())
+            .Where(g => !ownGroups.Contains(g, StringComparer.Ordinal)));
+
         if (disallowed.Count > 0)
             return Response.Fail(InternalErrorCode.NOT_ALLOWED,
-                $"cannot assign a role/group you do not hold: {string.Join(", ", disallowed)}",
+                $"not permitted to assign role/group: {string.Join(", ", disallowed)}",
                 ErrorTypes.Request);
         return null;
     }
