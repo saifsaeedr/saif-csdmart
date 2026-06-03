@@ -1,8 +1,12 @@
 using System.Collections.Generic;
 using System.Text;
+using Dmart.Config;
 using Dmart.Models.Core;
 using Dmart.Models.Enums;
 using Dmart.Plugins;
+using Dmart.Services;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Shouldly;
 using Xunit;
 
@@ -193,5 +197,43 @@ public class PluginManagerTests
         // mis-classify them as legacy.
         var apiOnly = Encoding.UTF8.GetBytes("{ \"shortname\":\"api\", \"type\":\"api\" }");
         PluginManager.HasLegacySubpathsShape(apiOnly).ShouldBeFalse();
+    }
+
+    // ==================== Registration: null/empty Actions ⇒ all actions ====================
+
+    [Fact]
+    public void Register_NullActions_Registers_Hook_For_All_Actions()
+    {
+        // Registration reads Filters.Actions to pick which ActionType buckets a
+        // hook subscribes to. EventFilter normalizes a null Actions (from
+        // "actions": null in config.json) to empty, and empty ⇒ "every action".
+        // Register() has no per-wrapper try/catch, so this also pins that a
+        // null-ish Actions can't take down the whole registration loop.
+        var pm = new PluginManager(
+            new IHookPlugin[] { new NoopHook() },
+            Array.Empty<IApiPlugin>(),
+            new SpaceEventLogger(Options.Create(new DmartSettings()),
+                NullLogger<SpaceEventLogger>.Instance),
+            NullLogger<PluginManager>.Instance);
+
+        var wrapper = new PluginWrapper
+        {
+            Shortname = "noop_hook",
+            IsActive = true,
+            Type = PluginType.Hook,
+            ListenTime = EventListenTime.Before,
+            Filters = AllFilter() with { Actions = null! },
+        };
+
+        Should.NotThrow(() => pm.Register(new[] { wrapper }));
+        pm.ActivePlugins.ShouldContain("noop_hook");
+    }
+
+    // Minimal hook stub so Register can resolve a C# instance for the wrapper's
+    // shortname without touching the filesystem or DI container.
+    private sealed class NoopHook : IHookPlugin
+    {
+        public string Shortname => "noop_hook";
+        public Task HookAsync(Event e, CancellationToken ct = default) => Task.CompletedTask;
     }
 }

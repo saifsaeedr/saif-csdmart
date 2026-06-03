@@ -21,14 +21,44 @@ namespace Dmart.Models.Core;
 // gate, mirroring the permission engine's subpath walk.
 public sealed record EventFilter
 {
+    // A property initializer alone does NOT keep these non-null: System.Text.Json
+    // source-gen calls the setter (overwriting the default) when a key is present
+    // but null — so `"schema_shortnames": null` in config.json yields a null list.
+    // Each member below coalesces null → empty in its init accessor, making the
+    // non-nullable type honest at runtime. That invariant lives on the type so
+    // every read site can treat these as never-null without its own guard, and so
+    // both plugin-config deserialization paths (PluginManager + NativePluginLoader)
+    // are covered by construction rather than by remembering to guard each one.
+
     // Keyed by space name (or "__all_spaces__"). Values are subpath patterns
     // (or "__all_subpaths__"). An empty dict means the plugin doesn't fire on
     // any event — explicitly opt in to "everything" via
     // { "__all_spaces__": ["__all_subpaths__"] }.
-    public Dictionary<string, List<string>> Subpaths { get; init; } =
-        new(StringComparer.Ordinal);
+    private readonly Dictionary<string, List<string>> _subpaths = new(StringComparer.Ordinal);
+    public Dictionary<string, List<string>> Subpaths
+    {
+        get => _subpaths;
+        init => _subpaths = value ?? new(StringComparer.Ordinal);
+    }
 
-    public List<string> ResourceTypes { get; init; } = new();
-    public List<string> SchemaShortnames { get; init; } = new();
-    public List<string> Actions { get; init; } = new();
+    private readonly List<string> _resourceTypes = new();
+    public List<string> ResourceTypes
+    {
+        get => _resourceTypes;
+        init => _resourceTypes = value ?? new();
+    }
+
+    private readonly List<string> _schemaShortnames = new();
+    public List<string> SchemaShortnames
+    {
+        get => _schemaShortnames;
+        init => _schemaShortnames = value ?? new();
+    }
+
+    private readonly List<string> _actions = new();
+    public List<string> Actions
+    {
+        get => _actions;
+        init => _actions = value ?? new();
+    }
 }
