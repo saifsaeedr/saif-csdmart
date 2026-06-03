@@ -334,6 +334,7 @@ internal static class HistoryDiffUtil
         // mutation.
         foreach (var (k, v) in p.AllowedFieldsValues ?? new())
             d[$"allowed_fields_values.{k}"] = v;
+        d["filter_fields_values"] = p.FilterFieldsValues;
         return d;
     }
 

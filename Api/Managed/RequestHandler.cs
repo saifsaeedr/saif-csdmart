@@ -513,6 +513,11 @@ public static class RequestHandler
             Actions = ExtractStringList(attrs, "actions") ?? new(),
             Conditions = ExtractStringList(attrs, "conditions") ?? new(),
             RestrictedFields = ExtractStringList(attrs, "restricted_fields"),
+            // Field-level write constraints — same wire shape the seed/import
+            // path carries. Absent from CreatePermissionAsync before, so these
+            // could only be set via spaces-import, never the managed API.
+            AllowedFieldsValues = ExtractDictStringObject(attrs, "allowed_fields_values"),
+            FilterFieldsValues = attrs.TryGetValue("filter_fields_values", out var ffv) ? ConvertToString(ffv) : null,
             IsActive = !attrs.TryGetValue("is_active", out var ia) || !IsExplicitlyFalse(ia),
             CreatedAt = TimeUtils.Now(),
             UpdatedAt = TimeUtils.Now(),
@@ -834,6 +839,17 @@ public static class RequestHandler
                     RestrictedFields = attrs.ContainsKey("restricted_fields")
                         ? ExtractStringList(attrs, "restricted_fields")
                         : existing.RestrictedFields,
+                    // Field-level write constraints. Like Subpaths/RestrictedFields
+                    // these have no "missing" form, so gate on presence: absent →
+                    // keep existing, present → replace (an explicit `{}`/null
+                    // clears the constraint). Previously omitted entirely, so the
+                    // cxb admin UI's edits to these two fields were silently dropped.
+                    AllowedFieldsValues = attrs.ContainsKey("allowed_fields_values")
+                        ? ExtractDictStringObject(attrs, "allowed_fields_values")
+                        : existing.AllowedFieldsValues,
+                    FilterFieldsValues = attrs.TryGetValue("filter_fields_values", out var ffv)
+                        ? ConvertToString(ffv)
+                        : existing.FilterFieldsValues,
                     Tags = ExtractStringList(attrs, "tags") ?? existing.Tags,
                     Slug = attrs.TryGetValue("slug", out var sl) ? ConvertToString(sl) : existing.Slug,
                     Displayname = attrs.TryGetValue("displayname", out var dn) ? ParseTranslation(dn) : existing.Displayname,
@@ -1391,6 +1407,20 @@ public static class RequestHandler
             }
         }
         return result;
+    }
+
+    // Extracts a JSON-object attribute into Dictionary<string, object> — the
+    // shape AllowedFieldsValues round-trips through JSONB (values stay as
+    // JsonElement, identical to AccessRepository's read path). Absent or JSON
+    // null → null (clears the column); `{}` → empty dict. Mirrors the source-gen
+    // landing form: HTTP callers arrive as JsonElement, in-process as a dict.
+    private static Dictionary<string, object>? ExtractDictStringObject(Dictionary<string, object> attrs, string key)
+    {
+        if (!attrs.TryGetValue(key, out var raw) || raw is null) return null;
+        if (raw is Dictionary<string, object> already) return already;
+        if (raw is JsonElement el && el.ValueKind == JsonValueKind.Object)
+            return JsonbHelpers.FromDictStringObject(el.GetRawText());
+        return null;
     }
 
     private static string? ConvertToString(object? v) => v switch

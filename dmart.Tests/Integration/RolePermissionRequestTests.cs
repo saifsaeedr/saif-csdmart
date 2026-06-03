@@ -175,6 +175,83 @@ public sealed class RolePermissionRequestTests : IClassFixture<DmartFactory>
         }
     }
 
+    // Regression: allowed_fields_values + filter_fields_values were silently
+    // dropped by both the create and update branches of the Permission case in
+    // RequestHandler — the `existing with { ... }` patch never read them from
+    // attrs. Setting them via /managed/request (the path the cxb admin UI uses)
+    // was a no-op, so field-level write constraints could not be edited.
+    [FactIfPg]
+    public async Task Permission_Update_Via_Request_Persists_AllowedFieldsValues_And_Filter()
+    {
+        var client = await AuthedClient();
+        var access = _factory.Services.GetRequiredService<AccessRepository>();
+
+        var perm = $"pafv_{Guid.NewGuid():N}"[..20];
+
+        try
+        {
+            // Create WITH allowed_fields_values + filter_fields_values set.
+            await CreateRecord(client, ResourceType.Permission, "/permissions", perm, new()
+            {
+                ["is_active"] = true,
+                ["subpaths"] = new Dictionary<string, object> { ["test"] = new List<string> { "a" } },
+                ["resource_types"] = new List<string> { "content" },
+                ["actions"] = new List<string> { "update" },
+                ["allowed_fields_values"] = new Dictionary<string, object>
+                {
+                    ["status"] = new List<string> { "open", "pending" },
+                },
+                ["filter_fields_values"] = "@state:active",
+            });
+
+            // Create must persist both fields (create branch also omitted them).
+            var afterCreate = await access.GetPermissionAsync(perm);
+            afterCreate.ShouldNotBeNull();
+            afterCreate!.AllowedFieldsValues.ShouldNotBeNull();
+            afterCreate.AllowedFieldsValues!.ShouldContainKey("status");
+            afterCreate.FilterFieldsValues.ShouldBe("@state:active");
+
+            // Update to a DIFFERENT constraint set — the reported bug.
+            var updateResp = await PostRequest(client, RequestType.Update, "management", new Record
+            {
+                ResourceType = ResourceType.Permission,
+                Subpath = "/permissions",
+                Shortname = perm,
+                Attributes = new()
+                {
+                    ["allowed_fields_values"] = new Dictionary<string, object>
+                    {
+                        ["priority"] = new List<string> { "high", "critical" },
+                    },
+                    ["filter_fields_values"] = "@state:closed",
+                },
+            });
+            updateResp.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+            var saved = await access.GetPermissionAsync(perm);
+            saved.ShouldNotBeNull();
+            saved!.AllowedFieldsValues.ShouldNotBeNull();
+            saved.AllowedFieldsValues!.ShouldContainKey("priority");
+            saved.AllowedFieldsValues.ShouldNotContainKey("status");
+            JsonArrayContains(saved.AllowedFieldsValues["priority"], "critical").ShouldBeTrue();
+            saved.FilterFieldsValues.ShouldBe("@state:closed");
+        }
+        finally
+        {
+            try { await access.DeletePermissionAsync(perm); } catch { }
+        }
+    }
+
+    // allowed_fields_values round-trips through JSONB, so the dict values come
+    // back as JsonElement arrays rather than List<string>.
+    private static bool JsonArrayContains(object? value, string needle)
+    {
+        if (value is not JsonElement el || el.ValueKind != JsonValueKind.Array) return false;
+        foreach (var item in el.EnumerateArray())
+            if (item.ValueKind == JsonValueKind.String && item.GetString() == needle) return true;
+        return false;
+    }
+
     [FactIfPg]
     public async Task Permission_Delete_Via_Request_Removes_Row()
     {
