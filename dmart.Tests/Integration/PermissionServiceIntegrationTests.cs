@@ -533,6 +533,26 @@ public class PermissionServiceIntegrationTests : IClassFixture<DmartFactory>
     }
 
     [FactIfPg]
+    public async Task GrantableBy_RoundTrips_Through_Upsert_And_Hydrate()
+    {
+        var (_, _, access) = Resolve();
+        var roleName = $"gb_rt_{Guid.NewGuid():N}"[..18];
+        try
+        {
+            await access.UpsertRoleAsync(
+                BuildRole(roleName) with { GrantableBy = new() { "user_manager", "team_lead" } });
+            var read = await access.GetRoleAsync(roleName);
+            read.ShouldNotBeNull();
+            read!.GrantableBy.ShouldBe(new[] { "user_manager", "team_lead" });
+
+            // null grantable_by round-trips as null (not empty list)
+            await access.UpsertRoleAsync(BuildRole(roleName));
+            (await access.GetRoleAsync(roleName))!.GrantableBy.ShouldBeNull();
+        }
+        finally { try { await access.DeleteRoleAsync(roleName); } catch { } }
+    }
+
+    [FactIfPg]
     public async Task Anonymous_Without_World_Or_Anonymous_User_Has_No_Access()
     {
         // Vanilla deployment with no anonymous-user row AND no world permission:
