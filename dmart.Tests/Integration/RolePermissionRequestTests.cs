@@ -175,6 +175,185 @@ public sealed class RolePermissionRequestTests : IClassFixture<DmartFactory>
         }
     }
 
+    // Regression: allowed_fields_values + filter_fields_values were silently
+    // dropped by both the create and update branches of the Permission case in
+    // RequestHandler — the `existing with { ... }` patch never read them from
+    // attrs. Setting them via /managed/request (the path the cxb admin UI uses)
+    // was a no-op, so field-level write constraints could not be edited.
+    [FactIfPg]
+    public async Task Permission_Update_Via_Request_Persists_AllowedFieldsValues_And_Filter()
+    {
+        var client = await AuthedClient();
+        var access = _factory.Services.GetRequiredService<AccessRepository>();
+
+        var perm = $"pafv_{Guid.NewGuid():N}"[..20];
+
+        try
+        {
+            // Create WITH allowed_fields_values + filter_fields_values set.
+            await CreateRecord(client, ResourceType.Permission, "/permissions", perm, new()
+            {
+                ["is_active"] = true,
+                ["subpaths"] = new Dictionary<string, object> { ["test"] = new List<string> { "a" } },
+                ["resource_types"] = new List<string> { "content" },
+                ["actions"] = new List<string> { "update" },
+                ["allowed_fields_values"] = new Dictionary<string, object>
+                {
+                    ["status"] = new List<string> { "open", "pending" },
+                },
+                ["filter_fields_values"] = "@state:active",
+            });
+
+            // Create must persist both fields (create branch also omitted them).
+            var afterCreate = await access.GetPermissionAsync(perm);
+            afterCreate.ShouldNotBeNull();
+            afterCreate!.AllowedFieldsValues.ShouldNotBeNull();
+            afterCreate.AllowedFieldsValues!.ShouldContainKey("status");
+            afterCreate.FilterFieldsValues.ShouldBe("@state:active");
+
+            // Update to a DIFFERENT constraint set — the reported bug.
+            var updateResp = await PostRequest(client, RequestType.Update, "management", new Record
+            {
+                ResourceType = ResourceType.Permission,
+                Subpath = "/permissions",
+                Shortname = perm,
+                Attributes = new()
+                {
+                    ["allowed_fields_values"] = new Dictionary<string, object>
+                    {
+                        ["priority"] = new List<string> { "high", "critical" },
+                    },
+                    ["filter_fields_values"] = "@state:closed",
+                },
+            });
+            updateResp.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+            var saved = await access.GetPermissionAsync(perm);
+            saved.ShouldNotBeNull();
+            saved!.AllowedFieldsValues.ShouldNotBeNull();
+            saved.AllowedFieldsValues!.ShouldContainKey("priority");
+            saved.AllowedFieldsValues.ShouldNotContainKey("status");
+            JsonArrayContains(saved.AllowedFieldsValues["priority"], "critical").ShouldBeTrue();
+            saved.FilterFieldsValues.ShouldBe("@state:closed");
+        }
+        finally
+        {
+            try { await access.DeletePermissionAsync(perm); } catch { }
+        }
+    }
+
+    // Presence-gating: an update that OMITS allowed_fields_values /
+    // filter_fields_values must preserve the existing constraints, not clear
+    // them. This is the subtler half of the fix (the create/replace path is
+    // covered above) — a regression that dropped the ContainsKey/TryGetValue
+    // gates would silently wipe field-level constraints on any unrelated edit.
+    [FactIfPg]
+    public async Task Permission_Update_Omitting_FieldConstraints_Preserves_Them()
+    {
+        var client = await AuthedClient();
+        var access = _factory.Services.GetRequiredService<AccessRepository>();
+
+        var perm = $"pafvk_{Guid.NewGuid():N}"[..20];
+
+        try
+        {
+            await CreateRecord(client, ResourceType.Permission, "/permissions", perm, new()
+            {
+                ["is_active"] = true,
+                ["subpaths"] = new Dictionary<string, object> { ["test"] = new List<string> { "a" } },
+                ["resource_types"] = new List<string> { "content" },
+                ["actions"] = new List<string> { "update" },
+                ["allowed_fields_values"] = new Dictionary<string, object>
+                {
+                    ["status"] = new List<string> { "open", "pending" },
+                },
+                ["filter_fields_values"] = "@state:active",
+            });
+
+            // Update an UNRELATED field, omitting both constraint keys entirely.
+            var updateResp = await PostRequest(client, RequestType.Update, "management", new Record
+            {
+                ResourceType = ResourceType.Permission,
+                Subpath = "/permissions",
+                Shortname = perm,
+                Attributes = new() { ["is_active"] = false },
+            });
+            updateResp.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+            var saved = await access.GetPermissionAsync(perm);
+            saved.ShouldNotBeNull();
+            saved!.IsActive.ShouldBeFalse();                 // the unrelated edit took effect
+            saved.AllowedFieldsValues.ShouldNotBeNull();     // ...without clobbering these
+            saved.AllowedFieldsValues!.ShouldContainKey("status");
+            saved.FilterFieldsValues.ShouldBe("@state:active");
+        }
+        finally
+        {
+            try { await access.DeletePermissionAsync(perm); } catch { }
+        }
+    }
+
+    // Explicit replace-with-empty: an update that sends `{}` / "" must replace
+    // the existing constraints (present ⇒ replace), distinguishing it from the
+    // omitted case above. Guards that `{}` isn't mis-coerced to null/preserved.
+    [FactIfPg]
+    public async Task Permission_Update_With_Empty_FieldConstraints_Replaces_Them()
+    {
+        var client = await AuthedClient();
+        var access = _factory.Services.GetRequiredService<AccessRepository>();
+
+        var perm = $"pafve_{Guid.NewGuid():N}"[..20];
+
+        try
+        {
+            await CreateRecord(client, ResourceType.Permission, "/permissions", perm, new()
+            {
+                ["is_active"] = true,
+                ["subpaths"] = new Dictionary<string, object> { ["test"] = new List<string> { "a" } },
+                ["resource_types"] = new List<string> { "content" },
+                ["actions"] = new List<string> { "update" },
+                ["allowed_fields_values"] = new Dictionary<string, object>
+                {
+                    ["status"] = new List<string> { "open" },
+                },
+                ["filter_fields_values"] = "@state:active",
+            });
+
+            var updateResp = await PostRequest(client, RequestType.Update, "management", new Record
+            {
+                ResourceType = ResourceType.Permission,
+                Subpath = "/permissions",
+                Shortname = perm,
+                Attributes = new()
+                {
+                    ["allowed_fields_values"] = new Dictionary<string, object>(),
+                    ["filter_fields_values"] = "",
+                },
+            });
+            updateResp.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+            var saved = await access.GetPermissionAsync(perm);
+            saved.ShouldNotBeNull();
+            saved!.AllowedFieldsValues.ShouldNotBeNull();
+            saved.AllowedFieldsValues!.ShouldBeEmpty();      // replaced, not preserved
+            saved.FilterFieldsValues.ShouldBe("");
+        }
+        finally
+        {
+            try { await access.DeletePermissionAsync(perm); } catch { }
+        }
+    }
+
+    // allowed_fields_values round-trips through JSONB, so the dict values come
+    // back as JsonElement arrays rather than List<string>.
+    private static bool JsonArrayContains(object? value, string needle)
+    {
+        if (value is not JsonElement el || el.ValueKind != JsonValueKind.Array) return false;
+        foreach (var item in el.EnumerateArray())
+            if (item.ValueKind == JsonValueKind.String && item.GetString() == needle) return true;
+        return false;
+    }
+
     [FactIfPg]
     public async Task Permission_Delete_Via_Request_Removes_Row()
     {

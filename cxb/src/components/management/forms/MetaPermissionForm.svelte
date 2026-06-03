@@ -197,7 +197,7 @@
 
     function saveJsonEditor() {
         try {
-            formData.allowed_fields_values = JSON.parse(jsonEditorContent);
+            if (formData) formData.allowed_fields_values = JSON.parse(jsonEditorContent);
         } catch (e) {
             alert('Invalid JSON format');
         }
@@ -207,7 +207,7 @@
 
     function validate() {
         try {
-            formData.allowed_fields_values = JSON.parse(jsonEditorContent);
+            if (formData) formData.allowed_fields_values = JSON.parse(jsonEditorContent);
         } catch (e) {
             showToast(Level.warn, 'Invalid JSON format in Allowed Fields Values', 'Please correct the JSON syntax.');
         }
@@ -223,6 +223,22 @@
 
     $effect(() => {
         validateFn = validate;
+    });
+
+    // Keep formData in sync with the JSON editor on every edit so the value is
+    // committed without requiring the "Apply Changes" click. The entry edit
+    // page's Save flow snapshots formData directly and cannot safely invoke
+    // this sub-form's validate() (the form may be unmounted, leaving a stale
+    // closure over an undefined formData). Invalid JSON is left uncommitted
+    // until corrected; the guard protects the brief windows where the bound
+    // prop is not yet/no longer available.
+    $effect(() => {
+        if (readOnly || !formData) return;
+        try {
+            formData.allowed_fields_values = JSON.parse(jsonEditorContent);
+        } catch {
+            // ignore until the JSON parses
+        }
     });
 
     $effect(() => {
