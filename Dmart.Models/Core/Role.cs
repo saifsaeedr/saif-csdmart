@@ -29,6 +29,10 @@ public sealed record Role
 
     // ----- Roles-specific -----
     public List<string> Permissions { get; init; } = new();
+    // Role shortnames whose holders may assign THIS role to a user (the
+    // managed privilege floor's only non-admin path). null/empty ⇒ only a
+    // global admin may grant it. Setting it is global-admin-only.
+    public List<string>? GrantableBy { get; init; }
     [JsonIgnore]
     public List<string> QueryPolicies { get; init; } = new();
 }

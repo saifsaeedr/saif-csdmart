@@ -13,8 +13,9 @@ namespace Dmart.Tests.Integration;
 
 // Security: even with a (broad) create grant, a NON-global-admin must not be
 // able to mint a super_admin user via /managed/request. The privilege floor
-// rejects assigning a role the actor doesn't hold, independent of whether the
-// deployment configured restricted_fields on the delegated permission.
+// rejects assigning a role unless it is explicitly delegated via grantable_by,
+// independent of whether the deployment configured restricted_fields on the
+// delegated permission.  Holding a role no longer implies the right to grant it.
 public class ManagedPrivilegeFloorTests : IClassFixture<DmartFactory>
 {
     private readonly DmartFactory _factory;
@@ -68,8 +69,10 @@ public class ManagedPrivilegeFloorTests : IClassFixture<DmartFactory>
             result!.Status.ShouldBe(Status.Failed);
             // The floor's message names the refused role — proving we got PAST
             // the CanCreate gate (which would say "not allowed to create user")
-            // and were stopped by the privilege floor.
-            raw.ShouldContain("do not hold");
+            // and were stopped by the privilege floor.  Under the new
+            // grantable_by-only contract the phrase is "not permitted to assign"
+            // (holding a role no longer implies the right to grant it).
+            raw.ShouldContain("not permitted to assign");
             raw.ShouldContain("super_admin");
 
             // And no escalated user was actually persisted.

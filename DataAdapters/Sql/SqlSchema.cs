@@ -113,6 +113,7 @@ public static class SqlSchema
         last_checksum_history   TEXT,
         resource_type           TEXT NOT NULL DEFAULT 'role',
 
+        grantable_by            JSONB,
         permissions             JSONB,
         query_policies          TEXT[] NOT NULL DEFAULT '{}',
 
@@ -403,6 +404,7 @@ public static class SqlSchema
     ALTER TABLE users       ADD COLUMN IF NOT EXISTS last_checksum_history TEXT;
     ALTER TABLE users       ADD COLUMN IF NOT EXISTS query_policies        TEXT[] NOT NULL DEFAULT '{}';
     ALTER TABLE roles       ADD COLUMN IF NOT EXISTS last_checksum_history TEXT;
+    ALTER TABLE roles       ADD COLUMN IF NOT EXISTS grantable_by          JSONB;
     ALTER TABLE roles       ADD COLUMN IF NOT EXISTS query_policies        TEXT[] NOT NULL DEFAULT '{}';
     ALTER TABLE permissions ADD COLUMN IF NOT EXISTS last_checksum_history TEXT;
     ALTER TABLE permissions ADD COLUMN IF NOT EXISTS query_policies        TEXT[] NOT NULL DEFAULT '{}';

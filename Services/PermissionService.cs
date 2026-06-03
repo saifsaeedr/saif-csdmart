@@ -329,6 +329,34 @@ public sealed class PermissionService(UserRepository users, AccessRepository acc
             && p.Actions.Contains("update", StringComparer.Ordinal));
     }
 
+    // Of `requestedRoles`, returns the subset the actor (holding `actorRoles`) may
+    // NOT assign. A role is assignable iff its grantable_by lists a role the actor
+    // holds. A role missing from the DB, or with null/empty grantable_by, is
+    // non-grantable. An inactive role is likewise non-grantable.
+    // Order/duplicates of requestedRoles are preserved in the result.
+    // The managed privilege floor calls this only for NON-global-admins (super
+    // admins bypass the floor before reaching it).
+    public async Task<List<string>> NonGrantableRolesAsync(
+        IReadOnlyList<string> requestedRoles,
+        IReadOnlyCollection<string> actorRoles,
+        CancellationToken ct = default)
+    {
+        if (requestedRoles.Count == 0) return new();
+        var roles = await access.GetRolesAsync(requestedRoles, ct);
+        // Inactive roles grant nothing (ResolvePermissionsAsync ignores them too),
+        // so an inactive grantee role is treated as non-grantable.
+        var byName = roles.Where(r => r.IsActive).ToDictionary(r => r.Shortname, StringComparer.Ordinal);
+        var actorSet = new HashSet<string>(actorRoles, StringComparer.Ordinal);
+        var notAllowed = new List<string>();
+        foreach (var rn in requestedRoles)
+        {
+            var grantable = byName.TryGetValue(rn, out var role) ? role.GrantableBy : null;
+            if (grantable is null || !grantable.Any(actorSet.Contains))
+                notAllowed.Add(rn);
+        }
+        return notAllowed;
+    }
+
     // Mirrors Python's utils/query_policies_helper.py:get_user_query_policies.
     // Builds the list of LIKE-capable patterns (owner-aware) that restrict
     // which entries.query_policies rows an actor may read. Returns empty

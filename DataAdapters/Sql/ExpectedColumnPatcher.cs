@@ -24,6 +24,7 @@ internal static class ExpectedColumnPatcher
         ["roles"] =
         [
             ("last_checksum_history", "TEXT"),
+            ("grantable_by", "JSONB"),
             ("query_policies", "TEXT[] NOT NULL DEFAULT '{}'"),
         ],
         ["permissions"] =
