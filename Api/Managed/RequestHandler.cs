@@ -1387,12 +1387,12 @@ public static class RequestHandler
         if (attrs is null) return null;
         bool Touches(params string[] keys) => keys.Any(attrs.ContainsKey);
 
-        var setsUserAuthority = resourceType == ResourceType.User && Touches("roles", "groups");
-        var setsRolePerms     = resourceType == ResourceType.Role
-                                && (attrs.ContainsKey("permissions") || attrs.ContainsKey("grantable_by"));
-        var setsPermScope     = resourceType == ResourceType.Permission
-                                && Touches("subpaths", "resource_types", "actions", "conditions");
-        if (!setsUserAuthority && !setsRolePerms && !setsPermScope) return null;
+        var setsUserRoles  = resourceType == ResourceType.User && attrs.ContainsKey("roles");
+        var setsRolePerms  = resourceType == ResourceType.Role
+                             && (attrs.ContainsKey("permissions") || attrs.ContainsKey("grantable_by"));
+        var setsPermScope  = resourceType == ResourceType.Permission
+                             && Touches("subpaths", "resource_types", "actions", "conditions");
+        if (!setsUserRoles && !setsRolePerms && !setsPermScope) return null;
 
         // A global admin (an __all_spaces__/__all_subpaths__ grant) may set anything.
         if (await perms.IsGlobalAdminAsync(actor, ct)) return null;
@@ -1402,22 +1402,18 @@ public static class RequestHandler
                 $"assigning {(setsRolePerms ? "role permissions" : "permission scope")} requires a global admin",
                 ErrorTypes.Request);
 
-        // Roles: the "assign a role you already hold" allowance is intentionally
-        // gone — a non-admin may assign a role ONLY when the role's grantable_by
-        // lists a role the actor holds (see PermissionService.NonGrantableRolesAsync).
-        // Groups: unchanged — a non-admin may still assign groups they belong to.
+        // A non-admin may assign a role ONLY when the role's grantable_by lists a role
+        // the actor holds (see PermissionService.NonGrantableRolesAsync).
+        // Groups have no grantable_by equivalent so they are not checked here.
         var self = await users.GetByShortnameAsync(actor, ct);
-        var ownRoles  = self?.Roles  ?? new List<string>();
-        var ownGroups = self?.Groups ?? new List<string>();
+        var ownRoles = self?.Roles ?? new List<string>();
 
         var requestedRoles = ExtractStringList(attrs, "roles") ?? new();
         var disallowed = await perms.NonGrantableRolesAsync(requestedRoles, ownRoles, ct);
-        disallowed.AddRange((ExtractStringList(attrs, "groups") ?? new())
-            .Where(g => !ownGroups.Contains(g, StringComparer.Ordinal)));
 
         if (disallowed.Count > 0)
             return Response.Fail(InternalErrorCode.NOT_ALLOWED,
-                $"not permitted to assign role/group: {string.Join(", ", disallowed)}",
+                $"not permitted to assign role: {string.Join(", ", disallowed)}",
                 ErrorTypes.Request);
         return null;
     }
