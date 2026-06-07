@@ -347,20 +347,27 @@ public sealed class AccessRepository(Db db, AuthzCacheRefresher refresher, UserR
                         if (result.TryGetValue(key, out var existing)
                             && existing is Dictionary<string, object> existingEntry)
                         {
-                            // Union allowed_actions and conditions so both permissions contribute.
-                            var prevActions = existingEntry["allowed_actions"] as List<string> ?? [];
-                            existingEntry["allowed_actions"] = prevActions
-                                .Union(perm.Actions, StringComparer.Ordinal).ToList();
-
-                            var prevConditions = existingEntry["conditions"] as List<string> ?? [];
-                            existingEntry["conditions"] = prevConditions
-                                .Union(perm.Conditions, StringComparer.Ordinal).ToList();
-
-                            // Union restricted_fields from both permissions.
-                            var prevRestricted = existingEntry["restricted_fields"] as List<string> ?? [];
-                            var newRestricted = perm.RestrictedFields ?? [];
-                            existingEntry["restricted_fields"] = prevRestricted
-                                .Union(newRestricted, StringComparer.Ordinal).ToList();
+                            // Two permissions the user holds resolved to the same
+                            // space:subpath:resource_type key → fold both into one
+                            // entry representing their COMBINED grant. Grants widen
+                            // (union); restrictions bind only where every overlapping
+                            // permission agrees (an unrestricted permission grants the
+                            // broader access and wins). Only filter_fields_values is
+                            // enforced (the QueryService row-filter); the rest are
+                            // informational — real write-gating reads the raw
+                            // Permission rows via PermissionService.CheckRestrictions —
+                            // but are kept consistent so the reported permissions match.
+                            existingEntry["allowed_actions"] = UnionStrings(
+                                existingEntry["allowed_actions"] as List<string>, perm.Actions);
+                            existingEntry["conditions"] = UnionStrings(
+                                existingEntry["conditions"] as List<string>, perm.Conditions);
+                            existingEntry["restricted_fields"] = IntersectStrings(
+                                existingEntry["restricted_fields"] as List<string>, perm.RestrictedFields);
+                            existingEntry["filter_fields_values"] = CombineFilterFieldsValues(
+                                existingEntry["filter_fields_values"] as string, perm.FilterFieldsValues);
+                            existingEntry["allowed_fields_values"] = CombineAllowedFieldsValues(
+                                existingEntry["allowed_fields_values"] as Dictionary<string, object>,
+                                perm.AllowedFieldsValues);
                         }
                         else
                         {
@@ -381,6 +388,52 @@ public sealed class AccessRepository(Db db, AuthzCacheRefresher refresher, UserR
         // Cache for next time.
         await CacheUserPermissionsAsync(userShortname, result, ct);
         return result;
+    }
+
+    // ── Overlapping-permission merge ────────────────────────────────────────
+    // When two permissions a user holds resolve to the SAME
+    // space:subpath:resource_type key, the cached entry must represent their
+    // COMBINED effect. Grants are additive (union); restrictions apply only
+    // where ALL overlapping permissions agree (an unrestricted permission grants
+    // the broader access and therefore wins). Kept internal + static so the
+    // semantics are unit-tested directly without a DB. Returned value types
+    // mirror the original entry (List<string>/string/Dictionary) so JSONB
+    // serialization is unchanged.
+
+    // Grant union (allowed_actions, conditions): order-stable, ordinal-deduped.
+    internal static List<string> UnionStrings(IEnumerable<string>? a, IEnumerable<string>? b)
+        => (a ?? []).Union(b ?? [], StringComparer.Ordinal).ToList();
+
+    // restricted_fields are write RESTRICTIONS: a field is restricted only when
+    // BOTH permissions restrict it (intersection). An empty/absent side restricts
+    // nothing, so the merged result restricts nothing.
+    internal static List<string> IntersectStrings(
+        IReadOnlyCollection<string>? a, IReadOnlyCollection<string>? b)
+        => a is null || a.Count == 0 || b is null || b.Count == 0
+            ? new List<string>()
+            : a.Intersect(b, StringComparer.Ordinal).ToList();
+
+    // filter_fields_values is a row-visibility filter (a whitespace-free
+    // RediSearch fragment, enforced by QueryService.MergeFilterFieldsValues).
+    // An empty filter allows ALL rows, so it dominates; two distinct non-empty
+    // filters OR together so a row visible to EITHER permission stays visible.
+    internal static string CombineFilterFieldsValues(string? a, string? b)
+        => string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)
+            ? ""
+            : string.Equals(a, b, StringComparison.Ordinal) ? a : $"({a})|({b})";
+
+    // allowed_fields_values caps the values each named field may take on write.
+    // An empty/absent cap allows any value, so it dominates (merged result is
+    // empty = unrestricted). When both sides cap fields, the field set is unioned
+    // (informational only — write enforcement uses the raw Permission rows).
+    internal static Dictionary<string, object> CombineAllowedFieldsValues(
+        Dictionary<string, object>? a, Dictionary<string, object>? b)
+    {
+        if (a is null || a.Count == 0 || b is null || b.Count == 0)
+            return new Dictionary<string, object>();
+        var merged = new Dictionary<string, object>(a);
+        foreach (var (field, vals) in b) merged[field] = vals;
+        return merged;
     }
 
     public async Task CacheUserPermissionsAsync(string userShortname, Dictionary<string, object> resolved, CancellationToken ct = default)
