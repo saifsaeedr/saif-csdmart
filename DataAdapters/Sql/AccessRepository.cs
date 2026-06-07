@@ -344,15 +344,35 @@ public sealed class AccessRepository(Db db, AuthzCacheRefresher refresher, UserR
                     foreach (var rt in perm.ResourceTypes)
                     {
                         var key = $"{spaceName}:{subpath}:{rt}";
-                        var entry = new Dictionary<string, object>
+                        if (result.TryGetValue(key, out var existing)
+                            && existing is Dictionary<string, object> existingEntry)
                         {
-                            ["allowed_actions"] = perm.Actions,
-                            ["conditions"] = perm.Conditions,
-                            ["restricted_fields"] = perm.RestrictedFields ?? (object)new List<string>(),
-                            ["allowed_fields_values"] = perm.AllowedFieldsValues ?? (object)new Dictionary<string, object>(),
-                            ["filter_fields_values"] = perm.FilterFieldsValues ?? (object)"",
-                        };
-                        result[key] = entry;
+                            // Union allowed_actions and conditions so both permissions contribute.
+                            var prevActions = existingEntry["allowed_actions"] as List<string> ?? [];
+                            existingEntry["allowed_actions"] = prevActions
+                                .Union(perm.Actions, StringComparer.Ordinal).ToList();
+
+                            var prevConditions = existingEntry["conditions"] as List<string> ?? [];
+                            existingEntry["conditions"] = prevConditions
+                                .Union(perm.Conditions, StringComparer.Ordinal).ToList();
+
+                            // Union restricted_fields from both permissions.
+                            var prevRestricted = existingEntry["restricted_fields"] as List<string> ?? [];
+                            var newRestricted = perm.RestrictedFields ?? [];
+                            existingEntry["restricted_fields"] = prevRestricted
+                                .Union(newRestricted, StringComparer.Ordinal).ToList();
+                        }
+                        else
+                        {
+                            result[key] = new Dictionary<string, object>
+                            {
+                                ["allowed_actions"] = perm.Actions,
+                                ["conditions"] = perm.Conditions,
+                                ["restricted_fields"] = perm.RestrictedFields ?? (object)new List<string>(),
+                                ["allowed_fields_values"] = perm.AllowedFieldsValues ?? (object)new Dictionary<string, object>(),
+                                ["filter_fields_values"] = perm.FilterFieldsValues ?? (object)"",
+                            };
+                        }
                     }
                 }
             }
