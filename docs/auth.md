@@ -168,12 +168,34 @@ deleted.
 
 ## Account lockout + attempt counter
 
-`users.attempt_count` is incremented on every bad-password attempt. When it
-reaches `settings.MaxFailedLoginAttempts` (default 5), login returns
-`USER_ACCOUNT_LOCKED` even on a correct password. Admin unlock:
+`users.attempt_count` is incremented on every bad-password/bad-OTP attempt, which
+also stamps `users.last_failed_login`. When the count reaches
+`settings.MaxFailedLoginAttempts` (default 5) the account is auto-locked
+(`is_active = false`, all sessions wiped) and login returns `USER_ACCOUNT_LOCKED`
+even on a correct password.
+
+### Cool-down auto-unlock (`LockoutCooldownSeconds`, default 900)
+
+The lock is **not permanent**. `UserService.RejectIfAttemptLockedAsync` (the gate
+that runs first in both the password and OTP login paths) checks
+`last_failed_login`: once `now − last_failed_login > LockoutCooldownSeconds`, the
+next login attempt auto-clears the lock (`attempt_count = 0`, `is_active = true`,
+`last_failed_login = NULL`) and proceeds to the normal credential check.
+
+The window is measured from the **last** failed/blocked attempt and is **refreshed
+on every attempt while locked**, so a persistent attacker never auto-unlocks — only
+an account left idle for the full window recovers. The cool-down applies **only** to
+the attempt-counter lock; a manually deactivated or never-verified account
+(`attempt_count < max`) is handled by the separate `is_active` gate and never
+auto-unlocks.
+
+Set `LOCKOUT_COOLDOWN_SECONDS=0` to disable auto-unlock and keep the lock permanent
+until an admin resets it (the pre-cooldown behaviour, and the Python-reference
+behaviour — Python has no cool-down). Admin manual unlock:
 
 ```sql
-UPDATE users SET attempt_count = 0 WHERE shortname = '...';
+UPDATE users SET attempt_count = 0, is_active = true, last_failed_login = NULL
+WHERE shortname = '...';
 ```
 
 ## OAuth providers (Google / Facebook / Apple)

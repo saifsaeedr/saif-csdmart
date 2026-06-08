@@ -261,7 +261,9 @@ public sealed class UserService(
             return Result<(string, string, User)>.Fail(
                 InternalErrorCode.INVALID_USERNAME_AND_PASS, "Invalid username or password", ErrorTypes.Auth);
 
-        if (RejectIfAttemptLocked(user) is { } attemptLocked) return attemptLocked;
+        var (attemptLocked, unlockedUser) = await RejectIfAttemptLockedAsync(user, ct);
+        if (attemptLocked is { } al) return al;
+        user = unlockedUser; // possibly auto-unlocked after the cool-down
         if (RejectIfNotActive(user) is { } inactiveReject) return inactiveReject;
 
         if (string.IsNullOrEmpty(user.Password) || req.Password is null
@@ -323,7 +325,9 @@ public sealed class UserService(
             return Result<(string, string, User)>.Fail(
                 InternalErrorCode.INVALID_USERNAME_AND_PASS, "Invalid username or password", ErrorTypes.Auth);
 
-        if (RejectIfAttemptLocked(user) is { } attemptLocked) return attemptLocked;
+        var (attemptLocked, unlockedUser) = await RejectIfAttemptLockedAsync(user, ct);
+        if (attemptLocked is { } al) return al;
+        user = unlockedUser; // possibly auto-unlocked after the cool-down
         if (RejectIfNotActive(user) is { } inactiveReject) return inactiveReject;
 
         // Validate OTP code.
@@ -390,14 +394,38 @@ public sealed class UserService(
     // on a guaranteed-fail attempt. attempt_count >= max means a prior run of
     // HandleFailedLoginAttemptAsync (or an admin/test setting the counter
     // directly) already locked the account.
-    private Result<(string Access, string Refresh, User User)>? RejectIfAttemptLocked(User user)
+    // Returns a rejection when the account is attempt-locked, plus the User to
+    // continue with — which may be an in-memory-unlocked copy when the cool-down
+    // (LockoutCooldownSeconds) has elapsed since the last failed/blocked attempt.
+    // The cool-down window is measured from LastFailedLogin and refreshed on every
+    // blocked attempt (reset-on-every-attempt), so a persistent attacker never
+    // auto-unlocks — only a genuinely idle account does. Applies ONLY to the
+    // attempt-counter lock; a manually-deactivated / never-verified account
+    // (attempt_count < max) is left to RejectIfNotActive and never auto-unlocks.
+    private async Task<(Result<(string Access, string Refresh, User User)>? Rejection, User User)>
+        RejectIfAttemptLockedAsync(User user, CancellationToken ct)
     {
         var maxAttempts = settings.Value.MaxFailedLoginAttempts;
-        if (maxAttempts > 0 && user.AttemptCount is int count && count >= maxAttempts)
-            return Result<(string, string, User)>.Fail(
-                InternalErrorCode.USER_ACCOUNT_LOCKED,
-                "Account has been locked due to too many failed login attempts.", ErrorTypes.Auth);
-        return null;
+        if (maxAttempts <= 0 || user.AttemptCount is not int count || count < maxAttempts)
+            return (null, user); // not attempt-locked
+
+        var cooldown = settings.Value.LockoutCooldownSeconds;
+        if (cooldown > 0 && user.LastFailedLogin is DateTime lastFailed
+            && (TimeUtils.Now() - lastFailed).TotalSeconds > cooldown)
+        {
+            // Cool-down elapsed → auto-unlock and let the normal credential check run.
+            await users.UnlockAfterCooldownAsync(user.Shortname, ct);
+            return (null, user with { AttemptCount = 0, IsActive = true, LastFailedLogin = null });
+        }
+
+        // Still locked → refresh the cool-down anchor (so ongoing attacks keep the
+        // window from ever elapsing) and reject. Message is kept identical to the
+        // fresh-lock path (generic — no remaining-time leak, no message drift).
+        await users.TouchLastFailedLoginAsync(user.Shortname, TimeUtils.Now(), ct);
+        return (Result<(string, string, User)>.Fail(
+            InternalErrorCode.USER_ACCOUNT_LOCKED,
+            "Account has been locked due to too many failed login attempts.",
+            ErrorTypes.Auth), user);
     }
 
     // Public wrapper around the private failed-attempt counter so out-of-class
@@ -409,7 +437,7 @@ public sealed class UserService(
 
     private async Task<bool> HandleFailedLoginAttemptAsync(User user, CancellationToken ct)
     {
-        await users.IncrementAttemptAsync(user.Shortname, ct);
+        await users.IncrementAttemptAsync(user.Shortname, TimeUtils.Now(), ct);
 
         var maxAttempts = settings.Value.MaxFailedLoginAttempts;
         if (maxAttempts <= 0) return false;
@@ -462,7 +490,7 @@ public sealed class UserService(
 
         // Sync the in-memory copy with ResetAttemptsAsync so callers see the
         // post-login counter even though we don't replay the full row to PG.
-        var updatedUser = user with { AttemptCount = 0 };
+        var updatedUser = user with { AttemptCount = 0, LastFailedLogin = null };
         string? newDeviceId = null;
         if (!string.IsNullOrEmpty(req.DeviceId) && req.DeviceId != user.DeviceId)
         {

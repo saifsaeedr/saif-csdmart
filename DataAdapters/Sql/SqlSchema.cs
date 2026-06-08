@@ -83,6 +83,7 @@ public static class SqlSchema
         apple_id                TEXT,
         social_avatar_url       TEXT,
         attempt_count           INTEGER,
+        last_failed_login       TIMESTAMP,
         last_login              JSONB,
         notes                   TEXT,
         query_policies          TEXT[] NOT NULL DEFAULT '{}',
@@ -447,6 +448,7 @@ public static class SqlSchema
     ALTER TABLE users       ADD COLUMN IF NOT EXISTS apple_id              TEXT;
     ALTER TABLE users       ADD COLUMN IF NOT EXISTS social_avatar_url     TEXT;
     ALTER TABLE users       ADD COLUMN IF NOT EXISTS attempt_count         INTEGER;
+    ALTER TABLE users       ADD COLUMN IF NOT EXISTS last_failed_login     TIMESTAMP;
     ALTER TABLE users       ADD COLUMN IF NOT EXISTS last_login            JSONB;
     ALTER TABLE users       ADD COLUMN IF NOT EXISTS notes                 TEXT;
     ALTER TABLE users       ADD COLUMN IF NOT EXISTS locked_to_device      BOOLEAN NOT NULL DEFAULT FALSE;

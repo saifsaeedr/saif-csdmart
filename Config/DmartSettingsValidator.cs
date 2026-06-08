@@ -40,6 +40,8 @@ internal sealed class DmartSettingsValidator : IValidateOptions<DmartSettings>
             failures.Add("JwtSecret is the built-in placeholder ('change-me-…') — set a real random JWT_SECRET (e.g. `openssl rand -hex 32`); a known signing key lets anyone forge admin tokens");
         if (s.MaxFailedLoginAttempts < 0)
             failures.Add($"MaxFailedLoginAttempts must be >= 0 (got {s.MaxFailedLoginAttempts})");
+        if (s.LockoutCooldownSeconds < 0)
+            failures.Add($"LockoutCooldownSeconds must be >= 0 (got {s.LockoutCooldownSeconds})");
         if (s.AuthRateLimitPerMinute < 1)
             failures.Add($"AuthRateLimitPerMinute must be >= 1 (got {s.AuthRateLimitPerMinute})");
         if (s.MaxQueryLimit < 1)

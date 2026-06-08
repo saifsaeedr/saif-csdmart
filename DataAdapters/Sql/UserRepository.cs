@@ -17,7 +17,7 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
                type::text, language::text, email, msisdn, locked_to_device,
                is_email_verified, is_msisdn_verified, force_password_change,
                device_id, google_id, facebook_id, apple_id, social_avatar_url,
-               attempt_count, last_login, notes, query_policies
+               attempt_count, last_login, notes, query_policies, last_failed_login
         FROM users
         """;
 
@@ -376,11 +376,35 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
         await refresher.RefreshAsync(ct);
     }
 
-    public async Task IncrementAttemptAsync(string shortname, CancellationToken ct = default)
+    public async Task IncrementAttemptAsync(string shortname, DateTime failedAt, CancellationToken ct = default)
     {
         await using var conn = await db.OpenAsync(ct);
         await using var cmd = new NpgsqlCommand(
-            "UPDATE users SET attempt_count = COALESCE(attempt_count, 0) + 1 WHERE shortname = $1", conn);
+            "UPDATE users SET attempt_count = COALESCE(attempt_count, 0) + 1, last_failed_login = $2 WHERE shortname = $1", conn);
+        cmd.Parameters.Add(new() { Value = shortname });
+        cmd.Parameters.Add(new() { Value = failedAt, NpgsqlDbType = NpgsqlDbType.Timestamp });
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    // Refresh the cool-down anchor on an attempt against an already-locked account
+    // (reset-on-every-attempt), without touching the counter.
+    public async Task TouchLastFailedLoginAsync(string shortname, DateTime failedAt, CancellationToken ct = default)
+    {
+        await using var conn = await db.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(
+            "UPDATE users SET last_failed_login = $2 WHERE shortname = $1", conn);
+        cmd.Parameters.Add(new() { Value = shortname });
+        cmd.Parameters.Add(new() { Value = failedAt, NpgsqlDbType = NpgsqlDbType.Timestamp });
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    // Clear an auto-lockout once the cool-down has elapsed: reset the counter, undo
+    // the is_active flip, and drop the anchor so the next login starts clean.
+    public async Task UnlockAfterCooldownAsync(string shortname, CancellationToken ct = default)
+    {
+        await using var conn = await db.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(
+            "UPDATE users SET attempt_count = 0, is_active = true, last_failed_login = NULL WHERE shortname = $1", conn);
         cmd.Parameters.Add(new() { Value = shortname });
         await cmd.ExecuteNonQueryAsync(ct);
     }
@@ -388,7 +412,8 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
     public async Task ResetAttemptsAsync(string shortname, CancellationToken ct = default)
     {
         await using var conn = await db.OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand("UPDATE users SET attempt_count = 0 WHERE shortname = $1", conn);
+        await using var cmd = new NpgsqlCommand(
+            "UPDATE users SET attempt_count = 0, last_failed_login = NULL WHERE shortname = $1", conn);
         cmd.Parameters.Add(new() { Value = shortname });
         await cmd.ExecuteNonQueryAsync(ct);
     }
@@ -691,6 +716,7 @@ public sealed class UserRepository(Db db, AuthzCacheRefresher refresher, Session
             LastLogin = JsonbHelpers.FromDictStringObject(r.IsDBNull(35) ? null : r.GetString(35)),
             Notes = r.IsDBNull(36) ? null : r.GetString(36),
             QueryPolicies = r.IsDBNull(37) ? new() : ((string[])r.GetValue(37)).ToList(),
+            LastFailedLogin = r.IsDBNull(38) ? null : r.GetDateTime(38),
         };
     }
 

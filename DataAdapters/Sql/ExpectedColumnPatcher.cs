@@ -15,6 +15,7 @@ internal static class ExpectedColumnPatcher
             ("apple_id", "TEXT"),
             ("social_avatar_url", "TEXT"),
             ("attempt_count", "INTEGER"),
+            ("last_failed_login", "TIMESTAMP"),
             ("last_login", "JSONB"),
             ("notes", "TEXT"),
             ("locked_to_device", "BOOLEAN NOT NULL DEFAULT FALSE"),

@@ -47,6 +47,10 @@ public sealed record User
     public string? SocialAvatarUrl { get; init; }
     public int? AttemptCount { get; init; }
     public Dictionary<string, object>? LastLogin { get; init; }
+    // Timestamp (naive) of the most recent failed/blocked login attempt. Anchors
+    // the auto-unlock cool-down (LockoutCooldownSeconds); null when clean. See
+    // UserService.RejectIfAttemptLockedAsync.
+    public DateTime? LastFailedLogin { get; init; }
     public string? Notes { get; init; }
     [JsonIgnore]
     public List<string> QueryPolicies { get; init; } = new();
