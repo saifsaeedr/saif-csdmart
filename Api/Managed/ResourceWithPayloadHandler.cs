@@ -112,8 +112,10 @@ public static class ResourceWithPayloadHandler
         if (record is null)
             return Response.Fail(InternalErrorCode.INVALID_DATA, "request_record is empty", ErrorTypes.Request);
 
-        // Python: shortname "auto" → generate from UUID first 8 chars.
-        record = RequestHandler.ResolveAutoShortname(record);
+        // Python: shortname "auto" → generate from UUID first 8 chars. Resolution
+        // is deferred to each persist attempt below so an auto shortname can be
+        // re-minted on a collision (entry path) — see RetryOnShortnameCollisionAsync.
+        var wasAuto = RequestHandler.IsAutoShortname(record.Shortname);
 
         // Read full bytes (acceptable here — dmart also reads the whole file at once
         // because it computes a sha256 over the entire payload before storing).
@@ -138,11 +140,21 @@ public static class ResourceWithPayloadHandler
         var schemaShortname = ExtractSchemaShortname(record.Attributes);
 
         if (IsAttachmentResourceType(record.ResourceType))
-            return await StoreAttachmentAsync(record, spaceName, actor, fileBytes, ext,
+            // Attachments upsert with ON CONFLICT (shortname, space, subpath) DO
+            // UPDATE: a shortname collision overwrites in place rather than erroring,
+            // so there is nothing to retry on — resolve once.
+            return await StoreAttachmentAsync(
+                RequestHandler.ResolveAutoShortname(record), spaceName, actor, fileBytes, ext,
                 resourceContentType, checksum, sha, schemaShortname, attachments, perms, log, ct);
 
-        return await StoreEntryAsync(record, spaceName, actor, fileBytes, ext,
-            resourceContentType, checksum, sha, schemaShortname, entries, ct);
+        // Entry-with-payload goes through EntryService.CreateAsync, which rejects a
+        // duplicate shortname — re-mint and retry past the rare auto collision.
+        return await RequestHandler.RetryOnShortnameCollisionAsync(
+            wasAuto,
+            () => StoreEntryAsync(
+                RequestHandler.ResolveAutoShortname(record), spaceName, actor, fileBytes, ext,
+                resourceContentType, checksum, sha, schemaShortname, entries, ct),
+            r => r.Error?.Code == InternalErrorCode.SHORTNAME_ALREADY_EXIST);
     }
 
     public static async Task<Response> StoreAttachmentAsync(
