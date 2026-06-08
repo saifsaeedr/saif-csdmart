@@ -57,6 +57,15 @@ public static class QueryPolicies
         ownerGroupShortname: u.OwnerGroupShortname,
         entryShortname: null);
 
+    public static List<string> Generate(Group g) => Generate(
+        spaceName: g.SpaceName,
+        subpath: g.Subpath,
+        resourceType: "group",
+        isActive: g.IsActive,
+        ownerShortname: g.OwnerShortname,
+        ownerGroupShortname: g.OwnerGroupShortname,
+        entryShortname: null);
+
     public static List<string> Generate(Role r) => Generate(
         spaceName: r.SpaceName,
         subpath: r.Subpath,

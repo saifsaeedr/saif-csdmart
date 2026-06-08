@@ -75,6 +75,9 @@ public sealed class PermissionService(UserRepository users, AccessRepository acc
     public static ResourceContext FromPermission(Permission p) =>
         new(p.IsActive, p.OwnerShortname, p.OwnerGroupShortname, p.Acl);
 
+    public static ResourceContext FromGroup(Group g) =>
+        new(g.IsActive, g.OwnerShortname, g.OwnerGroupShortname, g.Acl);
+
     public static ResourceContext FromSpace(Space s) =>
         new(s.IsActive, s.OwnerShortname, s.OwnerGroupShortname, s.Acl);
 
@@ -353,6 +356,27 @@ public sealed class PermissionService(UserRepository users, AccessRepository acc
             var grantable = byName.TryGetValue(rn, out var role) ? role.GrantableBy : null;
             if (grantable is null || !grantable.Any(actorSet.Contains))
                 notAllowed.Add(rn);
+        }
+        return notAllowed;
+    }
+
+    // A group is assignable to a user only when the group's grantable_by lists
+    // a group the actor belongs to. null/empty ⇒ global admin only.
+    public async Task<List<string>> NonGrantableGroupsAsync(
+        IReadOnlyList<string> requestedGroups,
+        IReadOnlyCollection<string> actorGroups,
+        CancellationToken ct = default)
+    {
+        if (requestedGroups.Count == 0) return new();
+        var groups = await access.GetGroupsAsync(requestedGroups, ct);
+        var byName = groups.Where(g => g.IsActive).ToDictionary(g => g.Shortname, StringComparer.Ordinal);
+        var actorSet = new HashSet<string>(actorGroups, StringComparer.Ordinal);
+        var notAllowed = new List<string>();
+        foreach (var gn in requestedGroups)
+        {
+            var grantable = byName.TryGetValue(gn, out var group) ? group.GrantableBy : null;
+            if (grantable is null || !grantable.Any(actorSet.Contains))
+                notAllowed.Add(gn);
         }
         return notAllowed;
     }

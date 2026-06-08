@@ -237,6 +237,9 @@ internal static class HistoryDiffUtil
     // build the same `{field: {old, new}}` shape clients already consume from
     // /managed/query?type=history for entries and self-service profile edits.
 
+    public static Dictionary<string, object> ComputeGroupDiff(Group oldG, Group newG)
+        => DiffFromMaps(FlattenGroup(oldG), FlattenGroup(newG));
+
     public static Dictionary<string, object> ComputeRoleDiff(Role oldR, Role newR)
         => DiffFromMaps(FlattenRole(oldR), FlattenRole(newR));
 
@@ -304,6 +307,10 @@ internal static class HistoryDiffUtil
     // Item-level deltas would require a different storage shape (multi-key
     // or array-index path) and aren't what the current /managed/query?type=history
     // contract promises — Python parity, intentional.
+    private static Dictionary<string, object?> FlattenGroup(Group g)
+        => FlattenMetasBase(g.IsActive, g.Slug, g.Displayname, g.Description, g.Tags, g.Payload,
+            g.OwnerShortname, g.OwnerGroupShortname);
+
     private static Dictionary<string, object?> FlattenRole(Role r)
     {
         var d = FlattenMetasBase(r.IsActive, r.Slug, r.Displayname, r.Description, r.Tags, r.Payload,

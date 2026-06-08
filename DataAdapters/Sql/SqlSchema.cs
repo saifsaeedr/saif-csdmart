@@ -121,6 +121,35 @@ public static class SqlSchema
     );
 
     -- ============================================================
+    -- GROUPS
+    -- ============================================================
+    CREATE TABLE IF NOT EXISTS groups (
+        uuid                    UUID PRIMARY KEY,
+        shortname               TEXT NOT NULL,
+        space_name              TEXT NOT NULL,
+        subpath                 TEXT NOT NULL,
+        is_active               BOOLEAN NOT NULL DEFAULT FALSE,
+        slug                    TEXT,
+        displayname             JSONB,
+        description             JSONB,
+        tags                    JSONB,
+        created_at              TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at              TIMESTAMP NOT NULL DEFAULT NOW(),
+        owner_shortname         TEXT NOT NULL REFERENCES users(shortname) DEFERRABLE INITIALLY DEFERRED,
+        owner_group_shortname   TEXT,
+        acl                     JSONB,
+        payload                 JSONB,
+        relationships           JSONB,
+        last_checksum_history   TEXT,
+        resource_type           TEXT NOT NULL DEFAULT 'group',
+
+        grantable_by            JSONB,
+        query_policies          TEXT[] NOT NULL DEFAULT '{}',
+
+        UNIQUE (shortname, space_name, subpath)
+    );
+
+    -- ============================================================
     -- PERMISSIONS
     -- ============================================================
     CREATE TABLE IF NOT EXISTS permissions (
