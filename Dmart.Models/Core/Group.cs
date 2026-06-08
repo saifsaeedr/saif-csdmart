@@ -28,8 +28,9 @@ public sealed record Group
     public ResourceType ResourceType { get; init; } = ResourceType.Group;
 
     // ----- Group-specific -----
-    // Role shortnames whose holders may assign THIS group to a user.
-    // null/empty ⇒ only a global admin may grant it.
+    // Group shortnames whose members may assign THIS group to a user (the
+    // managed privilege floor's only non-admin path). null/empty ⇒ only a
+    // global admin may grant it. Setting it is global-admin-only.
     public List<string>? GrantableBy { get; init; }
     [JsonIgnore]
     public List<string> QueryPolicies { get; init; } = new();

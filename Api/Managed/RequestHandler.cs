@@ -1484,7 +1484,9 @@ public static class RequestHandler
 
         if (setsRolePerms || setsGroupGrantable || setsPermScope)
             return Response.Fail(InternalErrorCode.NOT_ALLOWED,
-                $"assigning {(setsPermScope ? "permission scope" : "grantable_by")} requires a global admin",
+                $"assigning {(setsPermScope ? "permission scope"
+                    : setsRolePerms && attrs.ContainsKey("permissions") ? "role permissions"
+                    : "grantable_by")} requires a global admin",
                 ErrorTypes.Request);
 
         // Roles and groups: a non-admin may assign them ONLY when the role/group's
