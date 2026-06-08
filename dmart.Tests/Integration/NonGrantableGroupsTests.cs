@@ -115,4 +115,29 @@ public class NonGrantableGroupsTests : IClassFixture<DmartFactory>
         }
         finally { try { await access.DeleteGroupAsync(name); } catch { } }
     }
+
+    [FactIfPg]
+    public async Task Group_Shortname_Is_Globally_Unique_Across_Subpaths()
+    {
+        var access = _factory.Services.GetRequiredService<AccessRepository>();
+        var suffix = Guid.NewGuid().ToString("N")[..6];
+        var name = "guniq_" + suffix;
+        await UpsertGroupAsync(access, name, isActive: true, grantableBy: null);
+        try
+        {
+            // Same shortname under a DIFFERENT subpath slips past the composite
+            // ON CONFLICT key, so the unique-shortname index must reject it —
+            // this is what makes shortname-keyed get/delete unambiguous.
+            var ex = await Should.ThrowAsync<Npgsql.PostgresException>(() =>
+                access.UpsertGroupAsync(new Group
+                {
+                    Uuid = Guid.NewGuid().ToString(),
+                    Shortname = name, SpaceName = "management", Subpath = "/groups/other",
+                    OwnerShortname = "dmart", IsActive = true,
+                    CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+                }));
+            ex.SqlState.ShouldBe("23505"); // unique_violation
+        }
+        finally { try { await access.DeleteGroupAsync(name); } catch { } }
+    }
 }

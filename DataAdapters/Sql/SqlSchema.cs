@@ -368,6 +368,13 @@ public static class SqlSchema
     CREATE INDEX IF NOT EXISTS idx_users_owner_shortname     ON users (owner_shortname);
     CREATE INDEX IF NOT EXISTS idx_roles_owner_shortname     ON roles (owner_shortname);
     CREATE INDEX IF NOT EXISTS idx_permissions_owner_shortname ON permissions (owner_shortname);
+    -- The management model treats a group shortname as globally unique: get/delete
+    -- key on shortname alone. Enforce it so a shortname can't silently exist twice
+    -- across subpaths (which would make those lookups ambiguous / over-delete).
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_groups_shortname    ON groups (shortname);
+    -- Parity with roles/permissions: groups was added without its owner / policy
+    -- indexes, so owner lookups and policy-filtered QueryGroupsAsync had no support.
+    CREATE INDEX IF NOT EXISTS idx_groups_owner_shortname    ON groups (owner_shortname);
     CREATE INDEX IF NOT EXISTS idx_sessions_shortname        ON sessions (shortname);
     CREATE INDEX IF NOT EXISTS idx_histories_lookup
         ON histories (space_name, subpath, shortname, timestamp DESC);
@@ -401,6 +408,7 @@ public static class SqlSchema
     CREATE INDEX IF NOT EXISTS idx_entries_query_policies_gin       ON entries USING GIN (query_policies);
     CREATE INDEX IF NOT EXISTS idx_users_query_policies_gin         ON users USING GIN (query_policies);
     CREATE INDEX IF NOT EXISTS idx_roles_query_policies_gin         ON roles USING GIN (query_policies);
+    CREATE INDEX IF NOT EXISTS idx_groups_query_policies_gin        ON groups USING GIN (query_policies);
     CREATE INDEX IF NOT EXISTS idx_permissions_query_policies_gin   ON permissions USING GIN (query_policies);
     CREATE INDEX IF NOT EXISTS idx_spaces_query_policies_gin        ON spaces USING GIN (query_policies);
 

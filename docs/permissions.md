@@ -183,6 +183,21 @@ Roles and groups are **first-class tables** (`roles`, `groups`), each carrying a
 A global admin — a grant of every action over `__all_spaces__` /
 `__all_subpaths__` — bypasses the floor entirely.
 
+**Design boundaries (intentional, not gaps):**
+
+- **Same-type delegation only.** A role's `grantable_by` lists roles; a group's
+  lists groups. There is no cross-type delegation (no "holders of role X may grant
+  group Y"). This is the permanent model — gating a group on role membership would
+  need a separate mechanism, deliberately out of scope.
+- **No nesting / transitivity.** Groups are flat (a group is not a member of
+  another group) and `grantable_by` is a single hop — "A can grant B, B can grant
+  C" does **not** imply A can grant C. Mirrors Python.
+- **Inactive grantees are non-grantable, but ownership is not revoked.** The
+  delegation predicate filters inactive roles/groups, so deactivating a group
+  stops *new* assignments; existing `own`-via-`user.groups` resolution is
+  unaffected (it reads the string list regardless of active state). The two
+  consumers of "group" diverge here by design.
+
 ### Migration / backfill: groups promoted to a first-class table
 
 The `groups` table is **new** (added with `grantable_by`); there is **no

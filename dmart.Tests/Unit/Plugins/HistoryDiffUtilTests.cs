@@ -178,4 +178,64 @@ public sealed class HistoryDiffUtilTests
         CreatedAt = DateTime.UnixEpoch,
         UpdatedAt = DateTime.UnixEpoch,
     };
+
+    [Fact]
+    public void ComputeRoleDiff_GrantableBy_Change_Is_Audited()
+    {
+        var r1 = BaseRole() with { GrantableBy = new() { "admin" } };
+        var r2 = BaseRole() with { GrantableBy = new() { "admin", "ops" } };
+        var diff = HistoryDiffUtil.ComputeRoleDiff(r1, r2);
+        diff.ShouldContainKey("grantable_by");
+        var pair = (Dictionary<string, object?>)diff["grantable_by"];
+        ((IEnumerable<string>)pair["old"]!).ShouldBe(new[] { "admin" });
+        ((IEnumerable<string>)pair["new"]!).ShouldBe(new[] { "admin", "ops" });
+    }
+
+    [Fact]
+    public void ComputeGroupDiff_GrantableBy_Only_Change_Still_Produces_A_Diff()
+    {
+        // A group update touching ONLY grantable_by must produce a non-empty diff,
+        // else the privilege-delegation change writes no history row at all.
+        var g1 = BaseGroup();                                       // grantable_by null
+        var g2 = BaseGroup() with { GrantableBy = new() { "granters" } };
+        var diff = HistoryDiffUtil.ComputeGroupDiff(g1, g2);
+        diff.ShouldContainKey("grantable_by");
+        var pair = (Dictionary<string, object?>)diff["grantable_by"];
+        ((IEnumerable<string>)pair["old"]!).ShouldBeEmpty();        // null normalized to []
+        ((IEnumerable<string>)pair["new"]!).ShouldBe(new[] { "granters" });
+    }
+
+    [Fact]
+    public void ComputeGroupDiff_Null_Vs_Empty_GrantableBy_Is_Not_A_Change()
+    {
+        // null and [] both mean "global-admin only" — no spurious diff.
+        var g1 = BaseGroup() with { GrantableBy = null };
+        var g2 = BaseGroup() with { GrantableBy = new() };
+        HistoryDiffUtil.ComputeGroupDiff(g1, g2).ShouldNotContainKey("grantable_by");
+    }
+
+    private static Role BaseRole() => new()
+    {
+        Uuid = "00000000-0000-0000-0000-000000000003",
+        Shortname = "r1",
+        SpaceName = "management",
+        Subpath = "/roles",
+        OwnerShortname = "tester",
+        IsActive = true,
+        Permissions = new(),
+        CreatedAt = DateTime.UnixEpoch,
+        UpdatedAt = DateTime.UnixEpoch,
+    };
+
+    private static Group BaseGroup() => new()
+    {
+        Uuid = "00000000-0000-0000-0000-000000000004",
+        Shortname = "g1",
+        SpaceName = "management",
+        Subpath = "/groups",
+        OwnerShortname = "tester",
+        IsActive = true,
+        CreatedAt = DateTime.UnixEpoch,
+        UpdatedAt = DateTime.UnixEpoch,
+    };
 }
