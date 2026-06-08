@@ -35,7 +35,9 @@ public static class PayloadMerge
 
     // Pull `payload.body` out of a request's `attributes["payload"]` value, which may
     // arrive as a JsonElement (source-gen JSON) or a Dictionary<string,object>.
-    private static JsonElement? ExtractBody(object? payloadRaw)
+    // internal so the /user/profile protected-fields check screens the exact same
+    // body shapes this helper would later merge — no JsonElement-only blind spot.
+    internal static JsonElement? ExtractBody(object? payloadRaw)
     {
         if (payloadRaw is JsonElement pe && pe.ValueKind == JsonValueKind.Object
             && pe.TryGetProperty("body", out var bodyEl))

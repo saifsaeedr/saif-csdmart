@@ -559,12 +559,11 @@ public sealed class UserService(
         // against settings.user_profile_payload_protected_fields — it is
         // payload content that's restricted, not top-level Record attributes.
         var protectedCsv = settings.Value.UserProfilePayloadProtectedFields;
+        // Screen the SAME body shapes PayloadMerge would later merge (JsonElement or
+        // Dictionary), so a protected field can't slip in via a form the check missed.
         if (!string.IsNullOrWhiteSpace(protectedCsv)
-            && patch.TryGetValue("payload", out var payloadProtRaw)
-            && payloadProtRaw is JsonElement payloadProtEl
-            && payloadProtEl.ValueKind == JsonValueKind.Object
-            && payloadProtEl.TryGetProperty("body", out var bodyProtEl)
-            && bodyProtEl.ValueKind == JsonValueKind.Object)
+            && PayloadMerge.ExtractBody(patch.GetValueOrDefault("payload"))
+                is { ValueKind: JsonValueKind.Object } bodyProtEl)
         {
             var protectedFields = protectedCsv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             foreach (var prop in bodyProtEl.EnumerateObject())
@@ -641,23 +640,12 @@ public sealed class UserService(
             return v.ToString() ?? fallback;
         }
 
-        // If the password was updated, clear the force-change flag — Python
-        // does the same inside set_user_profile. The flag is only meaningful
-        // until the user picks their own password; keeping it true afterwards
-        // would force them to change it again on next login.
-        bool resolvedForcePasswordChange;
-        if (newPasswordHash is not null)
-        {
-            resolvedForcePasswordChange = false;
-        }
-        else if (patch.TryGetValue("force_password_change", out var fpc))
-        {
-            resolvedForcePasswordChange = fpc is true || (fpc is bool b && b);
-        }
-        else
-        {
-            resolvedForcePasswordChange = user.ForcePasswordChange;
-        }
+        // force_password_change is NOT self-settable via /user/profile — Python
+        // intentionally comments out the patch assignment (api/user/router.py:683-684).
+        // A user could otherwise clear an admin-mandated reset on themselves. The flag
+        // is only auto-cleared when they actually change their password (it's
+        // meaningless once they've picked one); otherwise it carries through unchanged.
+        var resolvedForcePasswordChange = newPasswordHash is not null ? false : user.ForcePasswordChange;
 
         // Email change: Python parity (router.py:688-739).
         //   * patched email != stored email  → email_otp REQUIRED
