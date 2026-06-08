@@ -395,12 +395,10 @@ public class PermissionServiceIntegrationTests : IClassFixture<DmartFactory>
 
         try
         {
-            await access.UpsertPermissionAsync(BuildPerm(
-                worldPerm,
-                "management",
-                new() { [PermissionService.AllSpacesMw] = new() { PermissionService.AllSubpathsMw } },
+            await WorldPermissionFixture.UpsertAsync(access, priorWorld,
+                subpaths: new() { [PermissionService.AllSpacesMw] = new() { PermissionService.AllSubpathsMw } },
                 actions: new() { "view", "query" },
-                resourceTypes: new() { "content" }));
+                resourceTypes: new() { "content" });
 
             await access.UpsertRoleAsync(BuildRole(anonRole, worldPerm));
             await users.UpsertAsync(BuildUser(anonUser, anonRole));
@@ -451,13 +449,11 @@ public class PermissionServiceIntegrationTests : IClassFixture<DmartFactory>
             // Single permission listing MULTIPLE leading-slash subpaths under
             // one space. Both must resolve — the matcher must iterate the
             // list, not short-circuit on the first pattern.
-            await access.UpsertPermissionAsync(BuildPerm(
-                worldPerm,
-                spaceName: "management",
+            await WorldPermissionFixture.UpsertAsync(access, priorWorld,
                 subpaths: new() { [space] = new() { "/alpha", "/bravo" } }, // leading slash
                 actions: new() { "view", "query" },
                 resourceTypes: new() { "content" },
-                conditions: new() { "is_active" }));
+                conditions: new() { "is_active" });
             await access.UpsertRoleAsync(BuildRole(anonRole, worldPerm));
             await users.UpsertAsync(BuildUser(anonUser, anonRole));
             await access.InvalidateAllCachesAsync();
@@ -508,12 +504,10 @@ public class PermissionServiceIntegrationTests : IClassFixture<DmartFactory>
         var priorWorld = await access.GetPermissionAsync(worldPerm);
         try
         {
-            await access.UpsertPermissionAsync(BuildPerm(
-                worldPerm,
-                "management",
-                new() { [PermissionService.AllSpacesMw] = new() { PermissionService.AllSubpathsMw } },
+            await WorldPermissionFixture.UpsertAsync(access, priorWorld,
+                subpaths: new() { [PermissionService.AllSpacesMw] = new() { PermissionService.AllSubpathsMw } },
                 actions: new() { "view" },
-                resourceTypes: new() { "content" }));
+                resourceTypes: new() { "content" });
             // Anonymous user with NO roles — mirrors "forgot to link" deployments.
             await users.UpsertAsync(BuildUser(anonUser /* no roles */));
             await access.InvalidateAllCachesAsync();

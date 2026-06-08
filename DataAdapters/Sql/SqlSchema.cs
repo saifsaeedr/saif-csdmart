@@ -371,16 +371,14 @@ public static class SqlSchema
     -- Parity index: groups (PR #94) was added without its owner index.
     CREATE INDEX IF NOT EXISTS idx_groups_owner_shortname    ON groups (owner_shortname);
 
-    -- Roles and groups are fetched and deleted by shortname ALONE (get/delete never
-    -- pass space_name/subpath), so a shortname MUST be globally unique. The per-table
-    -- composite UNIQUE(shortname,space,subpath) is too weak: it permits one shortname
-    -- under two subpaths, which makes those lookups ambiguous and the delete
-    -- over-broad. Enforce global uniqueness here.
-    -- NB permissions are deliberately NOT constrained the same way yet: the reserved
-    -- "world" permission is provisioned as a shared singleton at varying subpaths
-    -- across the codebase/tests, so a unique index would need a coordinated cleanup
-    -- first (GetPermissionAsync already keys on shortname, so it IS a latent
-    -- inconsistency — tracked as a separate follow-up).
+    -- Roles, groups, and permissions are fetched and deleted by shortname ALONE
+    -- (get/delete never pass space_name/subpath), so a shortname MUST be globally
+    -- unique. The per-table composite UNIQUE(shortname,space,subpath) is too weak:
+    -- it permits one shortname under two subpaths, which makes those lookups
+    -- ambiguous and the delete over-broad. Enforce global uniqueness here. (The
+    -- reserved "world" permission is provisioned through one shared test helper —
+    -- WorldPermissionFixture — that updates the single canonical row in place, so
+    -- it stays unique too.)
     -- UPGRADE NOTE: if init aborts with "key (shortname)=(..) is duplicated", a row
     -- already violates this. Locate offenders per table with
     --   SELECT shortname, count(*) FROM <table> GROUP BY shortname HAVING count(*) > 1;
@@ -388,6 +386,7 @@ public static class SqlSchema
     -- it rolls back fully — the app just won't start until the data is clean.
     CREATE UNIQUE INDEX IF NOT EXISTS idx_roles_shortname       ON roles (shortname);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_groups_shortname      ON groups (shortname);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_permissions_shortname ON permissions (shortname);
     CREATE INDEX IF NOT EXISTS idx_sessions_shortname        ON sessions (shortname);
     CREATE INDEX IF NOT EXISTS idx_histories_lookup
         ON histories (space_name, subpath, shortname, timestamp DESC);
