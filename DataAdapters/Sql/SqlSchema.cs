@@ -368,13 +368,26 @@ public static class SqlSchema
     CREATE INDEX IF NOT EXISTS idx_users_owner_shortname     ON users (owner_shortname);
     CREATE INDEX IF NOT EXISTS idx_roles_owner_shortname     ON roles (owner_shortname);
     CREATE INDEX IF NOT EXISTS idx_permissions_owner_shortname ON permissions (owner_shortname);
-    -- The management model treats a group shortname as globally unique: get/delete
-    -- key on shortname alone. Enforce it so a shortname can't silently exist twice
-    -- across subpaths (which would make those lookups ambiguous / over-delete).
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_groups_shortname    ON groups (shortname);
-    -- Parity with roles/permissions: groups was added without its owner / policy
-    -- indexes, so owner lookups and policy-filtered QueryGroupsAsync had no support.
+    -- Parity index: groups (PR #94) was added without its owner index.
     CREATE INDEX IF NOT EXISTS idx_groups_owner_shortname    ON groups (owner_shortname);
+
+    -- Roles and groups are fetched and deleted by shortname ALONE (get/delete never
+    -- pass space_name/subpath), so a shortname MUST be globally unique. The per-table
+    -- composite UNIQUE(shortname,space,subpath) is too weak: it permits one shortname
+    -- under two subpaths, which makes those lookups ambiguous and the delete
+    -- over-broad. Enforce global uniqueness here.
+    -- NB permissions are deliberately NOT constrained the same way yet: the reserved
+    -- "world" permission is provisioned as a shared singleton at varying subpaths
+    -- across the codebase/tests, so a unique index would need a coordinated cleanup
+    -- first (GetPermissionAsync already keys on shortname, so it IS a latent
+    -- inconsistency — tracked as a separate follow-up).
+    -- UPGRADE NOTE: if init aborts with "key (shortname)=(..) is duplicated", a row
+    -- already violates this. Locate offenders per table with
+    --   SELECT shortname, count(*) FROM <table> GROUP BY shortname HAVING count(*) > 1;
+    -- and reconcile before deploying. CreateAll runs as one transactional batch, so
+    -- it rolls back fully — the app just won't start until the data is clean.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_roles_shortname       ON roles (shortname);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_groups_shortname      ON groups (shortname);
     CREATE INDEX IF NOT EXISTS idx_sessions_shortname        ON sessions (shortname);
     CREATE INDEX IF NOT EXISTS idx_histories_lookup
         ON histories (space_name, subpath, shortname, timestamp DESC);
