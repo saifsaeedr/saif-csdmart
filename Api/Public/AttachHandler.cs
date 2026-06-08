@@ -82,8 +82,10 @@ public static class AttachHandler
             return Response.Fail(InternalErrorCode.NOT_ALLOWED,
                 "Only attachment resource types are allowed", ErrorTypes.Request);
 
+        // Anonymous callers never pick their own shortname — it is always the
+        // server-minted "auto" value, so both branches below insert-and-retry past
+        // the rare 8-hex collision (re-minting each attempt) rather than overwriting.
         record = record with { Shortname = "auto" };
-        record = RequestHandler.ResolveAutoShortname(record);
 
         var payloadFile = form.Files["payload_file"];
         if (payloadFile is not null)
@@ -95,34 +97,48 @@ public static class AttachHandler
             var checksum = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
             var ext = (Path.GetExtension(payloadFile.FileName) ?? "").TrimStart('.').ToLowerInvariant();
             var contentType = ResourceWithPayloadHandler.InferContentType(payloadFile.ContentType, ext);
-            return await ResourceWithPayloadHandler.StoreAttachmentAsync(
-                record, spaceName, "anonymous", bytes, ext, contentType, checksum, null,
-                ResourceWithPayloadHandler.ExtractSchemaShortname(record.Attributes),
-                attachments, perms, log, ct);
+            var schema = ResourceWithPayloadHandler.ExtractSchemaShortname(record.Attributes);
+            return await RequestHandler.RetryOnShortnameCollisionAsync(
+                wasAuto: true,
+                () => ResourceWithPayloadHandler.StoreAttachmentAsync(
+                    RequestHandler.ResolveAutoShortname(record), spaceName, "anonymous", bytes, ext,
+                    contentType, checksum, null, schema, attachments, perms, log,
+                    failOnConflict: true, ct),
+                r => r.Error?.Code == InternalErrorCode.SHORTNAME_ALREADY_EXIST);
         }
 
-        var attrs = record.Attributes ?? new();
-        var gate = new Locator(record.ResourceType, spaceName, "/" + record.Subpath.TrimStart('/'), record.Shortname);
-        if (!await perms.CanCreateAsync("anonymous", gate, attrs, ct))
-            return Response.Fail(InternalErrorCode.NOT_ALLOWED,
-                "You don't have permission to this action", ErrorTypes.Request);
+        return await RequestHandler.RetryOnShortnameCollisionAsync(
+            wasAuto: true,
+            async () =>
+            {
+                var resolved = RequestHandler.ResolveAutoShortname(record);
+                var attrs = resolved.Attributes ?? new();
+                var gate = new Locator(resolved.ResourceType, spaceName,
+                    "/" + resolved.Subpath.TrimStart('/'), resolved.Shortname);
+                if (!await perms.CanCreateAsync("anonymous", gate, attrs, ct))
+                    return Response.Fail(InternalErrorCode.NOT_ALLOWED,
+                        "You don't have permission to this action", ErrorTypes.Request);
 
-        var attachment = new Attachment
-        {
-            Uuid = string.IsNullOrEmpty(record.Uuid) ? Guid.NewGuid().ToString() : record.Uuid,
-            Shortname = record.Shortname,
-            SpaceName = spaceName,
-            Subpath = "/" + record.Subpath.TrimStart('/'),
-            ResourceType = record.ResourceType,
-            OwnerShortname = "anonymous",
-            IsActive = !attrs.TryGetValue("is_active", out var isActive) || IsTruthy(isActive),
-            Body = attrs.TryGetValue("body", out var body) ? ScalarToString(body) : null,
-            State = attrs.TryGetValue("state", out var state) ? ScalarToString(state) : null,
-            CreatedAt = TimeUtils.Now(),
-            UpdatedAt = TimeUtils.Now(),
-        };
-        await attachments.UpsertAsync(attachment, ct);
-        return Response.Ok(new[] { record with { Uuid = attachment.Uuid } });
+                var attachment = new Attachment
+                {
+                    Uuid = string.IsNullOrEmpty(resolved.Uuid) ? Guid.NewGuid().ToString() : resolved.Uuid,
+                    Shortname = resolved.Shortname,
+                    SpaceName = spaceName,
+                    Subpath = "/" + resolved.Subpath.TrimStart('/'),
+                    ResourceType = resolved.ResourceType,
+                    OwnerShortname = "anonymous",
+                    IsActive = !attrs.TryGetValue("is_active", out var isActive) || IsTruthy(isActive),
+                    Body = attrs.TryGetValue("body", out var body) ? ScalarToString(body) : null,
+                    State = attrs.TryGetValue("state", out var state) ? ScalarToString(state) : null,
+                    CreatedAt = TimeUtils.Now(),
+                    UpdatedAt = TimeUtils.Now(),
+                };
+                if (!await attachments.TryInsertAsync(attachment, ct))
+                    return Response.Fail(InternalErrorCode.SHORTNAME_ALREADY_EXIST,
+                        "attachment exists", ErrorTypes.Db);
+                return Response.Ok(new[] { resolved with { Uuid = attachment.Uuid } });
+            },
+            r => r.Error?.Code == InternalErrorCode.SHORTNAME_ALREADY_EXIST);
     }
 
     private static bool SpaceAllowed(string allowedSubmitModels, string spaceName)
