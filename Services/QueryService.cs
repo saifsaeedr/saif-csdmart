@@ -157,6 +157,8 @@ public sealed class QueryService(
                 return await QueryUsersAsync(q, actor, ct);
             if (sub == "roles" || sub.StartsWith("roles/", StringComparison.Ordinal))
                 return await QueryRolesAsync(q, actor, ct);
+            if (sub == "groups" || sub.StartsWith("groups/", StringComparison.Ordinal))
+                return await QueryGroupsAsync(q, actor, ct);
             if (sub == "permissions" || sub.StartsWith("permissions/", StringComparison.Ordinal))
                 return await QueryPermissionsAsync(q, actor, ct);
         }
@@ -239,6 +241,32 @@ public sealed class QueryService(
         await Task.WhenAll(pageTask, totalTask);
 
         var records = (await pageTask).Select(RoleMapper.ToRecord).ToList();
+        return Response.Ok(records, new() { ["total"] = await totalTask, ["returned"] = records.Count });
+    }
+
+    // ====================================================================
+    // GROUPS (management/groups)
+    // ====================================================================
+
+    private async Task<Response> QueryGroupsAsync(Query q, string? actor, CancellationToken ct)
+    {
+        if (!await CanQueryAsync(actor, ResourceType.Group, q.SpaceName, q.Subpath ?? "/", ct))
+            return EmptyQueryResponse();
+
+        var policies = await GetActorQueryPoliciesAsync(q, actor, ct);
+        if (actor is not null && policies!.Count == 0) return EmptyQueryResponse();
+
+        var pageTask = actor is not null
+            ? access.QueryGroupsAsync(q, actor, policies, ct)
+            : access.QueryGroupsAsync(q, ct);
+        var totalTask = q.RetrieveTotal == false
+            ? Task.FromResult(-1)
+            : (actor is not null
+                ? access.CountGroupsQueryAsync(q, actor, policies, ct)
+                : access.CountGroupsQueryAsync(q, ct));
+        await Task.WhenAll(pageTask, totalTask);
+
+        var records = (await pageTask).Select(GroupMapper.ToRecord).ToList();
         return Response.Ok(records, new() { ["total"] = await totalTask, ["returned"] = records.Count });
     }
 
@@ -1579,6 +1607,39 @@ internal static class UserMapper
             Subpath = u.Subpath,
             Shortname = u.Shortname,
             Uuid = u.Uuid,
+            Attributes = AttrHelper.StripNulls(attrs),
+        };
+    }
+}
+
+internal static class GroupMapper
+{
+    public static Record ToRecord(Group g)
+    {
+        var attrs = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["is_active"] = g.IsActive,
+            ["slug"] = g.Slug,
+            ["displayname"] = g.Displayname,
+            ["description"] = g.Description,
+            ["tags"] = g.Tags,
+            ["created_at"] = g.CreatedAt,
+            ["updated_at"] = g.UpdatedAt,
+            ["owner_shortname"] = g.OwnerShortname,
+            ["owner_group_shortname"] = g.OwnerGroupShortname,
+            ["acl"] = g.Acl,
+            ["payload"] = g.Payload,
+            ["relationships"] = g.Relationships,
+            ["last_checksum_history"] = g.LastChecksumHistory,
+            ["grantable_by"] = g.GrantableBy,
+            ["space_name"] = g.SpaceName,
+        };
+        return new Record
+        {
+            ResourceType = ResourceType.Group,
+            Subpath = g.Subpath,
+            Shortname = g.Shortname,
+            Uuid = g.Uuid,
             Attributes = AttrHelper.StripNulls(attrs),
         };
     }
