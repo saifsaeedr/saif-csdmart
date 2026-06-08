@@ -162,6 +162,56 @@ Shape on the wire:
 ] }
 ```
 
+## Granting roles & groups (`grantable_by`) and the privilege floor
+
+Roles and groups are **first-class tables** (`roles`, `groups`), each carrying a
+`grantable_by` JSONB list. `EnforcePrivilegeFloorAsync`
+(`Api/Managed/RequestHandler.cs`) gates a NON-global-admin going through
+`/managed/request`:
+
+- **Assigning** a role/group to a user (`attributes.roles` / `attributes.groups`)
+  is allowed only when that role/group's `grantable_by` lists a role/group the
+  actor already holds. Each type checks **its own kind**: a role's `grantable_by`
+  is matched against the actor's roles
+  (`PermissionService.NonGrantableRolesAsync`), a group's against the actor's
+  groups (`NonGrantableGroupsAsync`). An inactive, missing, or
+  null/empty-`grantable_by` grantee is non-grantable — only a global admin can
+  assign it. Holding a role/group no longer implies the right to grant it.
+- **Setting** `grantable_by` (or a role's `permissions`, or a permission's
+  scope) is global-admin-only.
+
+A global admin — a grant of every action over `__all_spaces__` /
+`__all_subpaths__` — bypasses the floor entirely.
+
+### Migration / backfill: groups promoted to a first-class table
+
+The `groups` table is **new** (added with `grantable_by`); there is **no
+automatic backfill** from the pre-existing free-form `user.groups` string lists.
+Consequences on upgrade:
+
+- **Ownership ACLs are unaffected.** The `own` condition still resolves group
+  membership off the `user.groups` string list
+  (`PermissionService.cs`, the `own` rule above), which does not join the
+  `groups` table.
+- **Group *assignment* by non-admins stops working** until the table is
+  populated. Every group a user currently references has no `groups` row, so its
+  `grantable_by` is effectively null → only a global admin can assign it.
+
+To restore non-admin delegation, insert a `groups` row for each distinct group
+shortname your users reference, active, with the intended `grantable_by`. The
+distinct names are discoverable from the user rows:
+
+```sql
+-- list group shortnames in use that have no backing groups row
+SELECT DISTINCT g AS shortname
+FROM users, jsonb_array_elements_text(COALESCE(groups, '[]'::jsonb)) AS g
+WHERE g NOT IN (SELECT shortname FROM groups);
+```
+
+Create each via `POST /managed/request` (`resource_type: "group"`, as a global
+admin) so `query_policies` is generated and caches refresh — setting
+`grantable_by` to the group(s) whose members should be able to assign it.
+
 ## Conditions
 
 `p.Conditions` is a list of required flags that the **resource** must have
