@@ -714,28 +714,12 @@ public sealed class UserService(
             resolvedIsMsisdnVerified = true;
         }
 
-        // Python parity: update_user_payload (api/user/service.py) deep-merges
-        // patch.payload.body into user.payload.body, creating an empty Payload
-        // if the user had none. Schema validation is intentionally omitted here
-        // — UserService has no SchemaService dependency and Python only runs
-        // it when the payload carries a schema_shortname, which admin-minted
-        // user payloads typically don't.
-        var resolvedPayload = user.Payload;
-        if (patch.TryGetValue("payload", out var payloadRaw)
-            && payloadRaw is JsonElement pe
-            && pe.ValueKind == JsonValueKind.Object
-            && pe.TryGetProperty("body", out var patchBody)
-            && patchBody.ValueKind != JsonValueKind.Null)
-        {
-            resolvedPayload ??= new Payload
-            {
-                ContentType = ContentType.Json,
-                SchemaShortname = null,
-                Body = null,
-            };
-            var mergedBody = JsonMerge.DeepMergeAndStripNulls(resolvedPayload.Body, patchBody);
-            resolvedPayload = resolvedPayload with { Body = mergedBody };
-        }
+        // Python parity: deep-merge patch.payload.body into user.payload.body
+        // (creating a default Payload if the user had none), via the shared
+        // PayloadMerge used by the managed-user and entry update paths. Schema
+        // validation is intentionally omitted — UserService has no SchemaService
+        // dependency and Python only runs it for schema-bearing payloads.
+        var resolvedPayload = PayloadMerge.MergeBody(user.Payload, patch.GetValueOrDefault("payload"));
 
         // Roles and Groups are intentionally absent from this `with` block: a
         // user can never change their own access via self-service

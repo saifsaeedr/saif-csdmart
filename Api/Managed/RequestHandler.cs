@@ -737,14 +737,12 @@ public static class RequestHandler
                 var passwordRaw = attrs.TryGetValue("password", out var p) ? ConvertToString(p) : null;
                 var newIsActive = attrs.TryGetValue("is_active", out var ia) ? !IsExplicitlyFalse(ia) : existing.IsActive;
                 var reactivating = !existing.IsActive && newIsActive;
-                // Python parity: payload + body, type, language, and
-                // force_password_change all flow through user update via
-                // Meta.update_from_record. Previously the C# branch dropped
-                // them on the floor, so a curl that POSTed `attributes.payload`
-                // saw the request 200 OK but the field never persisted.
-                var newPayload = attrs.ContainsKey("payload")
-                    ? ParsePayloadFromAttrs(attrs)
-                    : existing.Payload;
+                // Python parity: payload, type, language, and force_password_change
+                // flow through user update via Meta.update_from_record. payload.body
+                // is DEEP-MERGED (Payload.update(replace=false)) so a partial body
+                // patches the existing body instead of replacing it — shared with the
+                // entry and self-service /user/profile paths via PayloadMerge.
+                var newPayload = PayloadMerge.MergeBody(existing.Payload, attrs.GetValueOrDefault("payload"));
                 var updated = existing with
                 {
                     Email = attrs.TryGetValue("email", out var e) ? ConvertToString(e) : existing.Email,
