@@ -287,7 +287,7 @@ public static class RequestHandler
         if (!string.Equals(rec.Shortname, AutoShortname, StringComparison.OrdinalIgnoreCase))
             return rec;
         var uuid = Guid.NewGuid();
-        return rec with { Shortname = uuid.ToString("N")[..8], Uuid = uuid.ToString() };
+        return rec with { Shortname = uuid.ToString("N")[..16], Uuid = uuid.ToString() };
     }
 
     private static Record WithCreatedMetaAttributes(
