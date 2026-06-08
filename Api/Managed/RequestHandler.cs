@@ -160,8 +160,11 @@ public static class RequestHandler
                         result = req.RequestType switch
                         {
                             RequestType.Create =>
-                                await DispatchCreateAsync(rec, req.SpaceName, actor,
-                                    entries, users, access, spaces, attachments, hasher, perms, uniqueness, ct),
+                                await RetryOnShortnameCollisionAsync(
+                                    IsAutoShortname(rec.Shortname),
+                                    () => DispatchCreateAsync(rec, req.SpaceName, actor,
+                                        entries, users, access, spaces, attachments, hasher, perms, uniqueness, ct),
+                                    r => r.Response.Error?.Code == InternalErrorCode.SHORTNAME_ALREADY_EXIST),
                             RequestType.Delete =>
                                 await DispatchDeleteAsync(rec, req.SpaceName, actor, managementSpace,
                                     entries, users, access, spaces, attachments, perms, ct),
@@ -277,17 +280,49 @@ public static class RequestHandler
     // CREATE
     // ============================================================================
 
-    // Python: settings.auto_uuid_rule = "auto". When shortname == "auto",
-    // generate a UUID and use the first 8 chars as the shortname.
-    // Mirrors models/core.py::Meta.from_record:232 and User.from_record:593.
+    // Python: settings.auto_uuid_rule = "auto". When shortname == "auto", generate
+    // a UUID and use the first 8 chars as the shortname. Kept at 8 for Python parity
+    // (models/core.py::Meta.from_record:232 and User.from_record:593 do str(uuid)[:8],
+    // and the "N" format's first 8 chars equal the dashed form's first group, so the
+    // value matches the reference impl). Collisions are handled by retry, not by a
+    // longer prefix — see RetryOnShortnameCollisionAsync.
     private const string AutoShortname = "auto";
+
+    // Upper bound on auto-shortname regeneration. An 8-hex prefix is 32 bits; a
+    // collision within one (space, subpath) only bites at high volume, and each
+    // retry squares the (already small) miss probability, so a few attempts suffice.
+    internal const int MaxAutoShortnameAttempts = 5;
+
+    // Test seam: the UUID source behind an auto shortname. Overridable so a test can
+    // script a collision and prove the retry recovers. Production is Guid.NewGuid.
+    internal static Func<Guid> NewAutoUuid = Guid.NewGuid;
+
+    internal static bool IsAutoShortname(string? shortname)
+        => string.Equals(shortname, AutoShortname, StringComparison.OrdinalIgnoreCase);
 
     internal static Record ResolveAutoShortname(Record rec)
     {
-        if (!string.Equals(rec.Shortname, AutoShortname, StringComparison.OrdinalIgnoreCase))
+        if (!IsAutoShortname(rec.Shortname))
             return rec;
-        var uuid = Guid.NewGuid();
+        var uuid = NewAutoUuid();
         return rec with { Shortname = uuid.ToString("N")[..8], Uuid = uuid.ToString() };
+    }
+
+    // Re-runs `attempt` while it reports a shortname collision, up to maxAttempts,
+    // re-minting a fresh auto shortname each time (attempt re-resolves internally).
+    // Only retries when the shortname was the "auto" sentinel — a caller-supplied
+    // duplicate is a genuine error returned on the first attempt. Pure loop (no DB,
+    // no RNG of its own) so it is unit-testable in isolation.
+    internal static async Task<T> RetryOnShortnameCollisionAsync<T>(
+        bool wasAuto, Func<Task<T>> attempt, Func<T, bool> isCollision,
+        int maxAttempts = MaxAutoShortnameAttempts)
+    {
+        for (var i = 1; ; i++)
+        {
+            var result = await attempt();
+            if (!wasAuto || i >= maxAttempts || !isCollision(result))
+                return result;
+        }
     }
 
     private static Record WithCreatedMetaAttributes(
