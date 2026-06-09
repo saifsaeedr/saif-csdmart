@@ -446,7 +446,7 @@
         <div class="w-full flex flex-row justify-between">
             {#if ([ResourceType.schema, ...resourcesWithFormAndJson].includes(selectedResourceType) || subpath === "workflows") && (selectedResourceType !== ResourceType.content || contentType === "json")}
                 <Button
-                    class="cursor-pointer text-green-700 hover:text-green-500 mx-1"
+                    class="cursor-pointer text-green-700 mx-1"
                     outline
                     onclick={() =>
                         (selectedInputMode =
@@ -467,7 +467,7 @@
             <div>
                 {#if !isHandleCreateEntryLoading}
                     <Button
-                        class="cursor-pointer text-primary hover:text-primary mx-1"
+                        class="cursor-pointer text-primary mx-1"
                         outline
                         onclick={() => (isOpen = false)}
                     >

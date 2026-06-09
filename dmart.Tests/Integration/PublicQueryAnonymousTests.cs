@@ -50,21 +50,10 @@ public sealed class PublicQueryAnonymousTests : IClassFixture<DmartFactory>
         {
             // World permission mirroring the field-reported shape:
             //   leading-slash subpath, conditions=[is_active], actions=[view,query].
-            await access.UpsertPermissionAsync(new Permission
-            {
-                Uuid = Guid.NewGuid().ToString(),
-                Shortname = worldPerm,
-                SpaceName = "management",
-                Subpath = "permissions",
-                OwnerShortname = "dmart",
-                IsActive = true,
-                Subpaths = new() { [space] = new() { "/items" } }, // leading slash
-                ResourceTypes = new() { "content" },
-                Actions = new() { "view", "query" },
-                Conditions = new() { "is_active" },
-                CreatedAt = DateTime.UtcNow,
-                UpdatedAt = DateTime.UtcNow,
-            });
+            await WorldPermissionFixture.UpsertAsync(access, priorWorld,
+                subpaths: new() { [space] = new() { "/items" } }, // leading slash
+                actions: new() { "view", "query" },
+                conditions: new() { "is_active" });
             await access.UpsertRoleAsync(new Role
             {
                 Uuid = Guid.NewGuid().ToString(),
@@ -455,21 +444,12 @@ internal sealed class WorldScopeHarness : IAsyncDisposable
         var effectiveSubpaths = subpaths
             ?? new Dictionary<string, List<string>> { [space] = subpathsForSpace ?? new() { effectiveSubpath } };
 
-        await access.UpsertPermissionAsync(new Permission
-        {
-            Uuid = Guid.NewGuid().ToString(),
-            Shortname = worldPerm,
-            SpaceName = "management",
-            Subpath = "permissions",
-            OwnerShortname = "dmart",
-            IsActive = permIsActive,
-            Subpaths = effectiveSubpaths,
-            ResourceTypes = resourceTypes ?? new() { "content" },
-            Actions = actions ?? new() { "view", "query" },
-            Conditions = conditions ?? new(),
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow,
-        });
+        await WorldPermissionFixture.UpsertAsync(access, priorWorld,
+            subpaths: effectiveSubpaths,
+            actions: actions ?? new() { "view", "query" },
+            resourceTypes: resourceTypes ?? new() { "content" },
+            conditions: conditions ?? new(),
+            isActive: permIsActive);
         await access.UpsertRoleAsync(new Role
         {
             Uuid = Guid.NewGuid().ToString(),

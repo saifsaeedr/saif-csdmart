@@ -55,7 +55,6 @@ public static class RegistrationHandler
                 Subpath = "/",
                 Attributes = body.Attributes,
             };
-            record = RequestHandler.ResolveAutoShortname(record);
 
             // Python strips authorization/cookie from request_headers before
             // persisting last_login. Matches process_user_login behaviour.
@@ -67,7 +66,13 @@ public static class RegistrationHandler
                 headers[h.Key] = h.Value.ToString();
             }
 
-            var result = await svc.CreateAsync(record, headers, ct);
+            // The shortname is the server-minted "auto" sentinel; retry past the
+            // rare 8-hex collision (re-minting each attempt via ResolveAutoShortname
+            // inside the loop) instead of surfacing it to the registrant.
+            var result = await RequestHandler.RetryOnShortnameCollisionAsync(
+                RequestHandler.IsAutoShortname(record.Shortname),
+                () => svc.CreateAsync(RequestHandler.ResolveAutoShortname(record), headers, ct),
+                r => r.ErrorCode == InternalErrorCode.SHORTNAME_ALREADY_EXIST);
             if (!result.IsOk)
                 return Results.Json(
                     Response.Fail(result.ErrorCode, result.ErrorMessage!, result.ErrorType ?? "create"),

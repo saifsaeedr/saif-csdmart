@@ -237,6 +237,9 @@ internal static class HistoryDiffUtil
     // build the same `{field: {old, new}}` shape clients already consume from
     // /managed/query?type=history for entries and self-service profile edits.
 
+    public static Dictionary<string, object> ComputeGroupDiff(Group oldG, Group newG)
+        => DiffFromMaps(FlattenGroup(oldG), FlattenGroup(newG));
+
     public static Dictionary<string, object> ComputeRoleDiff(Role oldR, Role newR)
         => DiffFromMaps(FlattenRole(oldR), FlattenRole(newR));
 
@@ -296,7 +299,7 @@ internal static class HistoryDiffUtil
         return d;
     }
 
-    // For list-valued flatten entries (Role.Permissions,
+    // For list-valued flatten entries (Role.Permissions, Role/Group.GrantableBy,
     // Permission.{ResourceTypes,Actions,Conditions,RestrictedFields},
     // Space.{Mirrors,HideFolders,Languages}) the emitted diff surfaces the
     // *entire* list before/after on any change, not the specific item(s)
@@ -304,11 +307,23 @@ internal static class HistoryDiffUtil
     // Item-level deltas would require a different storage shape (multi-key
     // or array-index path) and aren't what the current /managed/query?type=history
     // contract promises — Python parity, intentional.
+    private static Dictionary<string, object?> FlattenGroup(Group g)
+    {
+        var d = FlattenMetasBase(g.IsActive, g.Slug, g.Displayname, g.Description, g.Tags, g.Payload,
+            g.OwnerShortname, g.OwnerGroupShortname);
+        // grantable_by is a privilege-delegation control — its changes MUST be
+        // auditable. null and [] both mean "global-admin only", so normalize to
+        // avoid spurious null↔[] diffs.
+        d["grantable_by"] = g.GrantableBy ?? new();
+        return d;
+    }
+
     private static Dictionary<string, object?> FlattenRole(Role r)
     {
         var d = FlattenMetasBase(r.IsActive, r.Slug, r.Displayname, r.Description, r.Tags, r.Payload,
             r.OwnerShortname, r.OwnerGroupShortname);
         d["permissions"] = r.Permissions;
+        d["grantable_by"] = r.GrantableBy ?? new();
         return d;
     }
 

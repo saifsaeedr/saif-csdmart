@@ -5,10 +5,18 @@ using NpgsqlTypes;
 
 namespace Dmart.DataAdapters.Sql;
 
-// roles + permissions + userpermissionscache. Column-for-column mapping to dmart's
+// roles + groups + permissions + userpermissionscache. Column-for-column mapping to dmart's
 // Roles, Permissions, and UserPermissionsCache SQLModel tables.
 public sealed class AccessRepository(Db db, AuthzCacheRefresher refresher, UserRepository userRepository)
 {
+    private const string SelectGroupColumns = """
+        SELECT uuid, shortname, space_name, subpath, is_active, slug,
+               displayname, description, tags, created_at, updated_at,
+               owner_shortname, owner_group_shortname, acl, payload, relationships,
+               last_checksum_history, resource_type, query_policies, grantable_by
+        FROM groups
+        """;
+
     private const string SelectRoleColumns = """
         SELECT uuid, shortname, space_name, subpath, is_active, slug,
                displayname, description, tags, created_at, updated_at,
@@ -26,6 +34,124 @@ public sealed class AccessRepository(Db db, AuthzCacheRefresher refresher, UserR
                filter_fields_values, query_policies
         FROM permissions
         """;
+
+    public async Task<Group?> GetGroupAsync(string shortname, CancellationToken ct = default)
+    {
+        await using var conn = await db.OpenAsync(ct);
+        return await GetGroupAsync(shortname, conn, ct);
+    }
+
+    public async Task<Group?> GetGroupAsync(string shortname, NpgsqlConnection conn, CancellationToken ct = default)
+    {
+        await using var cmd = new NpgsqlCommand($"{SelectGroupColumns} WHERE shortname = $1", conn);
+        cmd.Parameters.Add(new() { Value = shortname });
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        return await r.ReadAsync(ct) ? HydrateGroup(r) : null;
+    }
+
+    public async Task<List<Group>> GetGroupsAsync(IEnumerable<string> shortnames, CancellationToken ct = default)
+    {
+        var arr = shortnames.ToArray();
+        if (arr.Length == 0) return new();
+        await using var conn = await db.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand($"{SelectGroupColumns} WHERE shortname = ANY($1)", conn);
+        cmd.Parameters.Add(new() { Value = arr, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        var results = new List<Group>();
+        while (await r.ReadAsync(ct)) results.Add(HydrateGroup(r));
+        return results;
+    }
+
+    public async Task UpsertGroupAsync(Group group, CancellationToken ct = default)
+    {
+        await using var conn = await db.OpenAsync(ct);
+        await UpsertGroupAsync(group, conn, ct);
+    }
+
+    public Task UpsertGroupAsync(Group group, NpgsqlConnection conn, CancellationToken ct = default)
+        => UpsertGroupAsync(group, conn, deferCacheRefresh: false, ct);
+
+    public async Task UpsertGroupAsync(Group group, NpgsqlConnection conn, bool deferCacheRefresh, CancellationToken ct = default)
+    {
+        group = group with { QueryPolicies = Utils.QueryPolicies.Generate(group) };
+
+        await using var cmd = new NpgsqlCommand("""
+            INSERT INTO groups (uuid, shortname, space_name, subpath, is_active, slug,
+                                displayname, description, tags, created_at, updated_at,
+                                owner_shortname, owner_group_shortname, acl, payload, relationships,
+                                last_checksum_history, resource_type, query_policies, grantable_by)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+            ON CONFLICT (shortname, space_name, subpath) DO UPDATE SET
+                is_active = EXCLUDED.is_active,
+                slug = EXCLUDED.slug,
+                displayname = EXCLUDED.displayname,
+                description = EXCLUDED.description,
+                tags = EXCLUDED.tags,
+                updated_at = NOW(),
+                owner_shortname = EXCLUDED.owner_shortname,
+                owner_group_shortname = EXCLUDED.owner_group_shortname,
+                acl = EXCLUDED.acl,
+                payload = EXCLUDED.payload,
+                relationships = EXCLUDED.relationships,
+                last_checksum_history = EXCLUDED.last_checksum_history,
+                query_policies = EXCLUDED.query_policies,
+                grantable_by = EXCLUDED.grantable_by
+            """, conn);
+
+        cmd.Parameters.Add(new() { Value = Guid.Parse(group.Uuid) });
+        cmd.Parameters.Add(new() { Value = group.Shortname });
+        cmd.Parameters.Add(new() { Value = group.SpaceName });
+        cmd.Parameters.Add(new() { Value = group.Subpath });
+        cmd.Parameters.Add(new() { Value = group.IsActive });
+        cmd.Parameters.Add(new() { Value = (object?)group.Slug ?? DBNull.Value });
+        AddJsonb(cmd, JsonbHelpers.ToJsonb(group.Displayname));
+        AddJsonb(cmd, JsonbHelpers.ToJsonb(group.Description));
+        AddJsonbNotNull(cmd, JsonbHelpers.ToJsonbList(group.Tags));
+        cmd.Parameters.Add(new() { Value = group.CreatedAt == default ? TimeUtils.Now() : group.CreatedAt });
+        cmd.Parameters.Add(new() { Value = TimeUtils.Now() });
+        cmd.Parameters.Add(new() { Value = group.OwnerShortname });
+        cmd.Parameters.Add(new() { Value = (object?)group.OwnerGroupShortname ?? DBNull.Value });
+        AddJsonb(cmd, JsonbHelpers.ToJsonb(group.Acl));
+        AddJsonb(cmd, JsonbHelpers.ToJsonb(group.Payload));
+        AddJsonb(cmd, JsonbHelpers.ToJsonb(group.Relationships));
+        cmd.Parameters.Add(new() { Value = (object?)group.LastChecksumHistory ?? DBNull.Value });
+        cmd.Parameters.Add(new() { Value = JsonbHelpers.EnumMember(group.ResourceType) });
+        cmd.Parameters.Add(new()
+        {
+            Value = group.QueryPolicies.ToArray(),
+            NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text,
+        });
+        AddJsonb(cmd, JsonbHelpers.ToJsonb(group.GrantableBy));
+
+        await cmd.ExecuteNonQueryAsync(ct);
+        if (!deferCacheRefresh) await refresher.RefreshAsync(ct);
+    }
+
+    public async Task<bool> DeleteGroupAsync(string shortname, CancellationToken ct = default)
+    {
+        await using var conn = await db.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand("DELETE FROM groups WHERE shortname = $1", conn);
+        cmd.Parameters.Add(new() { Value = shortname });
+        var rows = await cmd.ExecuteNonQueryAsync(ct);
+        if (rows == 0) return false;
+        await refresher.RefreshAsync(ct);
+        return true;
+    }
+
+    public Task<List<Group>> QueryGroupsAsync(Models.Api.Query q, CancellationToken ct = default)
+        => QueryHelper.RunQueryAsync(db, SelectGroupColumns, q, HydrateGroup, ct, tableName: "groups");
+
+    public Task<List<Group>> QueryGroupsAsync(
+        Models.Api.Query q, string actor, List<string>? queryPolicies, CancellationToken ct = default)
+        => QueryHelper.RunQueryAsync(db, SelectGroupColumns, q, HydrateGroup, ct,
+            userShortname: actor, tableName: "groups", queryPolicies: queryPolicies);
+
+    public Task<int> CountGroupsQueryAsync(Models.Api.Query q, CancellationToken ct = default)
+        => QueryHelper.RunCountAsync(db, "groups", q, ct);
+
+    public Task<int> CountGroupsQueryAsync(
+        Models.Api.Query q, string actor, List<string>? queryPolicies, CancellationToken ct = default)
+        => QueryHelper.RunCountAsync(db, "groups", q, ct, actor, queryPolicies);
 
     public async Task<Role?> GetRoleAsync(string shortname, CancellationToken ct = default)
     {
@@ -344,15 +470,42 @@ public sealed class AccessRepository(Db db, AuthzCacheRefresher refresher, UserR
                     foreach (var rt in perm.ResourceTypes)
                     {
                         var key = $"{spaceName}:{subpath}:{rt}";
-                        var entry = new Dictionary<string, object>
+                        if (result.TryGetValue(key, out var existing)
+                            && existing is Dictionary<string, object> existingEntry)
                         {
-                            ["allowed_actions"] = perm.Actions,
-                            ["conditions"] = perm.Conditions,
-                            ["restricted_fields"] = perm.RestrictedFields ?? (object)new List<string>(),
-                            ["allowed_fields_values"] = perm.AllowedFieldsValues ?? (object)new Dictionary<string, object>(),
-                            ["filter_fields_values"] = perm.FilterFieldsValues ?? (object)"",
-                        };
-                        result[key] = entry;
+                            // Two permissions the user holds resolved to the same
+                            // space:subpath:resource_type key → fold both into one
+                            // entry representing their COMBINED grant. Grants widen
+                            // (union); restrictions bind only where every overlapping
+                            // permission agrees (an unrestricted permission grants the
+                            // broader access and wins). Only filter_fields_values is
+                            // enforced (the QueryService row-filter); the rest are
+                            // informational — real write-gating reads the raw
+                            // Permission rows via PermissionService.CheckRestrictions —
+                            // but are kept consistent so the reported permissions match.
+                            existingEntry["allowed_actions"] = UnionStrings(
+                                existingEntry["allowed_actions"] as List<string>, perm.Actions);
+                            existingEntry["conditions"] = UnionStrings(
+                                existingEntry["conditions"] as List<string>, perm.Conditions);
+                            existingEntry["restricted_fields"] = IntersectStrings(
+                                existingEntry["restricted_fields"] as List<string>, perm.RestrictedFields);
+                            existingEntry["filter_fields_values"] = CombineFilterFieldsValues(
+                                existingEntry["filter_fields_values"] as string, perm.FilterFieldsValues);
+                            existingEntry["allowed_fields_values"] = CombineAllowedFieldsValues(
+                                existingEntry["allowed_fields_values"] as Dictionary<string, object>,
+                                perm.AllowedFieldsValues);
+                        }
+                        else
+                        {
+                            result[key] = new Dictionary<string, object>
+                            {
+                                ["allowed_actions"] = perm.Actions,
+                                ["conditions"] = perm.Conditions,
+                                ["restricted_fields"] = perm.RestrictedFields ?? (object)new List<string>(),
+                                ["allowed_fields_values"] = perm.AllowedFieldsValues ?? (object)new Dictionary<string, object>(),
+                                ["filter_fields_values"] = perm.FilterFieldsValues ?? (object)"",
+                            };
+                        }
                     }
                 }
             }
@@ -361,6 +514,52 @@ public sealed class AccessRepository(Db db, AuthzCacheRefresher refresher, UserR
         // Cache for next time.
         await CacheUserPermissionsAsync(userShortname, result, ct);
         return result;
+    }
+
+    // ── Overlapping-permission merge ────────────────────────────────────────
+    // When two permissions a user holds resolve to the SAME
+    // space:subpath:resource_type key, the cached entry must represent their
+    // COMBINED effect. Grants are additive (union); restrictions apply only
+    // where ALL overlapping permissions agree (an unrestricted permission grants
+    // the broader access and therefore wins). Kept internal + static so the
+    // semantics are unit-tested directly without a DB. Returned value types
+    // mirror the original entry (List<string>/string/Dictionary) so JSONB
+    // serialization is unchanged.
+
+    // Grant union (allowed_actions, conditions): order-stable, ordinal-deduped.
+    internal static List<string> UnionStrings(IEnumerable<string>? a, IEnumerable<string>? b)
+        => (a ?? []).Union(b ?? [], StringComparer.Ordinal).ToList();
+
+    // restricted_fields are write RESTRICTIONS: a field is restricted only when
+    // BOTH permissions restrict it (intersection). An empty/absent side restricts
+    // nothing, so the merged result restricts nothing.
+    internal static List<string> IntersectStrings(
+        IReadOnlyCollection<string>? a, IReadOnlyCollection<string>? b)
+        => a is null || a.Count == 0 || b is null || b.Count == 0
+            ? new List<string>()
+            : a.Intersect(b, StringComparer.Ordinal).ToList();
+
+    // filter_fields_values is a row-visibility filter (a whitespace-free
+    // RediSearch fragment, enforced by QueryService.MergeFilterFieldsValues).
+    // An empty filter allows ALL rows, so it dominates; two distinct non-empty
+    // filters OR together so a row visible to EITHER permission stays visible.
+    internal static string CombineFilterFieldsValues(string? a, string? b)
+        => string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)
+            ? ""
+            : string.Equals(a, b, StringComparison.Ordinal) ? a : $"({a})|({b})";
+
+    // allowed_fields_values caps the values each named field may take on write.
+    // An empty/absent cap allows any value, so it dominates (merged result is
+    // empty = unrestricted). When both sides cap fields, the field set is unioned
+    // (informational only — write enforcement uses the raw Permission rows).
+    internal static Dictionary<string, object> CombineAllowedFieldsValues(
+        Dictionary<string, object>? a, Dictionary<string, object>? b)
+    {
+        if (a is null || a.Count == 0 || b is null || b.Count == 0)
+            return new Dictionary<string, object>();
+        var merged = new Dictionary<string, object>(a);
+        foreach (var (field, vals) in b) merged[field] = vals;
+        return merged;
     }
 
     public async Task CacheUserPermissionsAsync(string userShortname, Dictionary<string, object> resolved, CancellationToken ct = default)
@@ -387,6 +586,33 @@ public sealed class AccessRepository(Db db, AuthzCacheRefresher refresher, UserR
         await using var conn = await db.OpenAsync(ct);
         await using var cmd = new NpgsqlCommand("DELETE FROM userpermissionscache", conn);
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    private static Group HydrateGroup(NpgsqlDataReader r)
+    {
+        return new Group
+        {
+            Uuid = r.GetGuid(0).ToString(),
+            Shortname = r.GetString(1),
+            SpaceName = r.GetString(2),
+            Subpath = r.GetString(3),
+            IsActive = r.GetBoolean(4),
+            Slug = r.IsDBNull(5) ? null : r.GetString(5),
+            Displayname = JsonbHelpers.FromTranslation(r.IsDBNull(6) ? null : r.GetString(6)),
+            Description = JsonbHelpers.FromTranslation(r.IsDBNull(7) ? null : r.GetString(7)),
+            Tags = JsonbHelpers.FromListString(r.IsDBNull(8) ? null : r.GetString(8)) ?? new(),
+            CreatedAt = r.GetDateTime(9),
+            UpdatedAt = r.GetDateTime(10),
+            OwnerShortname = r.GetString(11),
+            OwnerGroupShortname = r.IsDBNull(12) ? null : r.GetString(12),
+            Acl = JsonbHelpers.FromAclList(r.IsDBNull(13) ? null : r.GetString(13)),
+            Payload = JsonbHelpers.FromPayload(r.IsDBNull(14) ? null : r.GetString(14)),
+            Relationships = JsonbHelpers.FromRelationships(r.IsDBNull(15) ? null : r.GetString(15)),
+            LastChecksumHistory = r.IsDBNull(16) ? null : r.GetString(16),
+            ResourceType = JsonbHelpers.ParseEnumMember<Models.Enums.ResourceType>(r.GetString(17)),
+            QueryPolicies = r.IsDBNull(18) ? new() : ((string[])r.GetValue(18)).ToList(),
+            GrantableBy = JsonbHelpers.FromListString(r.IsDBNull(19) ? null : r.GetString(19)),
+        };
     }
 
     private static void AddJsonb(NpgsqlCommand cmd, string? json)

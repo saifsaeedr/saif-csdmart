@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Dmart.Api.Managed;
 using Dmart.Config;
 using Dmart.Models.Api;
 using Dmart.Models.Core;
@@ -76,29 +77,36 @@ public static class SubmitHandler
         // field in the body is ignored for identity (it stays in Payload.Body
         // as data). Mint a fresh UUID-derived shortname server-side so one
         // caller can't squat on a name and concurrent submissions don't collide.
-        var entryUuid = Guid.NewGuid();
-        var shortname = entryUuid.ToString("N")[..8];
-
-        var entry = new Entry
+        // Anonymous callers never pick their own shortname, so it is always the
+        // server-minted "auto" value — mint a fresh uuid/shortname per attempt and
+        // retry past the rare 8-hex collision instead of failing the submission.
+        Entry BuildEntry()
         {
-            Uuid = entryUuid.ToString(),
-            Shortname = shortname,
-            SpaceName = space,
-            Subpath = "/" + subpath.TrimStart('/'),
-            ResourceType = rt,
-            OwnerShortname = "anonymous",
-            WorkflowShortname = workflow,
-            State = workflow is null ? null : "submitted",
-            IsOpen = workflow is null ? null : true,
-            Payload = new Payload
+            var entryUuid = RequestHandler.NewAutoUuid();
+            return new Entry
             {
-                ContentType = ContentType.Json,
-                SchemaShortname = schema,
-                Body = body,
-            },
-        };
+                Uuid = entryUuid.ToString(),
+                Shortname = entryUuid.ToString("N")[..8],
+                SpaceName = space,
+                Subpath = "/" + subpath.TrimStart('/'),
+                ResourceType = rt,
+                OwnerShortname = "anonymous",
+                WorkflowShortname = workflow,
+                State = workflow is null ? null : "submitted",
+                IsOpen = workflow is null ? null : true,
+                Payload = new Payload
+                {
+                    ContentType = ContentType.Json,
+                    SchemaShortname = schema,
+                    Body = body,
+                },
+            };
+        }
         // Public submit runs as the anonymous actor after the allowlist check.
-        var result = await entries.CreateAsync(entry, actor: "anonymous", rawAttrs, ct: ct);
+        var result = await RequestHandler.RetryOnShortnameCollisionAsync(
+            wasAuto: true,
+            () => entries.CreateAsync(BuildEntry(), actor: "anonymous", rawAttrs, ct: ct),
+            r => r.ErrorCode == InternalErrorCode.SHORTNAME_ALREADY_EXIST);
         if (!result.IsOk)
             return Response.Fail(result.ErrorCode, result.ErrorMessage!, result.ErrorType ?? "request");
 

@@ -142,6 +142,31 @@ public sealed class AttachmentRepository(Db db)
                 state = EXCLUDED.state
             """, conn);
 
+        BindAttachment(cmd, a);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    // Insert-only: returns true if the row was inserted, false if an attachment with
+    // the same (shortname, space_name, subpath) already exists. Unlike UpsertAsync
+    // (ON CONFLICT DO UPDATE, which overwrites in place), this lets the auto-shortname
+    // create path detect a collision and re-mint instead of clobbering an existing row.
+    public async Task<bool> TryInsertAsync(Attachment a, CancellationToken ct = default)
+    {
+        await using var conn = await db.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand("""
+            INSERT INTO attachments (uuid, shortname, space_name, subpath, is_active, slug,
+                                     displayname, description, tags, created_at, updated_at,
+                                     owner_shortname, owner_group_shortname, acl, payload, relationships,
+                                     last_checksum_history, resource_type, media, body, state)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+            ON CONFLICT (shortname, space_name, subpath) DO NOTHING
+            """, conn);
+        BindAttachment(cmd, a);
+        return await cmd.ExecuteNonQueryAsync(ct) > 0;
+    }
+
+    private static void BindAttachment(NpgsqlCommand cmd, Attachment a)
+    {
         cmd.Parameters.Add(new() { Value = Guid.Parse(a.Uuid) });
         cmd.Parameters.Add(new() { Value = a.Shortname });
         cmd.Parameters.Add(new() { Value = a.SpaceName });
@@ -165,8 +190,6 @@ public sealed class AttachmentRepository(Db db)
         cmd.Parameters.Add(new() { Value = (object?)a.Media ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Bytea });
         cmd.Parameters.Add(new() { Value = (object?)a.Body ?? DBNull.Value });
         cmd.Parameters.Add(new() { Value = (object?)a.State ?? DBNull.Value });
-
-        await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task<(byte[]? Bytes, string? ContentType)> GetMediaAsync(Guid uuid, CancellationToken ct = default)

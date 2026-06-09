@@ -101,7 +101,7 @@ public static class RequestHandler
                     // through dedicated repos that bypass it, so we emit the event here.
                     // Python fires before-hooks for all resource types on this endpoint.
                     var beforeActionType = rec.ResourceType is ResourceType.User or ResourceType.Role
-                        or ResourceType.Permission or ResourceType.Space
+                        or ResourceType.Group or ResourceType.Permission or ResourceType.Space
                         ? req.RequestType switch
                         {
                             RequestType.Create => (ActionType?)ActionType.Create,
@@ -160,8 +160,11 @@ public static class RequestHandler
                         result = req.RequestType switch
                         {
                             RequestType.Create =>
-                                await DispatchCreateAsync(rec, req.SpaceName, actor,
-                                    entries, users, access, spaces, attachments, hasher, perms, uniqueness, ct),
+                                await RetryOnShortnameCollisionAsync(
+                                    IsAutoShortname(rec.Shortname),
+                                    () => DispatchCreateAsync(rec, req.SpaceName, actor,
+                                        entries, users, access, spaces, attachments, hasher, perms, uniqueness, ct),
+                                    r => r.Response.Error?.Code == InternalErrorCode.SHORTNAME_ALREADY_EXIST),
                             RequestType.Delete =>
                                 await DispatchDeleteAsync(rec, req.SpaceName, actor, managementSpace,
                                     entries, users, access, spaces, attachments, perms, ct),
@@ -197,7 +200,7 @@ public static class RequestHandler
                     // but User/Role/Permission/Space go through their own repositories
                     // and bypass EntryService. Python fires plugins for all of these.
                     if (rec.ResourceType is ResourceType.User or ResourceType.Role
-                        or ResourceType.Permission or ResourceType.Space)
+                        or ResourceType.Group or ResourceType.Permission or ResourceType.Space)
                     {
                         // (No space-cache invalidation — PluginManager no
                         // longer caches per-space active_plugins.)
@@ -277,17 +280,49 @@ public static class RequestHandler
     // CREATE
     // ============================================================================
 
-    // Python: settings.auto_uuid_rule = "auto". When shortname == "auto",
-    // generate a UUID and use the first 8 chars as the shortname.
-    // Mirrors models/core.py::Meta.from_record:232 and User.from_record:593.
+    // Python: settings.auto_uuid_rule = "auto". When shortname == "auto", generate
+    // a UUID and use the first 8 chars as the shortname. Kept at 8 for Python parity
+    // (models/core.py::Meta.from_record:232 and User.from_record:593 do str(uuid)[:8],
+    // and the "N" format's first 8 chars equal the dashed form's first group, so the
+    // value matches the reference impl). Collisions are handled by retry, not by a
+    // longer prefix — see RetryOnShortnameCollisionAsync.
     private const string AutoShortname = "auto";
+
+    // Upper bound on auto-shortname regeneration. An 8-hex prefix is 32 bits; a
+    // collision within one (space, subpath) only bites at high volume, and each
+    // retry squares the (already small) miss probability, so a few attempts suffice.
+    internal const int MaxAutoShortnameAttempts = 5;
+
+    // Test seam: the UUID source behind an auto shortname. Overridable so a test can
+    // script a collision and prove the retry recovers. Production is Guid.NewGuid.
+    internal static Func<Guid> NewAutoUuid = Guid.NewGuid;
+
+    internal static bool IsAutoShortname(string? shortname)
+        => string.Equals(shortname, AutoShortname, StringComparison.OrdinalIgnoreCase);
 
     internal static Record ResolveAutoShortname(Record rec)
     {
-        if (!string.Equals(rec.Shortname, AutoShortname, StringComparison.OrdinalIgnoreCase))
+        if (!IsAutoShortname(rec.Shortname))
             return rec;
-        var uuid = Guid.NewGuid();
-        return rec with { Shortname = uuid.ToString("N")[..16], Uuid = uuid.ToString() };
+        var uuid = NewAutoUuid();
+        return rec with { Shortname = uuid.ToString("N")[..8], Uuid = uuid.ToString() };
+    }
+
+    // Re-runs `attempt` while it reports a shortname collision, up to maxAttempts,
+    // re-minting a fresh auto shortname each time (attempt re-resolves internally).
+    // Only retries when the shortname was the "auto" sentinel — a caller-supplied
+    // duplicate is a genuine error returned on the first attempt. Pure loop (no DB,
+    // no RNG of its own) so it is unit-testable in isolation.
+    internal static async Task<T> RetryOnShortnameCollisionAsync<T>(
+        bool wasAuto, Func<Task<T>> attempt, Func<T, bool> isCollision,
+        int maxAttempts = MaxAutoShortnameAttempts)
+    {
+        for (var i = 1; ; i++)
+        {
+            var result = await attempt();
+            if (!wasAuto || i >= maxAttempts || !isCollision(result))
+                return result;
+        }
     }
 
     private static Record WithCreatedMetaAttributes(
@@ -319,6 +354,7 @@ public static class RequestHandler
         {
             case ResourceType.User:
             case ResourceType.Role:
+            case ResourceType.Group:
             case ResourceType.Permission:
             case ResourceType.Space:
             case ResourceType.Comment:
@@ -355,6 +391,8 @@ public static class RequestHandler
                 return await CreateUserAsync(rec, space, actor, users, hasher, uniqueness, ct);
             case ResourceType.Role:
                 return await CreateRoleAsync(rec, space, actor, access, uniqueness, ct);
+            case ResourceType.Group:
+                return await CreateGroupAsync(rec, space, actor, access, uniqueness, ct);
             case ResourceType.Permission:
                 return await CreatePermissionAsync(rec, space, actor, access, uniqueness, ct);
             case ResourceType.Space:
@@ -491,6 +529,37 @@ public static class RequestHandler
         await access.UpsertRoleAsync(role, ct);
         return (Response.Ok(),
             WithCreatedMetaAttributes(rec, role.Uuid, role.CreatedAt, role.UpdatedAt, role.OwnerShortname));
+    }
+
+    private static async Task<(Response Response, Record UpdatedRecord)> CreateGroupAsync(
+        Record rec, string space, string actor, AccessRepository access,
+        UniquenessValidator uniqueness, CancellationToken ct)
+    {
+        var attrs = rec.Attributes ?? new();
+        var uniqRes = await uniqueness.ValidateRawAsync(
+            space, rec.Subpath, rec.Shortname, ResourceType.Group, attrs, ActionType.Create, ct);
+        if (!uniqRes.IsOk)
+            return (Response.Fail(uniqRes.ErrorCode!, uniqRes.ErrorMessage!, uniqRes.ErrorType ?? ErrorTypes.Request), rec);
+        var group = new Group
+        {
+            Uuid = string.IsNullOrEmpty(rec.Uuid) ? Guid.NewGuid().ToString() : rec.Uuid,
+            Shortname = rec.Shortname,
+            SpaceName = space,
+            Subpath = "/" + rec.Subpath.TrimStart('/'),
+            OwnerShortname = actor,
+            Slug = attrs.TryGetValue("slug", out var sl) ? ConvertToString(sl) : null,
+            Displayname = attrs.TryGetValue("displayname", out var dn) ? ParseTranslation(dn) : null,
+            Description = attrs.TryGetValue("description", out var desc) ? ParseTranslation(desc) : null,
+            Tags = ExtractStringList(attrs, "tags") ?? new(),
+            Payload = ParsePayloadFromAttrs(attrs),
+            GrantableBy = ExtractStringList(attrs, "grantable_by"),
+            IsActive = !attrs.TryGetValue("is_active", out var ia) || !IsExplicitlyFalse(ia),
+            CreatedAt = TimeUtils.Now(),
+            UpdatedAt = TimeUtils.Now(),
+        };
+        await access.UpsertGroupAsync(group, ct);
+        return (Response.Ok(),
+            WithCreatedMetaAttributes(rec, group.Uuid, group.CreatedAt, group.UpdatedAt, group.OwnerShortname));
     }
 
     private static async Task<(Response Response, Record UpdatedRecord)> CreatePermissionAsync(
@@ -786,6 +855,44 @@ public static class RequestHandler
                     WithCreatedMetaAttributes(rec, updated.Uuid, updated.CreatedAt, updated.UpdatedAt, updated.OwnerShortname),
                     spaceDiff);
             }
+            case ResourceType.Group:
+            {
+                var existing = await access.GetGroupAsync(rec.Shortname, ct);
+                if (existing is null)
+                    return (Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST, "group not found", ErrorTypes.Request), rec, null);
+                var attrs = rec.Attributes ?? new();
+                var groupLocator = new Locator(ResourceType.Group, existing.SpaceName, existing.Subpath, existing.Shortname);
+                if (!await perms.CanUpdateAsync(actor, groupLocator, PermissionService.FromGroup(existing), attrs, ct))
+                    return (Response.Fail(InternalErrorCode.NOT_ALLOWED, "not allowed to update group", ErrorTypes.Request), rec, null);
+                var groupFloor = await EnforcePrivilegeFloorAsync(ResourceType.Group, attrs, actor, perms, users, ct);
+                if (groupFloor is not null) return (groupFloor, rec, null);
+                var groupUniq = await uniqueness.ValidateRawAsync(
+                    existing.SpaceName, existing.Subpath, existing.Shortname,
+                    ResourceType.Group, attrs, ActionType.Update, ct);
+                if (!groupUniq.IsOk)
+                    return (Response.Fail(groupUniq.ErrorCode!, groupUniq.ErrorMessage!, groupUniq.ErrorType ?? ErrorTypes.Request), rec, null);
+                var updated = existing with
+                {
+                    GrantableBy = attrs.ContainsKey("grantable_by")
+                        ? ExtractStringList(attrs, "grantable_by")
+                        : existing.GrantableBy,
+                    Tags = ExtractStringList(attrs, "tags") ?? existing.Tags,
+                    Slug = attrs.TryGetValue("slug", out var sl) ? ConvertToString(sl) : existing.Slug,
+                    Displayname = attrs.TryGetValue("displayname", out var dn) ? ParseTranslation(dn) : existing.Displayname,
+                    Description = attrs.TryGetValue("description", out var desc) ? ParseTranslation(desc) : existing.Description,
+                    IsActive = attrs.TryGetValue("is_active", out var ia) ? !IsExplicitlyFalse(ia) : existing.IsActive,
+                    UpdatedAt = TimeUtils.Now(),
+                };
+                await access.UpsertGroupAsync(updated, ct);
+
+                var groupDiff = HistoryDiffUtil.ComputeGroupDiff(existing, updated);
+                if (groupDiff.Count > 0)
+                    await history.AppendAsync(updated.SpaceName, updated.Subpath, updated.Shortname, actor, null, groupDiff, ct);
+
+                return (Response.Ok(),
+                    WithCreatedMetaAttributes(rec, updated.Uuid, updated.CreatedAt, updated.UpdatedAt, updated.OwnerShortname),
+                    groupDiff);
+            }
             // Role/Permission live in their own tables, not `entries` — falling
             // through to EntryService.UpdateAsync would silently no-op.
             case ResourceType.Role:
@@ -944,6 +1051,18 @@ public static class RequestHandler
                 if (!await perms.CanDeleteAsync(actor, spaceLocator, PermissionService.FromSpace(existing), ct))
                     return (Response.Fail(InternalErrorCode.NOT_ALLOWED, "not allowed to delete space", ErrorTypes.Request), rec);
                 await spaces.DeleteAsync(rec.Shortname, ct);
+                return (Response.Ok(), rec);
+            }
+            case ResourceType.Group:
+            {
+                var existing = await access.GetGroupAsync(rec.Shortname, ct);
+                if (existing is null)
+                    return (Response.Fail(InternalErrorCode.OBJECT_NOT_FOUND,
+                        $"group '{rec.Shortname}' not found", ErrorTypes.Request), rec);
+                var groupLocator = new Locator(ResourceType.Group, existing.SpaceName, existing.Subpath, existing.Shortname);
+                if (!await perms.CanDeleteAsync(actor, groupLocator, PermissionService.FromGroup(existing), ct))
+                    return (Response.Fail(InternalErrorCode.NOT_ALLOWED, "not allowed to delete group", ErrorTypes.Request), rec);
+                await access.DeleteGroupAsync(rec.Shortname, ct);
                 return (Response.Ok(), rec);
             }
             // Role/Permission live in their own tables, not `entries` — falling
@@ -1390,30 +1509,31 @@ public static class RequestHandler
         var setsUserAuthority = resourceType == ResourceType.User && Touches("roles", "groups");
         var setsRolePerms     = resourceType == ResourceType.Role
                                 && (attrs.ContainsKey("permissions") || attrs.ContainsKey("grantable_by"));
+        var setsGroupGrantable = resourceType == ResourceType.Group && attrs.ContainsKey("grantable_by");
         var setsPermScope     = resourceType == ResourceType.Permission
                                 && Touches("subpaths", "resource_types", "actions", "conditions");
-        if (!setsUserAuthority && !setsRolePerms && !setsPermScope) return null;
+        if (!setsUserAuthority && !setsRolePerms && !setsGroupGrantable && !setsPermScope) return null;
 
         // A global admin (an __all_spaces__/__all_subpaths__ grant) may set anything.
         if (await perms.IsGlobalAdminAsync(actor, ct)) return null;
 
-        if (setsRolePerms || setsPermScope)
+        if (setsRolePerms || setsGroupGrantable || setsPermScope)
             return Response.Fail(InternalErrorCode.NOT_ALLOWED,
-                $"assigning {(setsRolePerms ? "role permissions" : "permission scope")} requires a global admin",
+                $"assigning {(setsPermScope ? "permission scope"
+                    : setsRolePerms && attrs.ContainsKey("permissions") ? "role permissions"
+                    : "grantable_by")} requires a global admin",
                 ErrorTypes.Request);
 
-        // Roles: the "assign a role you already hold" allowance is intentionally
-        // gone — a non-admin may assign a role ONLY when the role's grantable_by
-        // lists a role the actor holds (see PermissionService.NonGrantableRolesAsync).
-        // Groups: unchanged — a non-admin may still assign groups they belong to.
+        // Roles and groups: a non-admin may assign them ONLY when the role/group's
+        // grantable_by lists a role the actor holds.
         var self = await users.GetByShortnameAsync(actor, ct);
         var ownRoles  = self?.Roles  ?? new List<string>();
         var ownGroups = self?.Groups ?? new List<string>();
 
         var requestedRoles = ExtractStringList(attrs, "roles") ?? new();
         var disallowed = await perms.NonGrantableRolesAsync(requestedRoles, ownRoles, ct);
-        disallowed.AddRange((ExtractStringList(attrs, "groups") ?? new())
-            .Where(g => !ownGroups.Contains(g, StringComparer.Ordinal)));
+        var requestedGroups = ExtractStringList(attrs, "groups") ?? new();
+        disallowed.AddRange(await perms.NonGrantableGroupsAsync(requestedGroups, ownGroups, ct));
 
         if (disallowed.Count > 0)
             return Response.Fail(InternalErrorCode.NOT_ALLOWED,

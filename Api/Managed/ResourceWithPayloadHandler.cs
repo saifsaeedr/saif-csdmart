@@ -112,8 +112,10 @@ public static class ResourceWithPayloadHandler
         if (record is null)
             return Response.Fail(InternalErrorCode.INVALID_DATA, "request_record is empty", ErrorTypes.Request);
 
-        // Python: shortname "auto" → generate from UUID first 8 chars.
-        record = RequestHandler.ResolveAutoShortname(record);
+        // Python: shortname "auto" → generate from UUID first 8 chars. Resolution
+        // is deferred to each persist attempt below so an auto shortname can be
+        // re-minted on a collision (entry path) — see RetryOnShortnameCollisionAsync.
+        var wasAuto = RequestHandler.IsAutoShortname(record.Shortname);
 
         // Read full bytes (acceptable here — dmart also reads the whole file at once
         // because it computes a sha256 over the entire payload before storing).
@@ -138,17 +140,32 @@ public static class ResourceWithPayloadHandler
         var schemaShortname = ExtractSchemaShortname(record.Attributes);
 
         if (IsAttachmentResourceType(record.ResourceType))
-            return await StoreAttachmentAsync(record, spaceName, actor, fileBytes, ext,
-                resourceContentType, checksum, sha, schemaShortname, attachments, perms, log, ct);
+            // For a server-minted "auto" shortname, StoreAttachmentAsync inserts
+            // (failOnConflict) so a collision surfaces and we re-mint; an explicit
+            // shortname keeps the overwrite-in-place upsert (single attempt).
+            return await RequestHandler.RetryOnShortnameCollisionAsync(
+                wasAuto,
+                () => StoreAttachmentAsync(
+                    RequestHandler.ResolveAutoShortname(record), spaceName, actor, fileBytes, ext,
+                    resourceContentType, checksum, sha, schemaShortname, attachments, perms, log,
+                    failOnConflict: wasAuto, ct),
+                r => r.Error?.Code == InternalErrorCode.SHORTNAME_ALREADY_EXIST);
 
-        return await StoreEntryAsync(record, spaceName, actor, fileBytes, ext,
-            resourceContentType, checksum, sha, schemaShortname, entries, ct);
+        // Entry-with-payload goes through EntryService.CreateAsync, which rejects a
+        // duplicate shortname — re-mint and retry past the rare auto collision.
+        return await RequestHandler.RetryOnShortnameCollisionAsync(
+            wasAuto,
+            () => StoreEntryAsync(
+                RequestHandler.ResolveAutoShortname(record), spaceName, actor, fileBytes, ext,
+                resourceContentType, checksum, sha, schemaShortname, entries, ct),
+            r => r.Error?.Code == InternalErrorCode.SHORTNAME_ALREADY_EXIST);
     }
 
     public static async Task<Response> StoreAttachmentAsync(
         Record record, string spaceName, string actor, byte[] fileBytes, string ext,
         ContentType contentType, string checksum, string? clientChecksum, string? schemaShortname,
-        AttachmentRepository attachments, PermissionService perms, ILogger log, CancellationToken ct)
+        AttachmentRepository attachments, PermissionService perms, ILogger log,
+        bool failOnConflict, CancellationToken ct)
     {
         var gateLocator = new Locator(record.ResourceType, spaceName, "/" + record.Subpath.TrimStart('/'), record.Shortname);
         if (!await perms.CanCreateAsync(actor, gateLocator, record.Attributes, ct))
@@ -191,7 +208,20 @@ public static class ResourceWithPayloadHandler
 
         try
         {
-            await attachments.UpsertAsync(attachment, ct);
+            // failOnConflict (the server-minted "auto" shortname case): insert-only so
+            // a collision surfaces SHORTNAME_ALREADY_EXIST and the caller can re-mint,
+            // instead of silently overwriting an existing attachment. Explicit
+            // shortnames keep the upsert's overwrite-in-place idempotency.
+            if (failOnConflict)
+            {
+                if (!await attachments.TryInsertAsync(attachment, ct))
+                    return Response.Fail(InternalErrorCode.SHORTNAME_ALREADY_EXIST,
+                        "attachment exists", ErrorTypes.Db);
+            }
+            else
+            {
+                await attachments.UpsertAsync(attachment, ct);
+            }
         }
         catch (Exception ex)
         {

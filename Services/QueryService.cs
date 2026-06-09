@@ -78,17 +78,40 @@ public sealed class QueryService(
         if (string.IsNullOrEmpty(q.SpaceName))
             return Response.Fail(InternalErrorCode.INVALID_DATA, "space_name is required", ErrorTypes.Request);
 
-        var response = q.Type switch
+        // A cardinality-changing join (inner/right/outer) filters or appends
+        // records AFTER the base query runs. If we let the base query apply
+        // SQL LIMIT/OFFSET first, the join would then drop/append rows INSIDE
+        // an already-paged window — producing short pages, a `total` that
+        // reflects the pre-join base count, and rows silently skipped across
+        // pages. To get "inner-join then paginate" semantics we fetch the base
+        // set unpaginated (up to MaxQueryLimit), run the join over the whole
+        // set, then page the JOINED result below. This is a deliberate
+        // divergence from Python's adapter.py, which paginates BEFORE
+        // _apply_client_joins (same latent bug). A `left` join keeps base
+        // cardinality, so it stays on the cheap SQL-paged path untouched.
+        var userLimit = limit;
+        var userOffset = q.Offset;
+        var repaginateAfterJoin = q.Join is { Count: > 0 } jset
+            && jset.Any(j => (j.Type ?? JoinType.Left) is JoinType.Inner or JoinType.Right or JoinType.Outer);
+        var baseCap = maxLimit > 0 ? maxLimit : 10000;
+
+        // For the re-paginated path, fetch the full base set (offset 0, capped)
+        // and skip the base COUNT — `total` is recomputed post-join below.
+        var dispatchQuery = repaginateAfterJoin
+            ? q with { Limit = baseCap, Offset = 0, RetrieveTotal = false }
+            : q;
+
+        var response = dispatchQuery.Type switch
         {
-            QueryType.Spaces => await QuerySpacesAsync(q, actor, ct),
-            QueryType.History => await QueryHistoryAsync(q, actor, ct),
-            QueryType.Attachments => await QueryAttachmentsAsync(q, actor, ct),
-            QueryType.Tags => await QueryTagsAsync(q, actor, ct),
-            QueryType.Aggregation => await QueryAggregationAsync(q, actor, "entries", ct),
-            QueryType.AttachmentsAggregation => await QueryAggregationAsync(q, actor, "attachments", ct),
-            QueryType.Counters => await QueryCountersAsync(q, actor, ct),
-            QueryType.Events => await QueryEventsAsync(q, actor, ct),
-            _ => await DispatchTableQuery(q, actor, ct),
+            QueryType.Spaces => await QuerySpacesAsync(dispatchQuery, actor, ct),
+            QueryType.History => await QueryHistoryAsync(dispatchQuery, actor, ct),
+            QueryType.Attachments => await QueryAttachmentsAsync(dispatchQuery, actor, ct),
+            QueryType.Tags => await QueryTagsAsync(dispatchQuery, actor, ct),
+            QueryType.Aggregation => await QueryAggregationAsync(dispatchQuery, actor, "entries", ct),
+            QueryType.AttachmentsAggregation => await QueryAggregationAsync(dispatchQuery, actor, "attachments", ct),
+            QueryType.Counters => await QueryCountersAsync(dispatchQuery, actor, ct),
+            QueryType.Events => await QueryEventsAsync(dispatchQuery, actor, ct),
+            _ => await DispatchTableQuery(dispatchQuery, actor, ct),
         };
 
         // Python parity: client-side joins run against the materialized result
@@ -101,6 +124,12 @@ public sealed class QueryService(
             && response.Status == Status.Success
             && response.Records is { Count: > 0 } records)
         {
+            // No silent caps: when the base scan hits the cap the join+paginate
+            // window is incomplete for pages beyond it — surface it in the log.
+            if (repaginateAfterJoin && records.Count >= baseCap)
+                logger.LogWarning(
+                    "client_join base set hit the {Cap}-row cap; join pagination beyond it is incomplete",
+                    baseCap);
             try
             {
                 var (joined, jqFail) = await ApplyClientJoinsAsync(records, joins, actor, ct);
@@ -109,24 +138,42 @@ public sealed class QueryService(
                     // the client asked for a filter and we couldn't honor it, so
                     // returning un-filtered data would be misleading.
                     return jqFail;
-                // After Inner/Right/Outer joins the response cardinality
-                // differs from `returned` (which the per-type query set
-                // before the join ran). Resync it so consumers iterating
-                // Records match the attribute. `total` keeps its meaning
-                // as the base-table count.
-                Dictionary<string, object>? newAttrs = null;
-                if (response.Attributes is not null && response.Attributes.ContainsKey("returned"))
+
+                if (repaginateAfterJoin)
                 {
-                    newAttrs = new Dictionary<string, object>(response.Attributes, StringComparer.Ordinal)
+                    // Inner/right/outer: page the JOINED set and recompute
+                    // `total` as the post-join cardinality. The base COUNT was
+                    // suppressed above — it would have been the pre-join
+                    // base-table count, meaningless once the join drops/appends.
+                    var total = joined.Count;
+                    var page = joined.Skip(Math.Max(0, userOffset)).Take(Math.Max(1, userLimit)).ToList();
+                    var pagedAttrs = response.Attributes is not null
+                        ? new Dictionary<string, object>(response.Attributes, StringComparer.Ordinal)
+                        : new Dictionary<string, object>(StringComparer.Ordinal);
+                    pagedAttrs["total"] = total;
+                    pagedAttrs["returned"] = page.Count;
+                    response = response with { Records = page, Attributes = pagedAttrs };
+                }
+                else
+                {
+                    // Left join keeps base cardinality, so the SQL page is still
+                    // the correct window; just resync `returned` (the join only
+                    // attaches data, never changes the count) and keep `total`
+                    // as the base-table count.
+                    Dictionary<string, object>? newAttrs = null;
+                    if (response.Attributes is not null && response.Attributes.ContainsKey("returned"))
                     {
-                        ["returned"] = joined.Count,
+                        newAttrs = new Dictionary<string, object>(response.Attributes, StringComparer.Ordinal)
+                        {
+                            ["returned"] = joined.Count,
+                        };
+                    }
+                    response = response with
+                    {
+                        Records = joined,
+                        Attributes = newAttrs ?? response.Attributes,
                     };
                 }
-                response = response with
-                {
-                    Records = joined,
-                    Attributes = newAttrs ?? response.Attributes,
-                };
             }
             catch (Exception ex)
             {
@@ -135,6 +182,19 @@ public sealed class QueryService(
                 // whole query. jq failures are already handled above via the
                 // tuple return — this catch is for join-algorithm bugs only.
                 logger.LogWarning(ex, "client_join join failed");
+                if (repaginateAfterJoin)
+                {
+                    // The base set was fetched unpaginated for the join; on a
+                    // join failure, fall back to the user's page window over the
+                    // un-joined base records rather than dumping the whole capped
+                    // scan (up to MaxQueryLimit rows) at the caller.
+                    var page = records.Skip(Math.Max(0, userOffset)).Take(Math.Max(1, userLimit)).ToList();
+                    var attrs = response.Attributes is not null
+                        ? new Dictionary<string, object>(response.Attributes, StringComparer.Ordinal)
+                        : new Dictionary<string, object>(StringComparer.Ordinal);
+                    attrs["returned"] = page.Count;
+                    response = response with { Records = page, Attributes = attrs };
+                }
             }
         }
 
@@ -157,6 +217,8 @@ public sealed class QueryService(
                 return await QueryUsersAsync(q, actor, ct);
             if (sub == "roles" || sub.StartsWith("roles/", StringComparison.Ordinal))
                 return await QueryRolesAsync(q, actor, ct);
+            if (sub == "groups" || sub.StartsWith("groups/", StringComparison.Ordinal))
+                return await QueryGroupsAsync(q, actor, ct);
             if (sub == "permissions" || sub.StartsWith("permissions/", StringComparison.Ordinal))
                 return await QueryPermissionsAsync(q, actor, ct);
         }
@@ -239,6 +301,32 @@ public sealed class QueryService(
         await Task.WhenAll(pageTask, totalTask);
 
         var records = (await pageTask).Select(RoleMapper.ToRecord).ToList();
+        return Response.Ok(records, new() { ["total"] = await totalTask, ["returned"] = records.Count });
+    }
+
+    // ====================================================================
+    // GROUPS (management/groups)
+    // ====================================================================
+
+    private async Task<Response> QueryGroupsAsync(Query q, string? actor, CancellationToken ct)
+    {
+        if (!await CanQueryAsync(actor, ResourceType.Group, q.SpaceName, q.Subpath ?? "/", ct))
+            return EmptyQueryResponse();
+
+        var policies = await GetActorQueryPoliciesAsync(q, actor, ct);
+        if (actor is not null && policies!.Count == 0) return EmptyQueryResponse();
+
+        var pageTask = actor is not null
+            ? access.QueryGroupsAsync(q, actor, policies, ct)
+            : access.QueryGroupsAsync(q, ct);
+        var totalTask = q.RetrieveTotal == false
+            ? Task.FromResult(-1)
+            : (actor is not null
+                ? access.CountGroupsQueryAsync(q, actor, policies, ct)
+                : access.CountGroupsQueryAsync(q, ct));
+        await Task.WhenAll(pageTask, totalTask);
+
+        var records = (await pageTask).Select(GroupMapper.ToRecord).ToList();
         return Response.Ok(records, new() { ["total"] = await totalTask, ["returned"] = records.Count });
     }
 
@@ -1579,6 +1667,39 @@ internal static class UserMapper
             Subpath = u.Subpath,
             Shortname = u.Shortname,
             Uuid = u.Uuid,
+            Attributes = AttrHelper.StripNulls(attrs),
+        };
+    }
+}
+
+internal static class GroupMapper
+{
+    public static Record ToRecord(Group g)
+    {
+        var attrs = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["is_active"] = g.IsActive,
+            ["slug"] = g.Slug,
+            ["displayname"] = g.Displayname,
+            ["description"] = g.Description,
+            ["tags"] = g.Tags,
+            ["created_at"] = g.CreatedAt,
+            ["updated_at"] = g.UpdatedAt,
+            ["owner_shortname"] = g.OwnerShortname,
+            ["owner_group_shortname"] = g.OwnerGroupShortname,
+            ["acl"] = g.Acl,
+            ["payload"] = g.Payload,
+            ["relationships"] = g.Relationships,
+            ["last_checksum_history"] = g.LastChecksumHistory,
+            ["grantable_by"] = g.GrantableBy,
+            ["space_name"] = g.SpaceName,
+        };
+        return new Record
+        {
+            ResourceType = ResourceType.Group,
+            Subpath = g.Subpath,
+            Shortname = g.Shortname,
+            Uuid = g.Uuid,
             Attributes = AttrHelper.StripNulls(attrs),
         };
     }

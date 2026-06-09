@@ -188,8 +188,9 @@ public sealed class DmartFactory : WebApplicationFactory<Program>, IAsyncLifetim
 
     public Task<TestUser> CreateLoggedInUserAsync(
         UserType type = UserType.Web,
-        List<string>? roles = null) =>
-        CreateLoggedInUserAsync(host: this, type, roles);
+        List<string>? roles = null,
+        List<string>? groups = null) =>
+        CreateLoggedInUserAsync(host: this, type, roles, groups);
 
     // For tests that drive their own login flow (e.g. /oauth/authorize) and
     // only need the user row to exist, not a pre-issued JWT.
@@ -236,7 +237,8 @@ public sealed class DmartFactory : WebApplicationFactory<Program>, IAsyncLifetim
     public async Task<TestUser> CreateLoggedInUserAsync(
         WebApplicationFactory<Program> host,
         UserType type = UserType.Web,
-        List<string>? roles = null)
+        List<string>? roles = null,
+        List<string>? groups = null)
     {
         var users = host.Services.GetRequiredService<UserRepository>();
         var hasher = host.Services.GetRequiredService<PasswordHasher>();
@@ -261,7 +263,7 @@ public sealed class DmartFactory : WebApplicationFactory<Program>, IAsyncLifetim
             Type = type,
             Language = Language.En,
             Roles = roles ?? new() { "super_admin" },
-            Groups = new(),
+            Groups = groups ?? new(),
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow,
         });
