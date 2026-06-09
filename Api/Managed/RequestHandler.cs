@@ -453,8 +453,6 @@ public static class RequestHandler
         var groupsList = ExtractStringList(attrs, "groups");
         var languageStr = attrs.TryGetValue("language", out var lObj) ? ConvertToString(lObj) : null;
         var typeStr = attrs.TryGetValue("type", out var tObj) ? ConvertToString(tObj) : null;
-        var passwordRaw = attrs.TryGetValue("password", out var pObj) ? ConvertToString(pObj) : null;
-
         var user = new Dmart.Models.Core.User
         {
             Uuid = string.IsNullOrEmpty(rec.Uuid) ? Guid.NewGuid().ToString() : rec.Uuid,
@@ -473,7 +471,7 @@ public static class RequestHandler
             Payload = ParsePayloadFromAttrs(attrs),
             Email = attrs.TryGetValue("email", out var e) ? ConvertToString(e) : null,
             Msisdn = attrs.TryGetValue("msisdn", out var m) ? ConvertToString(m) : null,
-            Password = string.IsNullOrEmpty(passwordRaw) ? null : hasher.Hash(passwordRaw),
+            Password = null,
             Roles = rolesList ?? new(),
             Groups = groupsList ?? new(),
             Type = ParseUserType(typeStr),
@@ -734,7 +732,6 @@ public static class RequestHandler
                     ResourceType.User, attrs, ActionType.Update, ct);
                 if (!userUniq.IsOk)
                     return (Response.Fail(userUniq.ErrorCode!, userUniq.ErrorMessage!, userUniq.ErrorType ?? ErrorTypes.Request), rec, null);
-                var passwordRaw = attrs.TryGetValue("password", out var p) ? ConvertToString(p) : null;
                 var newIsActive = attrs.TryGetValue("is_active", out var ia) ? !IsExplicitlyFalse(ia) : existing.IsActive;
                 var reactivating = !existing.IsActive && newIsActive;
                 // Python parity: payload, type, language, and force_password_change
@@ -747,7 +744,7 @@ public static class RequestHandler
                 {
                     Email = attrs.TryGetValue("email", out var e) ? ConvertToString(e) : existing.Email,
                     Msisdn = attrs.TryGetValue("msisdn", out var m) ? ConvertToString(m) : existing.Msisdn,
-                    Password = string.IsNullOrEmpty(passwordRaw) ? existing.Password : hasher.Hash(passwordRaw),
+                    Password = existing.Password,
                     Roles = ExtractStringList(attrs, "roles") ?? existing.Roles,
                     Groups = ExtractStringList(attrs, "groups") ?? existing.Groups,
                     Tags = ExtractStringList(attrs, "tags") ?? existing.Tags,
