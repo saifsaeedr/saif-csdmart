@@ -1863,23 +1863,40 @@ internal static class HistoryMapper
                         foreach (var kv in state.Value.EnumerateObject())
                         {
                             if (kv.Name == "headers") continue;
-                            scrubbed[kv.Name] = System.Text.Json.Nodes.JsonNode.Parse(kv.Value.GetRawText());
+                            scrubbed[kv.Name] = ElementToNode(kv.Value);
                         }
                         changeNode[state.Name] = scrubbed;
                     }
                     else
                     {
-                        changeNode[state.Name] = System.Text.Json.Nodes.JsonNode.Parse(state.Value.GetRawText());
+                        changeNode[state.Name] = ElementToNode(state.Value);
                     }
                 }
                 outNode[prop.Name] = changeNode;
             }
             else
             {
-                outNode[prop.Name] = System.Text.Json.Nodes.JsonNode.Parse(prop.Value.GetRawText());
+                outNode[prop.Name] = ElementToNode(prop.Value);
             }
         }
-        using var doc2 = JsonDocument.Parse(outNode.ToJsonString());
+        // Serialize the node tree straight to UTF-8 bytes and reparse — avoids
+        // the UTF-16 string detour of ToJsonString() → Parse().
+        var buffer = new System.Buffers.ArrayBufferWriter<byte>();
+        using (var writer = new Utf8JsonWriter(buffer))
+            outNode.WriteTo(writer);
+        using var doc2 = JsonDocument.Parse(buffer.WrittenMemory);
         return doc2.RootElement.Clone();
     }
+
+    // JsonElement → JsonNode without round-tripping through a string. The BCL
+    // Create() factories clone the element's tokens directly and are AOT-safe
+    // (no serializer metadata). JSON null maps to a null node, matching the
+    // prior JsonNode.Parse("null") behavior.
+    private static System.Text.Json.Nodes.JsonNode? ElementToNode(JsonElement el) => el.ValueKind switch
+    {
+        JsonValueKind.Object => System.Text.Json.Nodes.JsonObject.Create(el),
+        JsonValueKind.Array => System.Text.Json.Nodes.JsonArray.Create(el),
+        JsonValueKind.Null => null,
+        _ => System.Text.Json.Nodes.JsonValue.Create(el),
+    };
 }

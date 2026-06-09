@@ -36,6 +36,14 @@ public static class ChannelAuthMiddleware
                 return;
             }
 
+            // Orchestrator health probes carry no x-channel-key; never let a
+            // channel pattern accidentally take a node out of rotation.
+            if (ctx.Request.Path.StartsWithSegments("/health"))
+            {
+                await next();
+                return;
+            }
+
             var registry = ctx.RequestServices.GetRequiredService<ChannelsRegistry>();
             var log = ctx.RequestServices.GetRequiredService<ILogger<ChannelsRegistry>>();
             var path = ctx.Request.Path.Value ?? "/";

@@ -204,6 +204,8 @@
     <DirectPInvoke Include="libc" />
     <PackageReference Include="Npgsql" Version="10.0.2" />
     <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" Version="10.0.5" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.15.3" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.15.3" />
     <!-- CLI subcommand (merged from dmart.Cli) -->
     <PackageReference Include="ReadLine" Version="2.0.1" />
     <PackageReference Include="Spectre.Console" Version="0.50.0" />

@@ -79,6 +79,13 @@ public sealed class DmartSettings
     public int MaxSessionsPerUser { get; set; } = 5;
     public int MaxFailedLoginAttempts { get; set; } = 5;
 
+    // Wrong guesses allowed against a single OTP code before it is invalidated.
+    // Caps brute force on the 6-digit code independently of the per-IP rate
+    // limit (a distributed attacker spreads guesses across IPs). C#-only
+    // hardening; the wire response is unchanged (exhausted == expired). 0
+    // disables the cap.
+    public int MaxOtpVerifyAttempts { get; set; } = 5;
+
     // Seconds an account stays auto-locked after MaxFailedLoginAttempts before a
     // login attempt is allowed to clear the lock and try again. The window is
     // measured from the LAST failed/blocked attempt, so each attempt while locked
@@ -105,6 +112,12 @@ public sealed class DmartSettings
     // Bearer-header (Authorization) callers are never affected. Set false only
     // if a first-party browser client genuinely can't send those signals.
     public bool CsrfProtectCookieAuth { get; set; } = true;
+
+    // OTLP collector endpoint for metrics/traces export (e.g.
+    // "http://localhost:4317"). Empty (default) = observability fully off, zero
+    // overhead — no meters wired, no exporter started. When set, dmart exports
+    // the built-in ASP.NET Core / Kestrel / Npgsql meters via OpenTelemetry.
+    public string OtlpEndpoint { get; set; } = "";
 
     // ---- reverse proxy / real client IP ----
     // When dmart runs behind nginx (or any L7 proxy / load balancer),

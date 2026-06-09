@@ -776,7 +776,7 @@ public sealed class ImportExportService(
         if (resume)
         {
             var path = checkpointPath ?? ImportCheckpointStore.DefaultPathFor(folderPath);
-            checkpoint = ImportCheckpointStore.LoadOrCreate(path, folderPath);
+            checkpoint = ImportCheckpointStore.LoadOrCreate(path, folderPath, log);
         }
 
         // Validation context: when enabled (default), per-entry validators

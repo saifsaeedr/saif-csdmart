@@ -58,6 +58,15 @@ public sealed class PluginManager(
     // Flat list of active shortnames, exposed to /info/manifest.
     private readonly List<string> _activePlugins = new();
 
+    // Tracks fire-and-forget concurrent after-hooks so graceful shutdown can
+    // wait for them. Drained by PluginDrainService on host stop.
+    private readonly InFlightTracker _inflight = new();
+
+    // Wait (bounded) for in-flight concurrent hooks to finish. Called from the
+    // PluginDrainService hosted service during graceful shutdown.
+    public Task<bool> DrainAsync(TimeSpan timeout, CancellationToken ct = default)
+        => _inflight.DrainAsync(timeout, ct);
+
     // Parallel registry carrying the resolved version + type per active plugin.
     // Populated alongside _activePlugins in Register(); exposed to /info/plugins.
     private readonly List<PluginInfo> _activePluginInfos = new();
@@ -286,16 +295,19 @@ public sealed class PluginManager(
             if (hook.Wrapper.Concurrent)
             {
                 // Fire-and-forget so slow hooks don't delay the response. We still
-                // log any failures from the background task — no swallowed errors.
+                // log any failures from the background task — no swallowed errors —
+                // and track it so graceful shutdown can drain it (DrainAsync)
+                // instead of cutting it off mid-write. Hooks observe the tracker's
+                // ShutdownToken rather than CancellationToken.None.
                 var captured = hook;
-                _ = Task.Run(async () =>
+                _inflight.Track(Task.Run(async () =>
                 {
-                    try { await captured.Plugin.HookAsync(e, CancellationToken.None); }
+                    try { await captured.Plugin.HookAsync(e, _inflight.ShutdownToken); }
                     catch (Exception ex)
                     {
                         log.LogError(ex, "PLUGIN_ERROR: {Shortname} after-hook failed (async)", captured.Wrapper.Shortname);
                     }
-                }, CancellationToken.None);
+                }, CancellationToken.None));
             }
             else
             {

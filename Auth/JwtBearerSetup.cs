@@ -92,6 +92,23 @@ public static class JwtBearerSetup
                             return;
                         }
 
+                        // A refresh token must never act as an access token.
+                        // Session binding incidentally blocks this for web
+                        // users (the sessions row stores the access token),
+                        // but bot users skip the session check below — so
+                        // without this guard a leaked bot refresh token works
+                        // on every API endpoint. Tokens WITHOUT the claim
+                        // pass: Python dmart never writes token_use and mixed
+                        // deployments share JWT_SECRET (tolerance is
+                        // permanent). Mirrors the access-as-refresh guard in
+                        // OAuthEndpoints' refresh grant.
+                        if (string.Equals(ReadTokenUse(jwt, raw), "refresh", StringComparison.Ordinal))
+                        {
+                            ctx.Fail(new SecurityTokenException(
+                                "refresh token presented as access token"));
+                            return;
+                        }
+
                         var users = ctx.HttpContext.RequestServices
                             .GetRequiredService<DataAdapters.Sql.UserRepository>();
                         var actor = ctx.Principal?.Identity?.Name;
@@ -175,6 +192,27 @@ public static class JwtBearerSetup
 
         services.AddAuthorization();
         return services;
+    }
+
+    // Read the `token_use` claim. Prefer the parsed JsonWebToken's payload;
+    // fall back to decoding the raw token (covers the JwtSecurityToken path).
+    // The signature is already verified by the time this runs. Returns null
+    // when the claim is absent (Python-issued / pre-upgrade tokens).
+    private static string? ReadTokenUse(
+        Microsoft.IdentityModel.JsonWebTokens.JsonWebToken? jwt, string raw)
+    {
+        if (jwt is not null && jwt.TryGetPayloadValue<string>("token_use", out var tu))
+            return tu;
+        var parts = raw.Split('.');
+        if (parts.Length != 3) return null;
+        try
+        {
+            var padded = parts[1].Replace('-', '+').Replace('_', '/');
+            padded += (padded.Length % 4) switch { 2 => "==", 3 => "=", _ => "" };
+            using var doc = JsonDocument.Parse(Convert.FromBase64String(padded));
+            return doc.RootElement.TryGetProperty("token_use", out var t) ? t.GetString() : null;
+        }
+        catch { return null; }
     }
 
     // CSRF defense for cookie-borne auth. The auth_token cookie is promoted to a

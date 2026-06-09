@@ -1631,6 +1631,14 @@ builder.Services.Configure<Microsoft.AspNetCore.Builder.ForwardedHeadersOptions>
         opts.KnownIPNetworks.Add(network);
 });
 
+// Opt-in observability. No-op unless Dmart:OtlpEndpoint is set, so existing
+// deployments and the test suite incur zero overhead by default.
+{
+    var telemetrySettings = new DmartSettings();
+    builder.Configuration.GetSection("Dmart").Bind(telemetrySettings);
+    builder.AddDmartTelemetry(telemetrySettings);
+}
+
 // Schema bootstrapper runs once on startup. AdminBootstrap MUST be registered AFTER
 // SchemaInitializer — IHostedServices run StartAsync sequentially in registration order.
 builder.Services.AddHostedService<SchemaInitializer>();
@@ -1684,6 +1692,8 @@ builder.Services.AddSingleton<WorkflowService>();
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddSingleton<SpaceEventLogger>();
 builder.Services.AddSingleton<PluginManager>();
+// Drains fire-and-forget concurrent plugin after-hooks on graceful shutdown.
+builder.Services.AddHostedService<Dmart.Plugins.PluginDrainService>();
 builder.Services.AddSingleton<LanguageLoader>();
 builder.Services.AddSingleton<LockService>();
 builder.Services.AddSingleton<ShortLinkService>();
@@ -2108,6 +2118,7 @@ app.MapGet("/docs", () => Results.Content("""
 </html>
 """, "text/html")).ExcludeFromDescription();
 app.MapGet("/", () => Results.Content("{\"status\":\"success\",\"message\":\"DMART-CS API\"}", "application/json")).WithTags("Root");
+app.MapHealth();
 
 app.MapGroup("/managed").WithTags("Managed").RequireAuthorization().AddEndpointFilter<FailedResponseFilter>().MapManaged();
 app.MapGroup("/public").WithTags("Public").AddEndpointFilter<FailedResponseFilter>().MapPublic();
