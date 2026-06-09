@@ -737,25 +737,10 @@ public sealed class EntryService(
             return existing.Relationships;
         }
 
-        // Payload body merge: mirrors Python's deep_update(old_body, patch_body)
-        // followed by remove_none_dict(). Sending a property as null removes it.
-        var payload = existing.Payload;
-        if (patch.TryGetValue("payload", out var payloadRaw) && payloadRaw is not null)
-        {
-            JsonElement? patchBody = null;
-            if (payloadRaw is JsonElement pe && pe.ValueKind == JsonValueKind.Object
-                && pe.TryGetProperty("body", out var bodyEl))
-                patchBody = bodyEl;
-            else if (payloadRaw is Dictionary<string, object> pd && pd.TryGetValue("body", out var bodyObj)
-                     && bodyObj is JsonElement bje)
-                patchBody = bje;
-
-            if (patchBody is not null && payload is not null)
-            {
-                var merged = JsonMerge.DeepMergeAndStripNulls(payload.Body, patchBody.Value);
-                payload = payload with { Body = merged };
-            }
-        }
+        // Payload body merge: deep_update(old_body, patch_body) + remove_none_dict()
+        // (a property sent as null removes it). Shared with the managed-user and
+        // self-service /user/profile update paths via PayloadMerge.
+        var payload = PayloadMerge.MergeBody(existing.Payload, patch.GetValueOrDefault("payload"));
 
         return existing with
         {

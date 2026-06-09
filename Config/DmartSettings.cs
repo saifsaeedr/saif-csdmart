@@ -78,6 +78,16 @@ public sealed class DmartSettings
     public string ManagementSpace { get; set; } = "management";
     public int MaxSessionsPerUser { get; set; } = 5;
     public int MaxFailedLoginAttempts { get; set; } = 5;
+
+    // Seconds an account stays auto-locked after MaxFailedLoginAttempts before a
+    // login attempt is allowed to clear the lock and try again. The window is
+    // measured from the LAST failed/blocked attempt, so each attempt while locked
+    // refreshes it — a persistent attacker never auto-unlocks; only a genuinely
+    // idle account recovers. 0 disables auto-unlock (the lock is permanent until
+    // an admin resets it — the pre-cooldown / Python-parity behaviour). C#-only
+    // enhancement; not present in the Python reference.
+    public int LockoutCooldownSeconds { get; set; } = 900; // 15 minutes
+
     public int MaxQueryLimit { get; set; } = 10000;
 
     // Per-IP cap on auth-endpoint calls (login/otp-request) in a 60-second

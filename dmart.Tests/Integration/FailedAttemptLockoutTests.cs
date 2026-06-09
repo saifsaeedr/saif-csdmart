@@ -281,4 +281,131 @@ public sealed class FailedAttemptLockoutTests : IClassFixture<DmartFactory>
         cmd.Parameters.Add(new() { Value = shortname });
         await cmd.ExecuteNonQueryAsync();
     }
+
+    // ---- cool-down (auto-unlock) ----
+
+    private int CooldownSeconds() =>
+        _factory.Services.GetRequiredService<IOptions<Dmart.Config.DmartSettings>>()
+            .Value.LockoutCooldownSeconds;
+
+    // Seed a full lock state directly. last_failed_login uses TimeUtils.Now()'s
+    // clock (DateTime.Now, naive) — the same clock the cool-down gate compares against.
+    private async Task SetLockedStateAsync(string shortname, int attemptCount, bool isActive, DateTime? lastFailed)
+    {
+        var db = _factory.Services.GetRequiredService<Db>();
+        await using var conn = await db.OpenAsync();
+        await using var cmd = new Npgsql.NpgsqlCommand(
+            "UPDATE users SET attempt_count = $1, is_active = $2, last_failed_login = $3 WHERE shortname = $4", conn);
+        cmd.Parameters.Add(new() { Value = attemptCount });
+        cmd.Parameters.Add(new() { Value = isActive });
+        cmd.Parameters.Add(new() { Value = (object?)lastFailed ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp });
+        cmd.Parameters.Add(new() { Value = shortname });
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    [FactIfPg]
+    public async Task Login_AutoUnlocks_After_The_Cooldown_Elapses()
+    {
+        var (shortname, password) = await CreateUserAsync(password: "Test1234aaa");
+        try
+        {
+            // Locked, last failed attempt well outside the cool-down window.
+            await SetLockedStateAsync(shortname, MaxAttempts(), isActive: false,
+                lastFailed: Dmart.Utils.TimeUtils.Now().AddSeconds(-(CooldownSeconds() + 60)));
+
+            var client = _factory.CreateClient();
+            var resp = await client.PostAsJsonAsync("/user/login",
+                new UserLoginRequest(shortname, null, null, password, null),
+                DmartJsonContext.Default.UserLoginRequest);
+
+            resp.StatusCode.ShouldBe(HttpStatusCode.OK); // auto-unlocked → normal login
+            (await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response))!
+                .Status.ShouldBe(Status.Success);
+
+            var refreshed = await GetUserAsync(shortname);
+            refreshed!.IsActive.ShouldBeTrue();
+            refreshed.AttemptCount.ShouldBe(0); // counter reset on the successful login
+        }
+        finally { await DeleteUserAsync(shortname); }
+    }
+
+    [FactIfPg]
+    public async Task Login_Stays_Locked_Within_The_Cooldown_Window()
+    {
+        var (shortname, password) = await CreateUserAsync(password: "Test1234aaa");
+        try
+        {
+            // Last failed attempt 1 minute ago — well inside the window.
+            await SetLockedStateAsync(shortname, MaxAttempts(), isActive: false,
+                lastFailed: Dmart.Utils.TimeUtils.Now().AddSeconds(-60));
+
+            var (_, code, msg) = await ExpectLoginFailureAsync(
+                new UserLoginRequest(shortname, null, null, password, null));
+            code.ShouldBe(InternalErrorCode.USER_ACCOUNT_LOCKED);
+            msg.ShouldBe(LockoutMessage);
+            (await GetUserAsync(shortname))!.IsActive.ShouldBeFalse();
+        }
+        finally { await DeleteUserAsync(shortname); }
+    }
+
+    [FactIfPg]
+    public async Task Blocked_Attempt_Refreshes_The_Cooldown_Clock()
+    {
+        var (shortname, password) = await CreateUserAsync(password: "Test1234aaa");
+        try
+        {
+            var stale = Dmart.Utils.TimeUtils.Now().AddSeconds(-300); // 5 min ago, still inside window
+            await SetLockedStateAsync(shortname, MaxAttempts(), isActive: false, lastFailed: stale);
+
+            // A blocked attempt must push last_failed_login forward to ~now, so a
+            // persistent attacker never lets the window elapse.
+            await ExpectLoginFailureAsync(new UserLoginRequest(shortname, null, null, password, null));
+
+            var after = (await GetUserAsync(shortname))!.LastFailedLogin;
+            after.ShouldNotBeNull();
+            after!.Value.ShouldBeGreaterThan(stale.AddSeconds(60));
+        }
+        finally { await DeleteUserAsync(shortname); }
+    }
+
+    [FactIfPg]
+    public async Task Manual_Deactivation_Is_Not_AutoUnlocked()
+    {
+        var (shortname, password) = await CreateUserAsync(password: "Test1234aaa");
+        try
+        {
+            // Admin-style deactivation: inactive, counter BELOW threshold, ancient
+            // (irrelevant) last_failed_login. The cool-down must not touch it.
+            await SetLockedStateAsync(shortname, 0, isActive: false,
+                lastFailed: Dmart.Utils.TimeUtils.Now().AddSeconds(-100000));
+
+            var (_, code, _) = await ExpectLoginFailureAsync(
+                new UserLoginRequest(shortname, null, null, password, null));
+            code.ShouldBe(InternalErrorCode.USER_ACCOUNT_LOCKED);
+            (await GetUserAsync(shortname))!.IsActive.ShouldBeFalse("manual deactivation stays locked");
+        }
+        finally { await DeleteUserAsync(shortname); }
+    }
+
+    [FactIfPg]
+    public async Task Cooldown_Disabled_Keeps_The_Lock_Permanent()
+    {
+        var factory = _factory.WithWebHostBuilder(b => b.ConfigureServices(svcs =>
+            svcs.Configure<Dmart.Config.DmartSettings>(s => s.LockoutCooldownSeconds = 0)));
+        var (shortname, password) = await CreateUserAsync(password: "Test1234aaa");
+        try
+        {
+            // Ancient last failed attempt, but cool-down disabled → never auto-unlocks.
+            await SetLockedStateAsync(shortname, MaxAttempts(), isActive: false,
+                lastFailed: Dmart.Utils.TimeUtils.Now().AddSeconds(-100000));
+
+            var resp = await factory.CreateClient().PostAsJsonAsync("/user/login",
+                new UserLoginRequest(shortname, null, null, password, null),
+                DmartJsonContext.Default.UserLoginRequest);
+            resp.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+            (await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response))!
+                .Error!.Code.ShouldBe(InternalErrorCode.USER_ACCOUNT_LOCKED);
+        }
+        finally { await DeleteUserAsync(shortname); }
+    }
 }
