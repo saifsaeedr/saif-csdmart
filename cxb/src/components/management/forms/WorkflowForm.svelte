@@ -125,7 +125,7 @@
                             Initial State {index + 1}
                         </h4>
                         <Button
-                            class="cursor-pointer text-red-500 hover:text-red-500"
+                            class="cursor-pointer text-red-500"
                             outline
                             size="xs"
                             onclick={() => removeInitialState(index)}
@@ -155,7 +155,7 @@
 
             <Button
                 onclick={addInitialState}
-                class="cursor-pointer mt-2 text-primary hover:text-primary"
+                class="cursor-pointer mt-2 text-primary"
                 outline
             >
                 <PlusOutline class="mr-1" />Add Initial State
