@@ -419,6 +419,16 @@ public sealed class DmartSettings
     // Empty means allow all. Python: allowed_submit_models.
     public string AllowedSubmitModels { get; set; } = "";
 
+    // Enforce a folder's content-policy arrays (content_resource_types,
+    // content_schema_shortnames, workflow_shortnames in the folder's
+    // payload.body) on create/update/move inside that folder. Default false:
+    // FolderContentValidator runs in DRY-RUN mode — violations are warn-logged
+    // ("folder-content policy violation (NOT enforced)") but allowed, because
+    // existing deployments carry folders whose policy arrays predate
+    // enforcement (they were UI rendering hints). Flip to true once the
+    // warnings have been reviewed/cleaned up.
+    public bool EnforceFolderContentPolicy { get; set; }
+
     // CSV list of payload field names users can't update via POST /user/profile.
     // Python: user_profile_payload_protected_fields.
     public string UserProfilePayloadProtectedFields { get; set; } = "";

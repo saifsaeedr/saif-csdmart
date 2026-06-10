@@ -1,15 +1,17 @@
 using System.Text.Json;
+using Dmart.Config;
 using Dmart.DataAdapters.Sql;
 using Dmart.Models.Api;
 using Dmart.Models.Core;
 using Dmart.Models.Enums;
 using Dmart.Models.Json;
+using Microsoft.Extensions.Options;
 
 namespace Dmart.Services;
 
 // Enforces a folder's content-policy fields on the resources created/updated
-// directly inside it. Sibling of UniquenessValidator: same parent-folder lookup,
-// reads three arrays from the folder's payload.body —
+// (or moved) directly inside it. Sibling of UniquenessValidator: same
+// parent-folder lookup, reads three arrays from the folder's payload.body —
 //   - content_resource_types     : the resource_type must be one of these
 //   - content_schema_shortnames  : an entry that DECLARES a payload.schema_shortname
 //                                  must use one of these
@@ -20,9 +22,18 @@ namespace Dmart.Services;
 //   * empty or absent list  -> no restriction on that dimension
 //   * absent incoming value -> that dimension's gate is skipped (so schema-less
 //     entries and identity resources are never rejected for "having no schema",
-//     and a non-ticket / workflow-less ticket ignores workflow_shortnames)
+//     and a non-ticket / workflow-less ticket ignores workflow_shortnames).
+//     NOTE this makes the schema dimension advisory on its own — an entry can
+//     omit schema_shortname entirely and pass; combine with
+//     content_resource_types when the folder must be airtight.
 //   * no parent folder / unreadable folder -> allow (fail open), matching
 //     UniquenessValidator
+//
+// ENFORCEMENT IS OPT-IN: these arrays predate server-side enforcement (they
+// were CXB rendering hints), so deployed folders may already carry them. With
+// EnforceFolderContentPolicy=false (the default) the validator runs in
+// dry-run mode — violations are warn-logged but allowed — so operators can
+// review/bless existing data before setting ENFORCE_FOLDER_CONTENT_POLICY=true.
 //
 // Attachments (Comment/Media/...) attach UNDER a content entry, so their parent
 // resolves to a non-folder and this validator no-ops — identical to how
@@ -30,14 +41,18 @@ namespace Dmart.Services;
 // attached directly to a Folder, which is the intended edge.
 public sealed class FolderContentValidator(
     EntryRepository entries,
-    ILogger<FolderContentValidator> log)
+    ILogger<FolderContentValidator> log,
+    IOptions<DmartSettings> settings)
 {
-    // Entry path (EntryService create/update). On update, pass the post-merge entry.
+    // Entry path (EntryService create/update/move). On update, pass the
+    // post-merge entry; on move, the entry rebased onto the DESTINATION locator.
     public async Task<Result<bool>> ValidateAsync(Entry entry, CancellationToken ct = default)
     {
         var body = await LoadFolderBodyAsync(entry.SpaceName, entry.Subpath, ct);
         if (body is null) return Result<bool>.Ok(true);
-        return Check(entry.ResourceType, entry.Payload?.SchemaShortname, entry.WorkflowShortname, body.Value);
+        return Gate(
+            Check(entry.ResourceType, entry.Payload?.SchemaShortname, entry.WorkflowShortname, body.Value),
+            entry.SpaceName, entry.Subpath);
     }
 
     // Raw-attrs path (RequestHandler non-entry create handlers). `shortname` is
@@ -49,7 +64,20 @@ public sealed class FolderContentValidator(
         var body = await LoadFolderBodyAsync(spaceName, subpath, ct);
         if (body is null) return Result<bool>.Ok(true);
         var (schema, workflow) = ExtractSchemaAndWorkflow(rawAttrs, spaceName, subpath);
-        return Check(resourceType, schema, workflow, body.Value);
+        return Gate(Check(resourceType, schema, workflow, body.Value), spaceName, subpath);
+    }
+
+    // Dry-run vs enforce: a violation only rejects when the operator opted in;
+    // otherwise it is warn-logged (this is the signal to watch before flipping
+    // ENFORCE_FOLDER_CONTENT_POLICY=true) and the write proceeds.
+    private Result<bool> Gate(Result<bool> check, string spaceName, string subpath)
+    {
+        if (check.IsOk || settings.Value.EnforceFolderContentPolicy) return check;
+        log.LogWarning(
+            "folder-content policy violation (NOT enforced) at {Space}{Subpath}: {Reason} — "
+            + "set ENFORCE_FOLDER_CONTENT_POLICY=true to reject such writes",
+            spaceName, subpath, check.ErrorMessage);
+        return Result<bool>.Ok(true);
     }
 
     private static Result<bool> Check(
@@ -94,7 +122,9 @@ public sealed class FolderContentValidator(
         }
         catch (Exception ex)
         {
-            log.LogDebug(ex, "folder-content: parent folder load failed for {Space}/{Subpath}", spaceName, subpath);
+            // Warning, not debug: this is a policy gate failing OPEN — operators
+            // should be able to see when enforcement was waived by a DB hiccup.
+            log.LogWarning(ex, "folder-content: parent folder load failed for {Space}/{Subpath} — policy not applied", spaceName, subpath);
             return null;
         }
         // Body is a standalone JsonElement (heap-owned document produced by
