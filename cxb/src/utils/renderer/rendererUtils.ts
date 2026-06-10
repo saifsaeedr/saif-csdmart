@@ -114,7 +114,9 @@ export function unionKeys(schema: any, value: any): string[] {
  */
 export function buildDefaultForSchema(schema: any): any {
     if (!schema || !schema.type) {
-        return "";
+        // Unknown shape — claim nothing about it. The renderer falls back to
+        // a text input for null values anyway (inferType(null) === "string").
+        return null;
     }
     switch (schema.type) {
         case "object":

@@ -52,19 +52,21 @@
     let showHeader = $derived(!hideLabel);
     let title = $derived(schema?.title || name);
 
-    // Coerce null/undefined containers so nested fields stay editable.
+    // Null containers are NEVER silently coerced — an entry whose declared
+    // object/array prop is explicitly null must still save null unless the
+    // user acts. Arrays initialize lazily on "Add Item" (addItem handles
+    // value ?? []); null objects render a placeholder with an explicit
+    // "Initialize" action below.
+
+    // One stable id per array index, so the keyed {#each} preserves each
+    // item's DOM/UI state (open accordions, focus) across removals — keying
+    // by raw index would re-key every survivor after removing item 0.
+    let nextItemId = 0;
+    let itemIds: number[] = $state([]);
     $effect(() => {
-        if (
-            schema?.type === "object" &&
-            (value === null || value === undefined)
-        ) {
-            value = {};
-        } else if (
-            schema?.type === "array" &&
-            (value === null || value === undefined)
-        ) {
-            value = [];
-        }
+        const len = Array.isArray(value) ? value.length : 0;
+        while (itemIds.length < len) itemIds.push(nextItemId++);
+        if (itemIds.length > len) itemIds.length = len;
     });
 
     function addItem() {
@@ -87,6 +89,9 @@
     }
 
     function removeItem(index: number) {
+        // Drop the removed slot's id BEFORE the value shrinks, so the sync
+        // effect doesn't truncate the tail id and misattribute identities.
+        itemIds.splice(index, 1);
         value = (value ?? []).filter((_: any, i: number) => i !== index);
     }
 </script>
@@ -151,6 +156,21 @@
                     {/each}
                 </div>
             {/if}
+        {:else}
+            <!-- Declared object that is currently null: initializing it is an
+                 EXPLICIT user action — auto-coercing here would silently save
+                 `{}` for a prop the user never touched. -->
+            <div
+                class="border rounded-lg p-3 flex items-center justify-between gap-2"
+            >
+                {#if showHeader}
+                    <span class="font-medium">{@render headerContent()}</span>
+                {/if}
+                <span class="text-sm text-gray-400 italic">null</span>
+                <Button size="xs" color="light" onclick={() => (value = {})}
+                    >Initialize</Button
+                >
+            </div>
         {/if}
     {:else if effectiveType === "array"}
         <div class="border p-4 rounded-lg">
@@ -165,7 +185,7 @@
             </div>
 
             {#if Array.isArray(value) && value.length > 0}
-                {#each value as _item, index (index)}
+                {#each value as _item, index (itemIds[index] ?? index)}
                     <div class="mt-2 p-2 bg-gray-50 rounded border">
                         <FormField
                             name={String(index)}
