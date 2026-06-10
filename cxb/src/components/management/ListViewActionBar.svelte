@@ -294,7 +294,7 @@
             {/if}
             {#if canUploadCSV}
                 <Button
-                    class="text-primary cursor-pointer hover:text-primary"
+                    class="text-primary cursor-pointer"
                     size="xs"
                     outline
                     onclick={handleCSVUploadModal}
@@ -304,7 +304,7 @@
             {/if}
             {#if canDownloadCSV}
                 <Button
-                    class="text-primary cursor-pointer hover:text-primary"
+                    class="text-primary cursor-pointer"
                     size="xs"
                     outline
                     onclick={() => (isCSVDownloadModalOpen = true)}
@@ -314,7 +314,7 @@
             {/if}
             {#if canDelete}
                 <Button
-                    class="text-red-600 cursor-pointer hover:text-red-600"
+                    class="text-red-600 cursor-pointer"
                     size="xs"
                     outline
                 >
@@ -325,7 +325,7 @@
         {#if $bulkBucket.length}
             {#if isEntryTrash}
                 <Button
-                    class="text-primary cursor-pointer hover:text-primary"
+                    class="text-primary cursor-pointer"
                     size="xs"
                     outline
                     onclick={restoreEntries}
@@ -333,7 +333,7 @@
                     <ClockArrowOutline size="md" /> Restore
                 </Button>
                 <Button
-                    class="text-red-500 cursor-pointer hover:text-red-500"
+                    class="text-red-500 cursor-pointer"
                     size="xs"
                     outline
                     onclick={deleteCurrentEntry}
@@ -343,7 +343,7 @@
                 </Button>
             {:else}
                 <Button
-                    class="text-primary cursor-pointer hover:text-primary"
+                    class="text-primary cursor-pointer"
                     size="xs"
                     outline
                     onclick={openBulkMove}
@@ -351,7 +351,7 @@
                     <FileExportOutline size="md" /> Bulk Move
                 </Button>
                 <Button
-                    class="text-primary cursor-pointer hover:text-primary"
+                    class="text-primary cursor-pointer"
                     size="xs"
                     outline
                     onclick={openBulkCopy}
@@ -359,7 +359,7 @@
                     <FileCopyOutline size="md" /> Bulk Copy
                 </Button>
                 <Button
-                    class="text-red-500 cursor-pointer hover:text-red-500"
+                    class="text-red-500 cursor-pointer"
                     size="xs"
                     outline
                     onclick={handleBulkTrash}
@@ -368,7 +368,7 @@
                     <TrashBinOutline size="md" /> Bulk Trash
                 </Button>
                 <Button
-                    class="text-red-600 cursor-pointer hover:text-red-600"
+                    class="text-red-600 cursor-pointer"
                     size="xs"
                     outline
                     onclick={deleteCurrentEntry}

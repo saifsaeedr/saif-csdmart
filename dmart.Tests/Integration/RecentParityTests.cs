@@ -197,6 +197,9 @@ public class RecentParityTests : IClassFixture<DmartFactory>
             body!.Status.ShouldBe(Status.Success);
             var rec = body.Records![0];
             rec.Shortname.ShouldNotBe("auto");
+            // Auto shortnames are the first 8 hex chars of the UUID — kept at 8
+            // for Python parity (models/core.py: str(uuid)[:8]); collisions are
+            // handled by retry, not a longer prefix (RequestHandler.cs:308).
             rec.Shortname.Length.ShouldBe(8);
             rec.Uuid.ShouldNotBeNull();
             rec.Uuid!.Replace("-", "")[..8].ShouldBe(rec.Shortname);
