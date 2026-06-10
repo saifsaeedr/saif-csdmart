@@ -407,9 +407,15 @@ public static unsafe class NativePluginCallbacks
 
     // Builds the {x-source: "plugin", x-plugin: <shortname>} marker so audit
     // consumers can tell plugin-written rows apart from REST writes. When the
-    // dispatcher hasn't seeded PluginInvocationContext.CurrentShortname — a
-    // bug, not a normal path — log a warning and return null so the history
-    // row carries no marker rather than the misleading literal "unknown".
+    // dispatcher hasn't seeded PluginInvocationContext.CurrentShortname the
+    // history row carries no marker rather than the misleading literal
+    // "unknown". Production showed this is NOT only a bug path: a plugin that
+    // calls back from its own thread (or any continuation the AsyncLocal
+    // doesn't flow into) legitimately lands here on every call — so the
+    // warning is rate-limited to once per op per hour (Debug in between)
+    // instead of flooding the log at request frequency.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _markerWarnLast = new();
+
     private static Dictionary<string, object>? BuildPluginMarkerHeaders(ILogger? logger, string opName)
     {
         if (PluginInvocationContext.CurrentShortname is { } shortname)
@@ -420,10 +426,20 @@ public static unsafe class NativePluginCallbacks
                 ["x-plugin"] = shortname,
             };
         }
-        logger?.LogWarning(
-            "{Op}: PluginInvocationContext.CurrentShortname is null — history row will lack plugin marker",
+        logger?.Log(
+            ShouldWarnMarkerNow(opName) ? LogLevel.Warning : LogLevel.Debug,
+            "{Op}: PluginInvocationContext.CurrentShortname is null — history row will lack plugin marker "
+            + "(the plugin invoked this callback outside the hook invocation context, e.g. from its own thread)",
             opName);
         return null;
+    }
+
+    private static bool ShouldWarnMarkerNow(string opName)
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var last = _markerWarnLast.GetOrAdd(opName, long.MinValue);
+        if (last != long.MinValue && now - last < 3600) return false;
+        return _markerWarnLast.TryUpdate(opName, now, last);
     }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
