@@ -105,6 +105,35 @@ public sealed class ImportCheckpointStoreTests : IDisposable
     }
 
     [Fact]
+    public void CorruptSidecar_LogsWarning_WhenLoggerProvided()
+    {
+        var path = Path.Combine(_dir, ".dmart-import-checkpoint.json");
+        File.WriteAllText(path, "{this is not, valid json");
+
+        var logger = new CapturingLogger();
+        var store = ImportCheckpointStore.LoadOrCreate(path, "/var/lib/dmart", logger);
+
+        store.IsHeadDone().ShouldBeFalse();
+        logger.Warnings.ShouldNotBeEmpty("a discarded corrupt checkpoint must be surfaced, not silent");
+    }
+
+    private sealed class CapturingLogger : Microsoft.Extensions.Logging.ILogger
+    {
+        public List<string> Warnings { get; } = new();
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+        public void Log<TState>(
+            Microsoft.Extensions.Logging.LogLevel logLevel,
+            Microsoft.Extensions.Logging.EventId eventId,
+            TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == Microsoft.Extensions.Logging.LogLevel.Warning)
+                Warnings.Add(formatter(state, exception));
+        }
+    }
+
+    [Fact]
     public void DefaultPathFor_IsSidecarOfFolder()
     {
         var p = ImportCheckpointStore.DefaultPathFor("/var/lib/dmart/spaces");

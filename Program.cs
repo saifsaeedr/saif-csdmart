@@ -511,7 +511,9 @@ switch (subcommand)
         // it for fat payloads (e.g. base64-encoded blobs in payload.body)
         // where 10k rows × payload would exceed the host RAM budget; raise
         // it for tiny payloads where the COPY round-trip overhead matters.
-        // Only meaningful with --fast (slow path doesn't accumulate).
+        // Applies to every import — the default path batches too (with FK
+        // constraints enforced); --fast adds the FK/trigger bypass and
+        // parallelism on top.
         var batchSize = Dmart.Services.ImportExportService.DefaultBatchSize;
         var batchArg = serverArgs.FirstOrDefault(a => a.StartsWith("--batch-size=", StringComparison.Ordinal));
         if (batchArg is not null)
@@ -1631,6 +1633,14 @@ builder.Services.Configure<Microsoft.AspNetCore.Builder.ForwardedHeadersOptions>
         opts.KnownIPNetworks.Add(network);
 });
 
+// Opt-in observability. No-op unless Dmart:OtlpEndpoint is set, so existing
+// deployments and the test suite incur zero overhead by default.
+{
+    var telemetrySettings = new DmartSettings();
+    builder.Configuration.GetSection("Dmart").Bind(telemetrySettings);
+    builder.AddDmartTelemetry(telemetrySettings);
+}
+
 // Schema bootstrapper runs once on startup. AdminBootstrap MUST be registered AFTER
 // SchemaInitializer — IHostedServices run StartAsync sequentially in registration order.
 builder.Services.AddHostedService<SchemaInitializer>();
@@ -1685,6 +1695,8 @@ builder.Services.AddSingleton<WorkflowService>();
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddSingleton<SpaceEventLogger>();
 builder.Services.AddSingleton<PluginManager>();
+// Drains fire-and-forget concurrent plugin after-hooks on graceful shutdown.
+builder.Services.AddHostedService<Dmart.Plugins.PluginDrainService>();
 builder.Services.AddSingleton<LanguageLoader>();
 builder.Services.AddSingleton<LockService>();
 builder.Services.AddSingleton<ShortLinkService>();
@@ -1695,6 +1707,7 @@ builder.Services.AddSingleton<WsConnectionManager>();
 
 // Auth
 builder.Services.AddSingleton<JwtIssuer>();
+builder.Services.AddSingleton<LegacyTokenMonitor>();
 builder.Services.AddSingleton<SmsSender>();
 builder.Services.AddSingleton<SmtpSender>();
 builder.Services.AddSingleton<PasswordHasher>();
@@ -2109,6 +2122,7 @@ app.MapGet("/docs", () => Results.Content("""
 </html>
 """, "text/html")).ExcludeFromDescription();
 app.MapGet("/", () => Results.Content("{\"status\":\"success\",\"message\":\"DMART-CS API\"}", "application/json")).WithTags("Root");
+app.MapHealth();
 
 app.MapGroup("/managed").WithTags("Managed").RequireAuthorization().AddEndpointFilter<FailedResponseFilter>().MapManaged();
 app.MapGroup("/public").WithTags("Public").AddEndpointFilter<FailedResponseFilter>().MapPublic();

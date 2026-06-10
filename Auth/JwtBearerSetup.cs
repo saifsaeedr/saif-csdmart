@@ -92,6 +92,40 @@ public static class JwtBearerSetup
                             return;
                         }
 
+                        // A refresh token must never act as an access token.
+                        // Session binding incidentally blocks this for web
+                        // users (the sessions row stores the access token),
+                        // but bot users skip the session check below — so
+                        // without this guard a leaked bot refresh token works
+                        // on every API endpoint. Tokens WITHOUT the claim
+                        // predate the 2026-06 hardening (the EOL Python
+                        // implementation never wrote token_use): they pass by
+                        // default — recorded so operators can tell when the
+                        // installed base has aged out — and are rejected once
+                        // JwtRequireTokenUse is set. Mirrors the
+                        // access-as-refresh guard in OAuthEndpoints.
+                        var tokenUse = ReadTokenUse(jwt, raw);
+                        if (tokenUse is null)
+                        {
+                            if (settings.JwtRequireTokenUse)
+                            {
+                                ctx.Fail(new SecurityTokenException(
+                                    "token missing token_use claim"));
+                                return;
+                            }
+                            ctx.HttpContext.RequestServices
+                                .GetRequiredService<LegacyTokenMonitor>()
+                                .Record(ctx.Principal?.Identity?.Name, "bearer");
+                        }
+                        else if (settings.JwtRequireTokenUse
+                            ? !string.Equals(tokenUse, TokenUse.Access, StringComparison.Ordinal)
+                            : string.Equals(tokenUse, TokenUse.Refresh, StringComparison.Ordinal))
+                        {
+                            ctx.Fail(new SecurityTokenException(
+                                "refresh token presented as access token"));
+                            return;
+                        }
+
                         var users = ctx.HttpContext.RequestServices
                             .GetRequiredService<DataAdapters.Sql.UserRepository>();
                         var actor = ctx.Principal?.Identity?.Name;
@@ -175,6 +209,18 @@ public static class JwtBearerSetup
 
         services.AddAuthorization();
         return services;
+    }
+
+    // Read the `token_use` claim. Prefer the parsed JsonWebToken's payload;
+    // fall back to decoding the raw token (covers the JwtSecurityToken path).
+    // The signature is already verified by the time this runs. Returns null
+    // when the claim is absent (pre-2026-06-hardening tokens).
+    private static string? ReadTokenUse(
+        Microsoft.IdentityModel.JsonWebTokens.JsonWebToken? jwt, string raw)
+    {
+        if (jwt is not null && jwt.TryGetPayloadValue<string>("token_use", out var tu))
+            return tu;
+        return TokenUse.Read(raw);
     }
 
     // CSRF defense for cookie-borne auth. The auth_token cookie is promoted to a

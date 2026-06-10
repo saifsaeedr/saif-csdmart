@@ -56,7 +56,21 @@ public sealed class OtpRepository(Db db)
         return code;
     }
 
-    public async Task<bool> VerifyAndConsumeAsync(string key, string code, CancellationToken ct = default)
+    public Task<bool> VerifyAndConsumeAsync(string key, string code, CancellationToken ct = default)
+        => VerifyAndConsumeAsync(key, code, maxAttempts: 0, ct);
+
+    // maxAttempts > 0 caps wrong guesses against a single stored code: each
+    // mismatch bumps an "attempts" counter in the HSTORE value, and once it
+    // reaches the cap the row is deleted so the code can never be redeemed —
+    // even by a later correct guess. This closes the brute-force window on
+    // anonymous OTP verification that per-IP rate limiting alone can't (a
+    // distributed attacker spreads guesses across IPs). maxAttempts == 0
+    // preserves the original uncapped behavior.
+    //
+    // Deliberate server-side divergence from Python dmart; the wire response is
+    // unchanged (an exhausted code looks identical to an expired one).
+    public async Task<bool> VerifyAndConsumeAsync(
+        string key, string code, int maxAttempts, CancellationToken ct = default)
     {
         await using var conn = await db.OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(ct);
@@ -68,13 +82,19 @@ public sealed class OtpRepository(Db db)
                 var raw = await cmd.ExecuteScalarAsync(ct);
                 if (raw is not IDictionary<string, string?> dict) return false;
                 if (!dict.TryGetValue("code", out var stored) || stored is null) return false;
+                if (dict.TryGetValue("expires_at", out var expRaw)
+                    && DateTime.TryParse(expRaw, out var exp) && exp < TimeUtils.Now()) return false;
                 // Timing-safe compare — prevents per-digit OTP brute force via side channel.
                 var storedBytes = System.Text.Encoding.UTF8.GetBytes(stored);
                 var inputBytes = System.Text.Encoding.UTF8.GetBytes(code);
-                if (storedBytes.Length != inputBytes.Length) return false;
-                if (!System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(storedBytes, inputBytes)) return false;
-                if (dict.TryGetValue("expires_at", out var expRaw)
-                    && DateTime.TryParse(expRaw, out var exp) && exp < TimeUtils.Now()) return false;
+                var matches = storedBytes.Length == inputBytes.Length
+                    && System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(storedBytes, inputBytes);
+                if (!matches)
+                {
+                    await RecordFailedAttemptAsync(conn, tx, key, dict, maxAttempts, ct);
+                    await tx.CommitAsync(ct);
+                    return false;
+                }
             }
             await using var del = new NpgsqlCommand("DELETE FROM otp WHERE key = $1", conn, tx);
             del.Parameters.Add(new() { Value = key });
@@ -87,5 +107,34 @@ public sealed class OtpRepository(Db db)
             await tx.RollbackAsync(ct);
             throw;
         }
+    }
+
+    // On a wrong guess, either bump the attempts counter or, once the cap is
+    // reached, delete the row so the code is permanently spent. No-op when
+    // capping is disabled (maxAttempts <= 0).
+    private static async Task RecordFailedAttemptAsync(
+        NpgsqlConnection conn, NpgsqlTransaction tx, string key,
+        IDictionary<string, string?> dict, int maxAttempts, CancellationToken ct)
+    {
+        if (maxAttempts <= 0) return;
+
+        var attempts = dict.TryGetValue("attempts", out var a)
+            && int.TryParse(a, out var n) ? n + 1 : 1;
+
+        if (attempts >= maxAttempts)
+        {
+            await using var del = new NpgsqlCommand("DELETE FROM otp WHERE key = $1", conn, tx);
+            del.Parameters.Add(new() { Value = key });
+            await del.ExecuteNonQueryAsync(ct);
+            return;
+        }
+
+        // hstore || hstore('attempts', $2) merges/overwrites just the one key,
+        // leaving code/expires_at intact.
+        await using var upd = new NpgsqlCommand(
+            "UPDATE otp SET value = value || hstore('attempts', $2) WHERE key = $1", conn, tx);
+        upd.Parameters.Add(new() { Value = key });
+        upd.Parameters.Add(new() { Value = attempts.ToString() });
+        await upd.ExecuteNonQueryAsync(ct);
     }
 }

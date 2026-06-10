@@ -243,7 +243,7 @@ public static class OAuthEndpoints
 
     private static async Task<IResult> HandleTokenAsync(HttpContext http,
         OAuthCodeStore codes, JwtIssuer jwt, UserService users,
-        UserRepository userRepo,
+        UserRepository userRepo, LegacyTokenMonitor legacyTokens,
         IOptions<DmartSettings> settings, CancellationToken ct)
     {
         // application/x-www-form-urlencoded per RFC 6749.
@@ -253,7 +253,7 @@ public static class OAuthEndpoints
         if (grantType == "authorization_code")
             return await ExchangeCodeAsync(form, codes, jwt, users, userRepo, settings.Value, ct);
         if (grantType == "refresh_token")
-            return await RefreshAsync(form, jwt, users, userRepo, settings.Value, ct);
+            return await RefreshAsync(form, jwt, users, userRepo, legacyTokens, settings.Value, ct);
 
         return OAuthError(400, "unsupported_grant_type",
             $"grant_type `{grantType}` not supported");
@@ -296,7 +296,8 @@ public static class OAuthEndpoints
 
     private static async Task<IResult> RefreshAsync(IFormCollection form,
         JwtIssuer jwt, UserService users, UserRepository userRepo,
-        DmartSettings settings, CancellationToken ct)
+        LegacyTokenMonitor legacyTokens, DmartSettings settings,
+        CancellationToken ct)
     {
         var refreshToken = form["refresh_token"].ToString();
         if (string.IsNullOrEmpty(refreshToken))
@@ -306,13 +307,20 @@ public static class OAuthEndpoints
         if (principal?.Identity?.Name is not string shortname)
             return OAuthError(400, "invalid_grant", "invalid refresh token");
 
-        // token_use guard: a stolen ACCESS token must not be redeemable here as
-        // a refresh token. Reject anything explicitly minted as "access";
-        // tolerate a missing claim (pre-upgrade tokens) so existing sessions
-        // keep refreshing until their own expiry, after which only
+        // token_use guard: a stolen ACCESS token must not be redeemable here
+        // as a refresh token. Default: reject anything explicitly minted as
+        // "access" but tolerate a missing claim (pre-2026-06-hardening
+        // tokens) so existing sessions keep refreshing until their own
+        // expiry — each such acceptance is recorded so operators can tell
+        // when the legacy base has aged out. With JwtRequireTokenUse only
         // "refresh"-tagged tokens are accepted.
-        if (string.Equals(ExtractTokenUse(refreshToken), "access", StringComparison.Ordinal))
+        var tokenUse = ExtractTokenUse(refreshToken);
+        if (settings.JwtRequireTokenUse
+            ? !string.Equals(tokenUse, TokenUse.Refresh, StringComparison.Ordinal)
+            : string.Equals(tokenUse, TokenUse.Access, StringComparison.Ordinal))
             return OAuthError(400, "invalid_grant", "not a refresh token");
+        if (tokenUse is null)
+            legacyTokens.Record(shortname, "oauth-refresh");
 
         var user = await users.GetByShortnameAsync(shortname, ct);
         if (user is null)
@@ -367,20 +375,7 @@ public static class OAuthEndpoints
     // Reads the (unverified) `token_use` claim — the caller has already verified
     // the signature via jwt.Validate before consulting this, so a plain payload
     // decode is sufficient. Returns null when the claim is absent.
-    private static string? ExtractTokenUse(string jwtToken)
-    {
-        var parts = jwtToken.Split('.');
-        if (parts.Length != 3) return null;
-        try
-        {
-            var padded = parts[1].Replace('-', '+').Replace('_', '/');
-            padded += (padded.Length % 4) switch { 2 => "==", 3 => "=", _ => "" };
-            var payload = Convert.FromBase64String(padded);
-            using var doc = System.Text.Json.JsonDocument.Parse(payload);
-            return doc.RootElement.TryGetProperty("token_use", out var tu) ? tu.GetString() : null;
-        }
-        catch { return null; }
-    }
+    private static string? ExtractTokenUse(string jwtToken) => TokenUse.Read(jwtToken);
 
     private static IResult TokenResponse(string access, string refresh,
         DmartSettings settings, string scope)
