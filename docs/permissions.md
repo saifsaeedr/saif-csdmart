@@ -86,24 +86,24 @@ SELECT shortname, is_active, roles FROM users WHERE shortname='anonymous';
 -- 2. For each role the anonymous user has, list its permissions.
 SELECT r.shortname AS role, r.is_active, r.permissions
 FROM roles r, jsonb_array_elements_text(
-            (SELECT roles FROM users WHERE shortname='anonymous')
-              ) AS t(role_name)
+    (SELECT roles FROM users WHERE shortname='anonymous')
+) AS t(role_name)
 WHERE r.shortname = t.role_name;
 
 -- 3. Every permission reachable from anonymous + the special "world".
 WITH anon_perms AS (
     SELECT DISTINCT p_name
     FROM users u
-             CROSS JOIN LATERAL jsonb_array_elements_text(u.roles) AS role_name
+    CROSS JOIN LATERAL jsonb_array_elements_text(u.roles) AS role_name
     JOIN roles r ON r.shortname = role_name
     CROSS JOIN LATERAL jsonb_array_elements_text(r.permissions) AS p_name
-WHERE u.shortname='anonymous'
-UNION
-SELECT 'world'
-    )
+    WHERE u.shortname='anonymous'
+    UNION
+    SELECT 'world'
+)
 SELECT p.shortname, p.is_active, p.subpaths, p.resource_types, p.actions
 FROM permissions p
-         JOIN anon_perms a ON p.shortname = a.p_name;
+JOIN anon_perms a ON p.shortname = a.p_name;
 ```
 
 ## Magic words
@@ -272,11 +272,11 @@ is allowed to see. `QueryHelper.AppendAclFilter` emits:
 
 ```sql
 AND (owner_shortname = $N
-OR EXISTS (SELECT 1 FROM jsonb_array_elements(acl) AS elem
-WHERE elem->>'user_shortname' = $N
-AND (elem->'allowed_actions') ? 'query')
-OR EXISTS (SELECT 1 FROM unnest(query_policies) AS qp
-WHERE qp LIKE $M ESCAPE '\\'))
+     OR EXISTS (SELECT 1 FROM jsonb_array_elements(acl) AS elem
+                 WHERE elem->>'user_shortname' = $N
+                   AND (elem->'allowed_actions') ? 'query')
+     OR EXISTS (SELECT 1 FROM unnest(query_policies) AS qp
+                 WHERE qp LIKE $M ESCAPE '\\'))
 ```
 
 The `query_policies` text[] is the **precomputed** authz filter —

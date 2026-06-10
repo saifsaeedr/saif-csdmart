@@ -2,12 +2,15 @@ using System;
 using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading.Tasks;
+using Dmart.Config;
 using Dmart.DataAdapters.Sql;
 using Dmart.Models.Api;
 using Dmart.Models.Core;
 using Dmart.Models.Enums;
 using Dmart.Services;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Shouldly;
 using Xunit;
 
@@ -23,14 +26,19 @@ public class FolderContentValidatorTests : IClassFixture<DmartFactory>
     private readonly DmartFactory _factory;
     public FolderContentValidatorTests(DmartFactory factory) => _factory = factory;
 
+    // Enforcement is ON by default — the rejection tests use default settings
+    // (pinning that default); DryRunOptOut_Violation_IsAllowed pins the
+    // explicit opt-out behaviour.
     private (SpaceRepository spaces, EntryRepository entries, FolderContentValidator validator) Resolve()
     {
         _factory.CreateClient();
         var sp = _factory.Services;
+        var entries = sp.GetRequiredService<EntryRepository>();
         return (
             sp.GetRequiredService<SpaceRepository>(),
-            sp.GetRequiredService<EntryRepository>(),
-            sp.GetRequiredService<FolderContentValidator>());
+            entries,
+            new FolderContentValidator(entries, NullLogger<FolderContentValidator>.Instance,
+                Options.Create(new DmartSettings())));
     }
 
     // Seeds a fresh space with one folder at "/" whose payload.body is the given
@@ -217,6 +225,27 @@ public class FolderContentValidatorTests : IClassFixture<DmartFactory>
             // A content entry never carries a workflow — the workflow gate must not fire.
             var res = await validator.ValidateAsync(MakeEntry(space, "/cat", ResourceType.Content));
             res.IsOk.ShouldBeTrue("non-ticket resources ignore workflow_shortnames");
+        }
+        finally { await spaces.DeleteAsync(space); }
+    }
+
+    // ---- enforcement flag --------------------------------------------------------
+
+    [FactIfPg]
+    public async Task DryRunOptOut_Violation_IsAllowed()
+    {
+        var (spaces, entries, _) = Resolve();
+        // ENFORCE_FOLDER_CONTENT_POLICY=false is the explicit migration escape
+        // hatch: a violation is warn-logged but the result is Ok, so legacy
+        // folders (whose policy arrays were UI rendering hints) keep accepting
+        // writes while the operator cleans up via `dmart check`.
+        var dryRun = new FolderContentValidator(entries, NullLogger<FolderContentValidator>.Instance,
+            Options.Create(new DmartSettings { EnforceFolderContentPolicy = false }));
+        var space = await SeedSpaceWithFolderAsync(spaces, entries, "cat", """{"content_resource_types":["content"]}""");
+        try
+        {
+            var res = await dryRun.ValidateAsync(MakeEntry(space, "/cat", ResourceType.Ticket));
+            res.IsOk.ShouldBeTrue("default is dry-run: violations are logged, not enforced");
         }
         finally { await spaces.DeleteAsync(space); }
     }

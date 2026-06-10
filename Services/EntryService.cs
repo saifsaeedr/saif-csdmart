@@ -548,6 +548,18 @@ public sealed class EntryService(
         if (!await perms.CanUpdateAsync(actor, from, srcCtx, null, ct) ||
             !await perms.CanCreateAsync(actor, to, EntryToAttributesDict(srcEntry), ct))
             return Result<Entry>.Fail(InternalErrorCode.NOT_ALLOWED, "no move access", ErrorTypes.Auth);
+
+        // Folder content policy of the DESTINATION parent — without this,
+        // create-in-an-unconstrained-folder + move would bypass the policy the
+        // create/update paths enforce. Validate the source entry rebased onto
+        // the target locator (resource type / schema / workflow travel with it).
+        if (folderContent is not null)
+        {
+            var fcRes = await folderContent.ValidateAsync(
+                srcEntry with { SpaceName = to.SpaceName, Subpath = to.Subpath, Shortname = to.Shortname }, ct);
+            if (!fcRes.IsOk)
+                return Result<Entry>.Fail(fcRes.ErrorCode, fcRes.ErrorMessage!, fcRes.ErrorType!);
+        }
         // Python fires a single "move" event keyed on the destination subpath and
         // passes the source shortname as an attribute. Mirror that so hook
         // plugins can see both the old and new names on the same event.
