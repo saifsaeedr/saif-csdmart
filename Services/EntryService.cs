@@ -17,7 +17,8 @@ public sealed class EntryService(
     SchemaValidator schemas,
     WorkflowEngine workflows,
     ILogger<EntryService> log,
-    UniquenessValidator? uniqueness = null)
+    UniquenessValidator? uniqueness = null,
+    FolderContentValidator? folderContent = null)
 {
     public async Task<Entry?> GetAsync(Locator l, string? actor, CancellationToken ct = default)
     {
@@ -106,6 +107,17 @@ public sealed class EntryService(
             var uniqRes = await uniqueness.ValidateAsync(entry, ActionType.Create, existing: null, ct);
             if (!uniqRes.IsOk)
                 return Result<Entry>.Fail(uniqRes.ErrorCode, uniqRes.ErrorMessage!, uniqRes.ErrorType!);
+        }
+
+        // Folder-level content policy: the parent folder may restrict which
+        // resource types / schemas / workflows it accepts. Runs after uniqueness
+        // and before ticket-state init + plugins, so a before-create hook sees a
+        // request that already satisfies the folder's declared constraints.
+        if (folderContent is not null)
+        {
+            var fcRes = await folderContent.ValidateAsync(entry, ct);
+            if (!fcRes.IsOk)
+                return Result<Entry>.Fail(fcRes.ErrorCode, fcRes.ErrorMessage!, fcRes.ErrorType!);
         }
 
         // Ticket initialization: resolve initial_state from the workflow definition
@@ -388,6 +400,16 @@ public sealed class EntryService(
             var uniqRes = await uniqueness.ValidateAsync(merged, ActionType.Update, existing, ct);
             if (!uniqRes.IsOk)
                 return Result<Entry>.Fail(uniqRes.ErrorCode, uniqRes.ErrorMessage!, uniqRes.ErrorType!);
+        }
+
+        // Folder-level content policy on the MERGED entry — a patch can change
+        // payload.schema_shortname or a ticket's workflow_shortname, so re-check
+        // against the parent folder's declared constraints.
+        if (folderContent is not null)
+        {
+            var fcRes = await folderContent.ValidateAsync(merged, ct);
+            if (!fcRes.IsOk)
+                return Result<Entry>.Fail(fcRes.ErrorCode, fcRes.ErrorMessage!, fcRes.ErrorType!);
         }
 
         var beforeEvent = BuildEvent(merged, ActionType.Update, actor, isBulkImport);

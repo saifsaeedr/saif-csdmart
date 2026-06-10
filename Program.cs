@@ -1674,6 +1674,7 @@ builder.Services.AddRateLimiter(opts =>
 builder.Services.AddSingleton<PermissionService>();
 builder.Services.AddSingleton<SchemaValidator>();
 builder.Services.AddSingleton<UniquenessValidator>();
+builder.Services.AddSingleton<FolderContentValidator>();
 builder.Services.AddSingleton<EntryService>();
 builder.Services.AddSingleton<QueryService>();
 builder.Services.AddSingleton<UserService>();
