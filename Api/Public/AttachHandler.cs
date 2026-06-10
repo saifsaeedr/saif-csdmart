@@ -22,9 +22,10 @@ public static class AttachHandler
             async Task<Response> (HttpRequest req, EntryService entries,
                                   AttachmentRepository attachments,
                                   PermissionService perms,
+                                  FolderContentValidator folderContent,
                                   ILogger<ResourceWithPayloadMarker> log, CancellationToken ct) =>
                 await ResourceWithPayloadHandler.HandleAsync(req, entries, attachments,
-                    perms, "anonymous", log, ct))
+                    perms, folderContent, "anonymous", log, ct))
           .Produces<Response>()
           // Anonymous upload endpoint — throttle per IP against attachment floods.
           .RequireRateLimiting("auth-by-ip")
@@ -33,9 +34,10 @@ public static class AttachHandler
         g.MapPost("/attach/{space_name}",
             async Task<Response> (string space_name, HttpRequest req, EntryService entries,
                                   AttachmentRepository attachments, PermissionService perms,
+                                  FolderContentValidator folderContent,
                                   IOptions<DmartSettings> settings,
                                   ILogger<ResourceWithPayloadMarker> log, CancellationToken ct) =>
-                await HandleAttachAsync(space_name, req, entries, attachments, perms, settings.Value, log, ct))
+                await HandleAttachAsync(space_name, req, entries, attachments, perms, folderContent, settings.Value, log, ct))
           .Produces<Response>()
           // Anonymous upload endpoint — throttle per IP against attachment floods.
           .RequireRateLimiting("auth-by-ip")
@@ -44,7 +46,7 @@ public static class AttachHandler
 
     private static async Task<Response> HandleAttachAsync(
         string spaceName, HttpRequest req, EntryService entries, AttachmentRepository attachments,
-        PermissionService perms, DmartSettings settings, ILogger log, CancellationToken ct)
+        PermissionService perms, FolderContentValidator folderContent, DmartSettings settings, ILogger log, CancellationToken ct)
     {
         if (!req.HasFormContentType)
             return Response.Fail(InternalErrorCode.INVALID_DATA, "expected multipart/form-data", ErrorTypes.Request);
@@ -56,7 +58,7 @@ public static class AttachHandler
         // while also supporting Python's public /attach contract below.
         if (form.Files["request_record"] is not null)
             return await ResourceWithPayloadHandler.HandleAsync(req, entries, attachments,
-                perms, "anonymous", log, ct);
+                perms, folderContent, "anonymous", log, ct);
 
         if (!SpaceAllowed(settings.AllowedSubmitModels, spaceName))
             return Response.Fail(InternalErrorCode.NOT_ALLOWED_LOCATION,
@@ -102,7 +104,7 @@ public static class AttachHandler
                 wasAuto: true,
                 () => ResourceWithPayloadHandler.StoreAttachmentAsync(
                     RequestHandler.ResolveAutoShortname(record), spaceName, "anonymous", bytes, ext,
-                    contentType, checksum, null, schema, attachments, perms, log,
+                    contentType, checksum, null, schema, attachments, perms, folderContent, log,
                     failOnConflict: true, ct),
                 r => r.Error?.Code == InternalErrorCode.SHORTNAME_ALREADY_EXIST);
         }
@@ -118,6 +120,13 @@ public static class AttachHandler
                 if (!await perms.CanCreateAsync("anonymous", gate, attrs, ct))
                     return Response.Fail(InternalErrorCode.NOT_ALLOWED,
                         "You don't have permission to this action", ErrorTypes.Request);
+                // Folder content policy — mirror the gate on every other create path
+                // so an anonymous /attach upload can't bypass content_resource_types.
+                var contentCheck = await folderContent.ValidateRawAsync(
+                    spaceName, gate.Subpath, resolved.Shortname, resolved.ResourceType, attrs, ct);
+                if (!contentCheck.IsOk)
+                    return Response.Fail(contentCheck.ErrorCode, contentCheck.ErrorMessage!,
+                        contentCheck.ErrorType ?? ErrorTypes.Request);
 
                 var attachment = new Attachment
                 {

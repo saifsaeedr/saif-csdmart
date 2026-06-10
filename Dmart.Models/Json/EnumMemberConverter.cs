@@ -26,6 +26,18 @@ public abstract class EnumMemberConverterBase<[DynamicallyAccessedMembers(Dynami
     // without a matching component.
     public static IReadOnlyList<string> WireValues { get; } = Map.Select(x => x.Name).ToArray();
 
+    // Wire-format string for a single enum value — the inverse of Read, without a
+    // JSON round-trip. Used by code that compares an enum against wire-format
+    // strings embedded in JSON payloads (e.g. a folder's content_resource_types)
+    // where the [JsonConverter] attribute is otherwise the only source of the
+    // mapping. Falls back to the lowercased C# name to mirror BuildMap's default.
+    public static string ToWire(TEnum value)
+    {
+        foreach (var (v, name) in Map)
+            if (EqualityComparer<TEnum>.Default.Equals(v, value)) return name;
+        return value.ToString().ToLowerInvariant();
+    }
+
     private static (TEnum, string)[] BuildMap()
     {
 #if NET5_0_OR_GREATER

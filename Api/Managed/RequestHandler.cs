@@ -32,6 +32,7 @@ public static class RequestHandler
                                   AttachmentRepository attachments, PasswordHasher hasher,
                                   Plugins.PluginManager plugins, PermissionService perms,
                                   UniquenessValidator uniqueness,
+                                  FolderContentValidator folderContent,
                                   HistoryRepository history,
                                   IOptions<DmartSettings> dmartSettings,
                                   HttpContext http, CancellationToken ct) =>
@@ -163,7 +164,7 @@ public static class RequestHandler
                                 await RetryOnShortnameCollisionAsync(
                                     IsAutoShortname(rec.Shortname),
                                     () => DispatchCreateAsync(rec, req.SpaceName, actor,
-                                        entries, users, access, spaces, attachments, hasher, perms, uniqueness, ct),
+                                        entries, users, access, spaces, attachments, hasher, perms, uniqueness, folderContent, ct),
                                     r => r.Response.Error?.Code == InternalErrorCode.SHORTNAME_ALREADY_EXIST),
                             RequestType.Delete =>
                                 await DispatchDeleteAsync(rec, req.SpaceName, actor, managementSpace,
@@ -342,7 +343,7 @@ public static class RequestHandler
         EntryService entries, UserRepository users, AccessRepository access,
         SpaceRepository spaces, AttachmentRepository attachments, PasswordHasher hasher,
         PermissionService perms,
-        UniquenessValidator uniqueness, CancellationToken ct)
+        UniquenessValidator uniqueness, FolderContentValidator folderContent, CancellationToken ct)
     {
         rec = ResolveAutoShortname(rec);
         // Gate non-entry branches here. The entry path runs through EntryService
@@ -382,6 +383,14 @@ public static class RequestHandler
                 // all-powerful permission. See EnforcePrivilegeFloorAsync.
                 var floor = await EnforcePrivilegeFloorAsync(rec.ResourceType, rec.Attributes, actor, perms, users, ct);
                 if (floor is not null) return (floor, rec);
+                // Folder-level content policy for non-entry creates (entry types
+                // are gated inside EntryService). For Space (effectiveSubpath "/")
+                // and attachments attached under a content entry this no-ops,
+                // since neither resolves to a parent Folder.
+                var content = await folderContent.ValidateRawAsync(
+                    effectiveSpace, effectiveSubpath, rec.Shortname, rec.ResourceType, rec.Attributes, ct);
+                if (!content.IsOk)
+                    return (Response.Fail(content.ErrorCode, content.ErrorMessage!, content.ErrorType ?? ErrorTypes.Request), rec);
                 break;
             }
         }
