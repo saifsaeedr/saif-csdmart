@@ -81,6 +81,13 @@
   </Target>
 
   <ItemGroup>
+    <!-- Git worktrees created under .claude/worktrees/ are full repo checkouts.
+         The Web SDK's default Compile glob would otherwise pull their .cs files
+         into this assembly, causing duplicate-symbol errors whenever a worktree
+         exists. Exclude the whole .claude/ dir from all item globs. -->
+    <Compile Remove=".claude/**" />
+    <Content Remove=".claude/**" />
+    <None Remove=".claude/**" />
     <!-- The test project lives under dmart.Tests/ inside this project's source tree.
          The Web SDK's default Compile glob would otherwise pull its .cs files into the
          main assembly, causing duplicate-symbol and missing-using errors. -->
