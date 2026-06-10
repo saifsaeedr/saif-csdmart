@@ -421,13 +421,13 @@ public sealed class DmartSettings
 
     // Enforce a folder's content-policy arrays (content_resource_types,
     // content_schema_shortnames, workflow_shortnames in the folder's
-    // payload.body) on create/update/move inside that folder. Default false:
-    // FolderContentValidator runs in DRY-RUN mode — violations are warn-logged
-    // ("folder-content policy violation (NOT enforced)") but allowed, because
-    // existing deployments carry folders whose policy arrays predate
-    // enforcement (they were UI rendering hints). Flip to true once the
-    // warnings have been reviewed/cleaned up.
-    public bool EnforceFolderContentPolicy { get; set; }
+    // payload.body) on create/update/move inside that folder. Default TRUE —
+    // a declared folder policy means what it says. Set false to run
+    // FolderContentValidator in DRY-RUN mode (violations warn-logged,
+    // "folder-content policy violation (NOT enforced)", but allowed) while
+    // migrating legacy data; `dmart check` reports the non-compliant stock
+    // either way (folder_content_violations).
+    public bool EnforceFolderContentPolicy { get; set; } = true;
 
     // CSV list of payload field names users can't update via POST /user/profile.
     // Python: user_profile_payload_protected_fields.

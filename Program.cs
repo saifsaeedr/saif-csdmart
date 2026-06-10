@@ -369,9 +369,22 @@ switch (subcommand)
     case "health-check":
     {
         // Run health checks — mirrors Python's check subcommand.
+        //   dmart check [space] [soft|hard|all]
+        // Reports each integrity probe's issue COUNT per space (this used to
+        // misprint the number of probes), including folder-rendering
+        // compliance: folder_content_violations (entries violating their
+        // parent folder's policy arrays) and folder_body_schema_violations
+        // (folder bodies that don't validate against the centralized
+        // management folder_rendering schema). "hard"/"all" adds sample paths
+        // so the operator can locate the non-compliant content.
         var space = serverArgs.Length > 0 ? serverArgs[0] : null;
+        var healthType = serverArgs.Length > 1 ? serverArgs[1] : "soft";
+        var includeSamples = healthType is "hard" or "all";
         var (_, dbInst) = CliBootstrap.BuildOrExit(dotenvPath, dotenvValues);
         var healthRepo = new HealthCheckRepository(dbInst);
+        var entryRepo = new EntryRepository(dbInst);
+        var schemaValidator = new Dmart.Services.SchemaValidator(entryRepo,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<Dmart.Services.SchemaValidator>.Instance);
         var spacesToCheck = new List<string>();
         if (!string.IsNullOrEmpty(space))
         {
@@ -384,6 +397,39 @@ switch (subcommand)
             var allSpaces = await spaceRepo.ListAsync();
             spacesToCheck.AddRange(allSpaces.Select(sp => sp.Shortname));
         }
+
+        // Folder bodies vs the centralized folder_rendering schema. Collect
+        // first, then validate — the validator opens its own connection for
+        // the schema lookup and must not interleave with an open reader.
+        async Task<HealthCheckRepository.IssueCheck> FolderBodyComplianceAsync(string sp)
+        {
+            var folders = new List<(string Path, System.Text.Json.JsonElement Body)>();
+            await using (var conn = await dbInst.OpenAsync())
+            {
+                await using var cmd = new Npgsql.NpgsqlCommand(
+                    "SELECT subpath, shortname, payload->>'body' FROM entries " +
+                    "WHERE space_name = $1 AND resource_type = 'folder' AND jsonb_typeof(payload->'body') = 'object'", conn);
+                cmd.Parameters.Add(new() { Value = sp });
+                await using var reader = await cmd.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    var path = $"{reader.GetString(0)}/{reader.GetString(1)}";
+                    using var doc = System.Text.Json.JsonDocument.Parse(reader.GetString(2));
+                    folders.Add((path, doc.RootElement.Clone()));
+                }
+            }
+            long count = 0;
+            var samples = new List<string>();
+            foreach (var (path, body) in folders)
+            {
+                var errors = await schemaValidator.ValidateAsync(sp, "folder_rendering", body);
+                if (errors is null) continue;
+                count++;
+                if (includeSamples && samples.Count < 10) samples.Add(path);
+            }
+            return new HealthCheckRepository.IssueCheck("folder_body_schema_violations", count, samples);
+        }
+
         Console.WriteLine("{");
         var first = true;
         foreach (var sp in spacesToCheck)
@@ -391,15 +437,27 @@ switch (subcommand)
             if (!first) Console.WriteLine(",");
             first = false;
             Console.Write($"  \"{sp}\": {{");
-            foreach (var ht in new[] { "orphan_attachments", "dangling_owner", "stale_locks", "missing_payload_body", "missing_schema_reference" })
+            List<HealthCheckRepository.IssueCheck> checks;
+            try
             {
-                try
-                {
-                    var results = await healthRepo.RunAsync(sp, ht);
-                    Console.Write($"\"{ht}\": {results.Count}");
-                    if (ht != "missing_schema_reference") Console.Write(", ");
-                }
-                catch { Console.Write($"\"{ht}\": -1"); if (ht != "missing_schema_reference") Console.Write(", "); }
+                checks = await healthRepo.RunAsync(sp, healthType);
+                checks.Add(await FolderBodyComplianceAsync(sp));
+            }
+            catch (Exception ex)
+            {
+                Console.Write($"\"error\": \"{System.Text.Json.JsonEncodedText.Encode(ex.Message)}\"}}");
+                continue;
+            }
+            var firstCheck = true;
+            foreach (var c in checks)
+            {
+                if (!firstCheck) Console.Write(", ");
+                firstCheck = false;
+                if (includeSamples && c.Count > 0)
+                    Console.Write($"\"{c.Name}\": {{\"count\": {c.Count}, \"samples\": [" +
+                        string.Join(", ", c.Samples.Select(s => $"\"{System.Text.Json.JsonEncodedText.Encode(s)}\"")) + "]}");
+                else
+                    Console.Write($"\"{c.Name}\": {c.Count}");
             }
             Console.Write("}");
         }

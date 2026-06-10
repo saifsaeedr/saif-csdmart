@@ -1,6 +1,6 @@
 {
   "title": "Folder schema",
-  "description": "Folder schema description",
+  "description": "Canonical folder-body schema. CENTRALIZED: resolved from the management space for every space (SchemaValidator special-cases the shortname), and EXACT: additionalProperties is false at every level, so unknown or misspelled fields are rejected rather than silently ignored.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -9,7 +9,6 @@
       "description": "folder level websocket watch",
       "type": "boolean"
     },
-
     "disable_filter": {
       "title": "Disable filter",
       "description": "The search filter icon / functionality is disabled",
@@ -31,6 +30,7 @@
       "type": "array",
       "items": {
         "type": "object",
+        "additionalProperties": false,
         "properties": {
           "key": {
             "title": "Key",
@@ -49,6 +49,7 @@
       "type": "array",
       "items": {
         "type": "object",
+        "additionalProperties": false,
         "properties": {
           "key": {
             "title": "Key",
@@ -62,15 +63,15 @@
       }
     },
     "enable_pdf_schema_shortnames": {
-	    "title": "List of schema shortnames for which pdf icon is displayed",
-	    "type": "array",
-	    "items": {
-		    "type": "string"
-	    }
+      "title": "List of schema shortnames for which pdf icon is displayed",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
     },
     "workflow_shortnames": {
-      "title": "Workflow shortname",
-      "description": "workflow shortname field title",
+      "title": "Workflow shortnames",
+      "description": "Tickets created in this folder must declare one of these workflows",
       "type": "array",
       "items": {
         "type": "string"
@@ -83,6 +84,7 @@
     },
     "query": {
       "type": "object",
+      "additionalProperties": false,
       "properties": {
         "type": {
           "type": "string",
@@ -96,9 +98,9 @@
         },
         "filter_types": {
           "type": "array",
-	  "items": {
-		  "type": "string"
-	  }
+          "items": {
+            "type": "string"
+          }
         }
       }
     },
@@ -133,15 +135,47 @@
     },
     "content_resource_types": {
       "title": "Resource types",
-      "description": "Resource types",
+      "description": "Resources created in this folder must be one of these types",
       "type": "array",
       "items": {
-        "type": "string"
+        "type": "string",
+        "enum": [
+          "user",
+          "group",
+          "folder",
+          "schema",
+          "content",
+          "log",
+          "acl",
+          "comment",
+          "media",
+          "data_asset",
+          "locator",
+          "relationship",
+          "alteration",
+          "history",
+          "space",
+          "permission",
+          "role",
+          "ticket",
+          "json",
+          "lock",
+          "post",
+          "reaction",
+          "reply",
+          "share",
+          "plugin_wrapper",
+          "notification",
+          "csv",
+          "jsonl",
+          "sqlite",
+          "parquet"
+        ]
       }
     },
     "content_schema_shortnames": {
       "title": "schema shortname",
-      "description": "schema shortnames",
+      "description": "Entries created in this folder that declare a schema must use one of these",
       "type": "array",
       "items": {
         "type": "string"
@@ -155,16 +189,13 @@
         "properties": {}
       }
     },
-    "append_subpath": {
-      "title": "Append string to subpath",
-      "type": "string"
-    },
     "index_attributes": {
       "title": "index attributes",
       "description": "the attributes from the schema that should be displayed in index page",
       "type": "array",
       "items": {
         "type": "object",
+        "additionalProperties": false,
         "properties": {
           "key": {
             "title": "Key",

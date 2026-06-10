@@ -23,17 +23,17 @@ namespace Dmart.Tests.Integration;
 // Uses a super_admin token so the permission layer passes and the request
 // reaches the content gate.
 //
-// Enforcement is OPT-IN (EnforceFolderContentPolicy, default false = dry-run
-// warn-only), so every rejection test runs against an enforcing host; the
-// dry-run test pins the default-off behaviour.
+// Enforcement is ON by default (EnforceFolderContentPolicy=true), so the
+// rejection tests run against the plain factory — pinning the default — and
+// the dry-run test opts out explicitly via a flag-off host.
 public class FolderContentConstraintWiringTests : IClassFixture<DmartFactory>
 {
     private readonly DmartFactory _factory;
     public FolderContentConstraintWiringTests(DmartFactory factory) => _factory = factory;
 
-    private WebApplicationFactory<Program> EnforcingHost() =>
+    private WebApplicationFactory<Program> DryRunHost() =>
         _factory.WithWebHostBuilder(b => b.ConfigureServices(svcs =>
-            svcs.Configure<DmartSettings>(s => s.EnforceFolderContentPolicy = true)));
+            svcs.Configure<DmartSettings>(s => s.EnforceFolderContentPolicy = false)));
 
     private async Task<string> SeedSpaceWithFolderAsync(string folderShortname, string bodyJson)
     {
@@ -96,8 +96,7 @@ public class FolderContentConstraintWiringTests : IClassFixture<DmartFactory>
     [FactIfPg]
     public async Task EntryPath_Create_DisallowedResourceType_Rejected()
     {
-        var enforcing = EnforcingHost();
-        var user = await _factory.CreateLoggedInUserAsync(host: enforcing);
+        var user = await _factory.CreateLoggedInUserAsync();
         // Folder accepts only subfolders — a content entry must be rejected.
         var space = await SeedSpaceWithFolderAsync("subdirs", """{"content_resource_types":["folder"]}""");
         try
@@ -122,8 +121,7 @@ public class FolderContentConstraintWiringTests : IClassFixture<DmartFactory>
     [FactIfPg]
     public async Task EntryPath_Update_FlipWorkflowToDisallowed_Rejected()
     {
-        var enforcing = EnforcingHost();
-        var user = await _factory.CreateLoggedInUserAsync(host: enforcing);
+        var user = await _factory.CreateLoggedInUserAsync();
         var space = await SeedSpaceWithFolderAsync("tickets", """{"workflow_shortnames":["approval"]}""");
         try
         {
@@ -156,8 +154,7 @@ public class FolderContentConstraintWiringTests : IClassFixture<DmartFactory>
     [FactIfPg]
     public async Task DedicatedPath_Create_AttachmentOnFolder_DisallowedType_Rejected()
     {
-        var enforcing = EnforcingHost();
-        var user = await _factory.CreateLoggedInUserAsync(host: enforcing);
+        var user = await _factory.CreateLoggedInUserAsync();
         // Folder accepts only content — a comment attached directly to the folder
         // must be rejected (the comment's parent resolves to this Folder).
         var space = await SeedSpaceWithFolderAsync("notes", """{"content_resource_types":["content"]}""");
@@ -186,8 +183,7 @@ public class FolderContentConstraintWiringTests : IClassFixture<DmartFactory>
         // switch block) for an identity type — the headline "all resource types"
         // case: a folder restricted to content must reject a user created under it.
         // The gate fires before CreateUserAsync, so no user row is ever written.
-        var enforcing = EnforcingHost();
-        var user = await _factory.CreateLoggedInUserAsync(host: enforcing);
+        var user = await _factory.CreateLoggedInUserAsync();
         var space = await SeedSpaceWithFolderAsync("people", """{"content_resource_types":["content"]}""");
         try
         {
@@ -214,8 +210,7 @@ public class FolderContentConstraintWiringTests : IClassFixture<DmartFactory>
         // bypassed by uploading a media attachment instead of POSTing JSON.
         // This endpoint returns StoreAttachmentAsync's Response directly (no batch
         // aggregation), so the top-level error code is INVALID_DATA, not SOMETHING_WRONG.
-        var enforcing = EnforcingHost();
-        var user = await _factory.CreateLoggedInUserAsync(host: enforcing);
+        var user = await _factory.CreateLoggedInUserAsync();
         var space = await SeedSpaceWithFolderAsync("uploads", """{"content_resource_types":["content"]}""");
         try
         {
@@ -248,8 +243,7 @@ public class FolderContentConstraintWiringTests : IClassFixture<DmartFactory>
         // create-then-move must not bypass the destination folder's policy: an
         // entry born in an unconstrained folder gets re-validated against the
         // DESTINATION parent on move (EntryService.MoveAsync).
-        var enforcing = EnforcingHost();
-        var user = await _factory.CreateLoggedInUserAsync(host: enforcing);
+        var user = await _factory.CreateLoggedInUserAsync();
         var space = await SeedSpaceWithFolderAsync("open", """{}""");
         await AddFolderAsync(space, "locked", """{"content_resource_types":["folder"]}""");
         var entries = _factory.Services.GetRequiredService<EntryRepository>();
@@ -282,14 +276,14 @@ public class FolderContentConstraintWiringTests : IClassFixture<DmartFactory>
     }
 
     [FactIfPg]
-    public async Task DryRun_Default_DisallowedCreate_IsAllowed()
+    public async Task DryRun_OptOut_DisallowedCreate_IsAllowed()
     {
-        // EnforceFolderContentPolicy defaults to FALSE: deployed folders may carry
-        // policy arrays from when they were UI-only rendering hints, so the
-        // validator runs in dry-run mode — the violation is warn-logged but the
-        // write succeeds. This pins the default so enabling enforcement stays an
-        // explicit operator decision.
-        var user = await _factory.CreateLoggedInUserAsync();
+        // ENFORCE_FOLDER_CONTENT_POLICY=false is the migration escape hatch:
+        // the validator runs in dry-run mode — the violation is warn-logged but
+        // the write succeeds — while the operator reviews `dmart check`'s
+        // folder_content_violations report and cleans up legacy folders.
+        var dryRun = DryRunHost();
+        var user = await _factory.CreateLoggedInUserAsync(host: dryRun);
         var space = await SeedSpaceWithFolderAsync("subdirs", """{"content_resource_types":["folder"]}""");
         var entries = _factory.Services.GetRequiredService<EntryRepository>();
         try
@@ -299,7 +293,7 @@ public class FolderContentConstraintWiringTests : IClassFixture<DmartFactory>
                 "{\"resource_type\":\"content\",\"shortname\":\"" + shortname + "\",\"subpath\":\"/subdirs\",\"attributes\":{}}]}";
             var (result, raw) = await PostAsync(user.Client, body);
 
-            result!.Status.ShouldBe(Status.Success, $"dry-run default must allow the write: {raw}");
+            result!.Status.ShouldBe(Status.Success, $"dry-run opt-out must allow the write: {raw}");
             (await entries.GetAsync(space, "/subdirs", shortname, ResourceType.Content)).ShouldNotBeNull();
         }
         finally

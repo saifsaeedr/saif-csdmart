@@ -36,6 +36,11 @@ public sealed class SchemaValidator(EntryRepository entries, ILogger<SchemaValid
     public async Task<List<string>?> ValidateAsync(string spaceName, string schemaShortname, JsonElement body, CancellationToken ct = default)
     {
         if (string.IsNullOrEmpty(schemaShortname)) return null;
+        // folder_rendering is CENTRALIZED: the canonical (strict,
+        // additionalProperties:false) definition lives in the management space
+        // only, so every space's folder bodies validate against the same
+        // document — a per-space copy can't weaken or fork it.
+        if (schemaShortname == "folder_rendering") spaceName = "management";
         var schema = await GetCompiledAsync(spaceName, schemaShortname, ct);
         if (schema is null) return null;   // schema not found — pass through
 

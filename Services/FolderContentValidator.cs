@@ -29,11 +29,12 @@ namespace Dmart.Services;
 //   * no parent folder / unreadable folder -> allow (fail open), matching
 //     UniquenessValidator
 //
-// ENFORCEMENT IS OPT-IN: these arrays predate server-side enforcement (they
-// were CXB rendering hints), so deployed folders may already carry them. With
-// EnforceFolderContentPolicy=false (the default) the validator runs in
-// dry-run mode — violations are warn-logged but allowed — so operators can
-// review/bless existing data before setting ENFORCE_FOLDER_CONTENT_POLICY=true.
+// Enforcement is ON by default (EnforceFolderContentPolicy=true): a declared
+// folder policy means what it says. Operators migrating legacy data (these
+// arrays were once CXB-only rendering hints) can set
+// ENFORCE_FOLDER_CONTENT_POLICY=false for a dry-run window — violations are
+// warn-logged but allowed — and use `dmart check` to list the non-compliant
+// stock (folder_content_violations) before re-enabling.
 //
 // Attachments (Comment/Media/...) attach UNDER a content entry, so their parent
 // resolves to a non-folder and this validator no-ops — identical to how

@@ -26,9 +26,9 @@ public class FolderContentValidatorTests : IClassFixture<DmartFactory>
     private readonly DmartFactory _factory;
     public FolderContentValidatorTests(DmartFactory factory) => _factory = factory;
 
-    // Enforcement is opt-in (default = dry-run), so the rejection tests build
-    // their own validator with the flag ON; DryRunDefault_Violation_IsAllowed
-    // pins the default-off behaviour.
+    // Enforcement is ON by default — the rejection tests use default settings
+    // (pinning that default); DryRunOptOut_Violation_IsAllowed pins the
+    // explicit opt-out behaviour.
     private (SpaceRepository spaces, EntryRepository entries, FolderContentValidator validator) Resolve()
     {
         _factory.CreateClient();
@@ -38,7 +38,7 @@ public class FolderContentValidatorTests : IClassFixture<DmartFactory>
             sp.GetRequiredService<SpaceRepository>(),
             entries,
             new FolderContentValidator(entries, NullLogger<FolderContentValidator>.Instance,
-                Options.Create(new DmartSettings { EnforceFolderContentPolicy = true })));
+                Options.Create(new DmartSettings())));
     }
 
     // Seeds a fresh space with one folder at "/" whose payload.body is the given
@@ -232,14 +232,15 @@ public class FolderContentValidatorTests : IClassFixture<DmartFactory>
     // ---- enforcement flag --------------------------------------------------------
 
     [FactIfPg]
-    public async Task DryRunDefault_Violation_IsAllowed()
+    public async Task DryRunOptOut_Violation_IsAllowed()
     {
         var (spaces, entries, _) = Resolve();
-        // EnforceFolderContentPolicy defaults to false → dry-run: a violation is
-        // warn-logged but the result is Ok, so pre-enforcement folders (whose
-        // policy arrays were UI rendering hints) keep accepting writes.
+        // ENFORCE_FOLDER_CONTENT_POLICY=false is the explicit migration escape
+        // hatch: a violation is warn-logged but the result is Ok, so legacy
+        // folders (whose policy arrays were UI rendering hints) keep accepting
+        // writes while the operator cleans up via `dmart check`.
         var dryRun = new FolderContentValidator(entries, NullLogger<FolderContentValidator>.Instance,
-            Options.Create(new DmartSettings()));
+            Options.Create(new DmartSettings { EnforceFolderContentPolicy = false }));
         var space = await SeedSpaceWithFolderAsync(spaces, entries, "cat", """{"content_resource_types":["content"]}""");
         try
         {
