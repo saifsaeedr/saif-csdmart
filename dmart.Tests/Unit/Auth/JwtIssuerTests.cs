@@ -11,14 +11,18 @@ namespace Dmart.Tests.Unit.Auth;
 
 public class JwtIssuerTests
 {
-    private static JwtIssuer NewIssuer() => new(Options.Create(new DmartSettings
+    private static DmartSettings TestSettings(bool requireTokenUse = false) => new()
     {
         JwtSecret = "test-secret-test-secret-test-secret-32",
         JwtIssuer = "dmart",
         JwtAudience = "dmart",
         JwtAccessExpires = 300,
         JwtRefreshDays = 1,
-    }));
+        JwtRequireTokenUse = requireTokenUse,
+    };
+
+    private static JwtIssuer NewIssuer() => new(Options.Create(TestSettings()));
+    private static JwtIssuer NewStrictIssuer() => new(Options.Create(TestSettings(requireTokenUse: true)));
 
     [Fact]
     public void IssueAccess_Returns_Three_Segments()
@@ -140,9 +144,9 @@ public class JwtIssuerTests
         issuer.Validate(access, requireTokenUse: "refresh").ShouldBeNull();
     }
 
-    // Python dmart's jwt.py never writes token_use, and mixed Python/C#
-    // deployments share JWT_SECRET. A claimless token must therefore pass a
-    // token_use requirement — tolerance is permanent, not transitional.
+    // Claimless tokens (minted before the 2026-06 hardening; Python dmart
+    // never wrote token_use) are tolerated by DEFAULT so the installed base
+    // can age out — but only while JwtRequireTokenUse stays false.
     [Fact]
     public void Validate_Accepts_Claimless_Token_When_Access_Required()
     {
@@ -150,6 +154,32 @@ public class JwtIssuerTests
         var principal = NewIssuer().Validate(token, requireTokenUse: "access");
         principal.ShouldNotBeNull();
         principal!.Identity!.Name.ShouldBe("alice");
+    }
+
+    [Fact]
+    public void Validate_Rejects_Claimless_Token_When_Strict()
+    {
+        var token = MintTokenWithoutTokenUse("alice");
+        NewStrictIssuer().Validate(token, requireTokenUse: "access").ShouldBeNull();
+    }
+
+    [Fact]
+    public void Validate_Accepts_Tagged_Access_Token_When_Strict()
+    {
+        var issuer = NewStrictIssuer();
+        var principal = issuer.Validate(issuer.IssueAccess("alice"), requireTokenUse: "access");
+        principal.ShouldNotBeNull();
+        principal!.Identity!.Name.ShouldBe("alice");
+    }
+
+    // requireTokenUse: null callers only need signature + exp — e.g. the
+    // OAuth refresh grant validates first and applies its own token_use
+    // guard. Strict mode must not change that contract.
+    [Fact]
+    public void Validate_Without_Required_Use_Skips_TokenUse_Check_Even_When_Strict()
+    {
+        var token = MintTokenWithoutTokenUse("alice");
+        NewStrictIssuer().Validate(token).ShouldNotBeNull();
     }
 
     // Hand-rolled HS256 token with the same secret as NewIssuer() but no

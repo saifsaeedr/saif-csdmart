@@ -109,14 +109,22 @@ public sealed class JwtIssuer(IOptions<DmartSettings> settings)
 
         // token_use guard (e.g. requireTokenUse: "access" on the WebSocket
         // path rejects a refresh token presented as an access token). A token
-        // WITHOUT the claim passes: Python dmart's jwt.py never writes
-        // token_use and mixed Python/C# deployments share JWT_SECRET, so
-        // tolerance for claimless tokens is permanent, not transitional.
+        // WITHOUT the claim predates the 2026-06 hardening (the EOL Python
+        // implementation never wrote token_use); it passes only while
+        // JwtRequireTokenUse is false, so the legacy installed base can age
+        // out — callers record those acceptances via LegacyTokenMonitor.
         // Mirrors the refresh-grant guard in OAuthEndpoints.
-        if (requireTokenUse is not null
-            && payload.TryGetProperty("token_use", out var tu)
-            && tu.GetString() != requireTokenUse)
-            return null;
+        if (requireTokenUse is not null)
+        {
+            if (payload.TryGetProperty("token_use", out var tu))
+            {
+                if (tu.GetString() != requireTokenUse) return null;
+            }
+            else if (_s.JwtRequireTokenUse)
+            {
+                return null;
+            }
+        }
 
         var sub = payload.TryGetProperty("sub", out var s) ? s.GetString() : null;
         if (sub is null) return null;

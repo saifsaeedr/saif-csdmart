@@ -105,6 +105,14 @@ public static class WebSocketHandler
                 }
             }
 
+            // In tolerant mode a claimless legacy token (pre-2026-06
+            // hardening) reaches here; record it so operators can tell when
+            // the installed base has aged out. Strict mode never gets this
+            // far — jwt.Validate(requireTokenUse: "access") already rejected.
+            if (TokenUse.Read(authedToken) is null)
+                ctx.RequestServices.GetRequiredService<LegacyTokenMonitor>()
+                    .Record(userShortname, "websocket");
+
             var ws = await ctx.WebSockets.AcceptWebSocketAsync();
             await mgr.ConnectAsync(ws, userShortname);
 

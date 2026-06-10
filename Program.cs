@@ -511,7 +511,9 @@ switch (subcommand)
         // it for fat payloads (e.g. base64-encoded blobs in payload.body)
         // where 10k rows × payload would exceed the host RAM budget; raise
         // it for tiny payloads where the COPY round-trip overhead matters.
-        // Only meaningful with --fast (slow path doesn't accumulate).
+        // Applies to every import — the default path batches too (with FK
+        // constraints enforced); --fast adds the FK/trigger bypass and
+        // parallelism on top.
         var batchSize = Dmart.Services.ImportExportService.DefaultBatchSize;
         var batchArg = serverArgs.FirstOrDefault(a => a.StartsWith("--batch-size=", StringComparison.Ordinal));
         if (batchArg is not null)
@@ -1704,6 +1706,7 @@ builder.Services.AddSingleton<WsConnectionManager>();
 
 // Auth
 builder.Services.AddSingleton<JwtIssuer>();
+builder.Services.AddSingleton<LegacyTokenMonitor>();
 builder.Services.AddSingleton<SmsSender>();
 builder.Services.AddSingleton<SmtpSender>();
 builder.Services.AddSingleton<PasswordHasher>();

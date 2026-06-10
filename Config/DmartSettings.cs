@@ -19,6 +19,15 @@ public sealed class DmartSettings
     // the same thing in Python dmart and csdmart.
     public int JwtAccessExpires { get; set; } = 30 * 86400;
     public int JwtRefreshDays { get; set; } = 30;
+    // Strict token_use enforcement. When true, a JWT lacking the token_use
+    // claim is rejected wherever a specific use is required (bearer auth,
+    // WebSocket auth, the OAuth refresh grant). Default false: claimless
+    // tokens minted before the 2026-06 hardening are still accepted, but
+    // each acceptance is counted and warn-logged by LegacyTokenMonitor.
+    // Flip to true once deployments stop seeing legacy-token warnings for
+    // a full JwtAccessExpires window (Python dmart, which never wrote the
+    // claim, is EOL — every current issuer tags its tokens).
+    public bool JwtRequireTokenUse { get; set; }
 
     // Full Npgsql connection string. If unset, Db builds one from the
     // individual DATABASE_* components below (matching Python's behavior
