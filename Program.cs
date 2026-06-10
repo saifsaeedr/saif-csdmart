@@ -196,6 +196,15 @@ switch (subcommand)
                              the shortname prompt. `dmart passwd` with no
                              args prompts for both shortname and password.
               check          Run health checks on a space
+                             Usage: dmart check [space] [soft|hard|all]
+                             (hard/all adds sample paths per finding)
+              fix-folder-rendering
+                             Repair legacy folder payload bodies: strip fields the
+                             canonical folder_rendering schema doesn't define, add
+                             required-but-missing fields, and widen non-empty policy
+                             arrays to cover the folder's existing children. Content
+                             is never touched. Dry-run by default.
+                             Usage: dmart fix-folder-rendering [space] [--apply]
               selfcheck      Smoke-test the running HTTP surface (login + CRUD + query)
                              Usage: dmart selfcheck [--url <url>] [--admin <name>]
                                                     [--password <pwd> | --password-stdin]
@@ -362,6 +371,56 @@ switch (subcommand)
         // three scanners (UUID dedup / owner fixup / schema violation
         // flagging).
         Environment.ExitCode = await Dmart.Cli.PreflightCommand.Run(serverArgs);
+        return;
+    }
+
+    case "fix-folder-rendering":
+    {
+        // Auto-repair legacy folder payload bodies so the strict centralized
+        // folder_rendering schema + ENFORCE_FOLDER_CONTENT_POLICY can be
+        // relied on. Dry-run by default; --apply writes. See
+        // Cli/FolderRenderingFixer.cs for the (conservative) fix rules.
+        var space = serverArgs.FirstOrDefault(a => !a.StartsWith("--", StringComparison.Ordinal));
+        var apply = serverArgs.Contains("--apply");
+        var (_, dbInst) = CliBootstrap.BuildOrExit(dotenvPath, dotenvValues);
+        var fixer = new FolderRenderingFixer(dbInst);
+        var spacesToFix = new List<string>();
+        if (!string.IsNullOrEmpty(space))
+        {
+            spacesToFix.Add(space);
+        }
+        else
+        {
+            var spaceRepo = new SpaceRepository(dbInst);
+            spacesToFix.AddRange((await spaceRepo.ListAsync()).Select(sp => sp.Shortname));
+        }
+
+        var totalPlanned = 0;
+        var totalApplied = 0;
+        foreach (var sp in spacesToFix)
+        {
+            var plan = await fixer.ScanAsync(sp);
+            foreach (var fix in plan)
+            {
+                totalPlanned++;
+                Console.WriteLine($"{sp}:{fix.Path}");
+                if (fix.RemovedFields.Count > 0)
+                    Console.WriteLine($"  - remove unknown fields: {string.Join(", ", fix.RemovedFields)}");
+                if (fix.AddedRequired.Count > 0)
+                    Console.WriteLine($"  - add required fields:   {string.Join(", ", fix.AddedRequired)} (empty)");
+                foreach (var (key, added) in fix.WidenedArrays)
+                    Console.WriteLine($"  - widen {key}: +{string.Join(", +", added)}");
+                if (fix.InvalidResourceTypes.Count > 0)
+                    Console.WriteLine($"  ! invalid resource types (NOT auto-fixed, needs operator): {string.Join(", ", fix.InvalidResourceTypes)}");
+            }
+            if (apply && plan.Any(f => f.NewBodyJson is not null))
+                totalApplied += await fixer.ApplyAsync(sp);
+        }
+        Console.WriteLine(totalPlanned == 0
+            ? "All folder bodies comply — nothing to fix."
+            : apply
+                ? $"Applied fixes to {totalApplied} folder(s)."
+                : $"{totalPlanned} folder(s) need fixing — re-run with --apply to write.");
         return;
     }
 
