@@ -23,10 +23,7 @@
     import { fetchWorkflows } from "@/lib/dmart_services";
     import { params } from "@roxi/routify";
     import { untrack } from "svelte";
-    import {
-        generateObjectFromSchema,
-        generateSchemaFromObject,
-    } from "@/utils/renderer/rendererUtils";
+    import { generateObjectFromSchema } from "@/utils/renderer/rendererUtils";
     import { jsonEditorContentParser } from "@/utils/jsonEditor";
 
     let {
@@ -429,36 +426,36 @@
         {:else}
             {#if !isCreate && mismatchedProperties.length > 0}
                 <div
-                    class="bg-yellow-50 border-l-4 border-yellow-400 p-4 my-2 w-full mx-auto dark:bg-yellow-900/20 dark:border-yellow-500"
+                    class="bg-blue-50 border-l-4 border-blue-400 p-4 my-2 w-full mx-auto dark:bg-blue-900/20 dark:border-blue-500"
                 >
                     <div class="flex">
                         <div class="ml-3">
                             <p
-                                class="text-sm text-yellow-700 font-medium dark:text-yellow-400"
+                                class="text-sm text-blue-700 font-medium dark:text-blue-400"
                             >
-                                ⚠ The current payload does not match the
-                                schema.
+                                {mismatchedProperties.length} propert{mismatchedProperties.length ===
+                                1
+                                    ? "y is"
+                                    : "ies are"} not declared in this schema.
                             </p>
-                            {#if selectedInputMode === InputMode.form}
-                                <p
-                                    class="text-sm text-yellow-600 mt-1 dark:text-yellow-300"
-                                >
-                                    The following properties will be discarded
-                                    when saving from form mode:
-                                </p>
-                                <ul
-                                    class="list-disc list-inside text-sm text-yellow-800 mt-1 dark:text-yellow-200"
-                                >
-                                    {#each mismatchedProperties as prop}
-                                        <li>
-                                            <code
-                                                class="bg-yellow-100 px-1 rounded dark:bg-yellow-800"
-                                                >{prop}</code
-                                            >
-                                        </li>
-                                    {/each}
-                                </ul>
-                            {/if}
+                            <p
+                                class="text-sm text-blue-600 mt-1 dark:text-blue-300"
+                            >
+                                They are still shown below and preserved when you
+                                save:
+                            </p>
+                            <ul
+                                class="list-disc list-inside text-sm text-blue-800 mt-1 dark:text-blue-200"
+                            >
+                                {#each mismatchedProperties as prop}
+                                    <li>
+                                        <code
+                                            class="bg-blue-100 px-1 rounded dark:bg-blue-800"
+                                            >{prop}</code
+                                        >
+                                    </li>
+                                {/each}
+                            </ul>
                         </div>
                     </div>
                 </div>
@@ -466,32 +463,16 @@
             <div class="my-2">
                 {#if resourcesWithFormAndJson.includes(selectedResourceType)}
                     {#if selectedInputMode === InputMode.form}
-                        {#if selectedSchemaContent}
-                            {#if isCreate}
-                                {#if content.json}
-                                    <DynamicSchemaBasedForms
-                                        schema={selectedSchemaContent}
-                                        bind:content={content.json}
-                                    />
-                                {/if}
-                            {:else}
+                        {#if isCreate}
+                            {#if content.json}
                                 <DynamicSchemaBasedForms
                                     schema={selectedSchemaContent}
-                                    bind:content
-                                />
-                            {/if}
-                        {:else if isCreate}
-                            {#if content.json && typeof content.json === "object" && Object.keys(content.json).length > 0}
-                                <DynamicSchemaBasedForms
-                                    schema={generateSchemaFromObject(
-                                        content.json,
-                                    )}
                                     bind:content={content.json}
                                 />
                             {/if}
-                        {:else if content && typeof content === "object" && Object.keys(content).length > 0}
+                        {:else}
                             <DynamicSchemaBasedForms
-                                schema={generateSchemaFromObject(content)}
+                                schema={selectedSchemaContent}
                                 bind:content
                             />
                         {/if}
