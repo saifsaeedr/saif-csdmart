@@ -24,6 +24,38 @@ public class FolderRenderingFixerTests : IClassFixture<DmartFactory>
     private readonly DmartFactory _factory;
     public FolderRenderingFixerTests(DmartFactory factory) => _factory = factory;
 
+    // The fixer needs the canonical schema in management (CI runs against a
+    // freshly-migrated DB that may not be seeded). Create a minimal strict one
+    // when absent; returns true when this test owns the cleanup.
+    private static async Task<bool> EnsureManagementSchemaAsync(EntryRepository entries)
+    {
+        foreach (var sub in new[] { "/schema", "/schemas" })
+            if (await entries.GetAsync("management", sub, "folder_rendering", ResourceType.Schema) is not null)
+                return false;
+
+        await entries.UpsertAsync(new Entry
+        {
+            Uuid = Guid.NewGuid().ToString(),
+            Shortname = "folder_rendering", SpaceName = "management", Subpath = "/schema",
+            ResourceType = ResourceType.Schema, IsActive = true, OwnerShortname = "dmart",
+            CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+            Payload = new Payload
+            {
+                ContentType = ContentType.Json,
+                Body = JsonDocument.Parse("""
+                    {"type":"object","additionalProperties":false,
+                     "properties":{
+                       "content_resource_types":{"type":"array","items":{"type":"string"}},
+                       "content_schema_shortnames":{"type":"array","items":{"type":"string"}},
+                       "workflow_shortnames":{"type":"array","items":{"type":"string"}},
+                       "index_attributes":{"type":"array"}},
+                     "required":["index_attributes"]}
+                    """).RootElement.Clone(),
+            },
+        });
+        return true;
+    }
+
     [FactIfPg]
     public async Task Fixer_Repairs_Legacy_Folder_Body_And_Blesses_Existing_Children()
     {
@@ -33,6 +65,7 @@ public class FolderRenderingFixerTests : IClassFixture<DmartFactory>
         var entries = sp.GetRequiredService<EntryRepository>();
         var health = sp.GetRequiredService<HealthCheckRepository>();
         var fixer = new FolderRenderingFixer(sp.GetRequiredService<Db>());
+        var seededSchema = await EnsureManagementSchemaAsync(entries);
 
         var spaceName = $"ffx_{Guid.NewGuid():N}"[..16];
         await spaces.UpsertAsync(new Space
@@ -114,6 +147,8 @@ public class FolderRenderingFixerTests : IClassFixture<DmartFactory>
         finally
         {
             try { await spaces.DeleteAsync(spaceName); } catch { }
+            if (seededSchema)
+                try { await entries.DeleteAsync("management", "/schema", "folder_rendering", ResourceType.Schema); } catch { }
         }
     }
 }
