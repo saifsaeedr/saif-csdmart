@@ -9,6 +9,20 @@ using NpgsqlTypes;
 
 namespace Dmart.DataAdapters.Sql;
 
+// One pushed INNER join, prebuilt by QueryService and consumed by
+// AppendInnerSemiJoins. RightQuery carries the right side's space/subpath/
+// filters/search (already merged with the actor's filter_fields_values);
+// limit/offset/sort are ignored (existence only). Correlations are SQL
+// expressions: LeftExpr references the OUTER row (entries.*), RightExpr the
+// inner alias (r.*). Both sides are cast to text.
+public sealed record InnerSemiJoinSpec
+{
+    public required Query RightQuery { get; init; }
+    public required string Actor { get; init; }
+    public required List<string>? RightQueryPolicies { get; init; }
+    public required List<(string LeftExpr, string RightExpr)> Correlations { get; init; }
+}
+
 // Shared query-building logic used by every repository's QueryAsync/CountQueryAsync.
 // Mirrors Python's set_sql_statement_from_query + apply_acl_and_query_policies +
 // query_aggregation. Every table in dmart shares the same Metas-base columns, so
@@ -27,8 +41,12 @@ public static class QueryHelper
 
     public static string BuildWhereClause(Query q, List<NpgsqlParameter> args, string? tableName = null)
     {
-        var sql = new System.Text.StringBuilder("space_name = $1 ");
+        // Add the param FIRST, then reference its 1-based index. For a base
+        // query (empty args) this is $1 — byte-identical to before. For a nested
+        // reuse (EXISTS semi-join, args already populated) it continues the
+        // positional sequence instead of colliding on $1.
         args.Add(new() { Value = q.SpaceName });
+        var sql = new System.Text.StringBuilder($"space_name = ${args.Count} ");
 
         // exact_subpath=true: only entries at this exact subpath (including "/").
         // exact_subpath=false + subpath="/": no filter (return all subpaths).
@@ -227,6 +245,71 @@ public static class QueryHelper
     }
 
     // ====================================================================
+    // INNER-JOIN SEMI-JOIN PUSHDOWN
+    // ====================================================================
+
+    // Join keys we can express in SQL AND that QueryService's in-memory
+    // GetValuesFromRecord reads from strongly-typed Record fields, guaranteeing
+    // the SQL text comparison matches the in-memory FormatValue comparison.
+    // Deliberately conservative: owner_shortname/slug/space_name are read from
+    // record.attributes in-memory (population not guaranteed) so they stay on
+    // the fallback path.
+    private static readonly HashSet<string> JoinMetaColumns = new(StringComparer.Ordinal)
+    {
+        "shortname", "subpath", "uuid", "resource_type",
+    };
+
+    // Map a scalar join key path to a SQL expression under `qualifier`
+    // ("entries." for the outer row, "r." for the semi-join inner row).
+    // Returns false for any path we can't safely express (→ caller falls back).
+    public static bool TryJoinKeyToSql(string path, string qualifier, out string expr)
+    {
+        expr = "";
+        if (string.IsNullOrEmpty(path)) return false;
+
+        if (JoinMetaColumns.Contains(path))
+        {
+            expr = $"({qualifier}{path})::text";
+            return true;
+        }
+
+        // Only payload paths beyond meta columns. Mirrors in-memory
+        // GetNestedFromAttributes walking attributes["payload"].body...
+        if (!path.StartsWith("payload.", StringComparison.Ordinal)) return false;
+        var dot = path["payload.".Length..];
+        if (dot.Length == 0) return false;
+        foreach (var seg in dot.Split('.'))
+            if (!SafeSortSegmentRegex.IsMatch(seg)) return false;
+
+        // qualifier+"payload" → entries.payload / r.payload; BuildJsonbPath adds ::jsonb->...->>'last'.
+        expr = BuildJsonbPath($"{qualifier}payload", dot);
+        return true;
+    }
+
+    [SuppressMessage("Security", "CA2100",
+        Justification = "Audited: correlation exprs are built only from TryJoinKeyToSql (whitelisted meta columns + segment-validated JSONB paths); all data values flow through $N params via BuildWhereClause/AppendAclFilter.")]
+    public static void AppendInnerSemiJoins(
+        System.Text.StringBuilder sql, List<NpgsqlParameter> args,
+        IReadOnlyList<InnerSemiJoinSpec> specs)
+    {
+        foreach (var spec in specs)
+        {
+            sql.Append("AND EXISTS (SELECT 1 FROM entries r WHERE ");
+            // Right-side filters. Bare columns bind to the inner `r` (it shadows
+            // the outer `entries`). BuildWhereClause is positional-param safe,
+            // so its $N continue the shared sequence.
+            sql.Append(BuildWhereClause(spec.RightQuery, args, "entries"));
+            // Right-side ACL — MANDATORY. Bare owner_shortname/acl/query_policies
+            // bind to `r`. Without this a base row could survive on a right row
+            // the caller can't query.
+            AppendAclFilter(sql, args, spec.Actor, "entries", spec.RightQueryPolicies);
+            foreach (var (leftExpr, rightExpr) in spec.Correlations)
+                sql.Append($"AND {rightExpr} = {leftExpr} ");
+            sql.Append(") ");
+        }
+    }
+
+    // ====================================================================
     // ORDER + PAGING
     // ====================================================================
 
@@ -363,7 +446,8 @@ public static class QueryHelper
         Func<NpgsqlDataReader, T> hydrate,
         CancellationToken ct,
         string? userShortname = null, string? tableName = null,
-        List<string>? queryPolicies = null)
+        List<string>? queryPolicies = null,
+        IReadOnlyList<InnerSemiJoinSpec>? semiJoins = null)
     {
         var args = new List<NpgsqlParameter>();
         var where = BuildWhereClause(q, args, tableName);
@@ -372,6 +456,11 @@ public static class QueryHelper
         // Apply ACL filtering if user info provided.
         if (userShortname is not null && tableName is not null)
             AppendAclFilter(sql, args, userShortname, tableName, queryPolicies);
+
+        // Inject INNER-join EXISTS semi-joins (filter base by existence of a
+        // matching right row) so LIMIT/OFFSET below page the post-filter set.
+        if (semiJoins is { Count: > 0 })
+            AppendInnerSemiJoins(sql, args, semiJoins);
 
         AppendOrderAndPaging(sql, q, args, tableName);
 
@@ -393,7 +482,8 @@ public static class QueryHelper
     public static async Task<int> RunCountAsync(
         Db db, string tableName, Query q,
         CancellationToken ct,
-        string? userShortname = null, List<string>? queryPolicies = null)
+        string? userShortname = null, List<string>? queryPolicies = null,
+        IReadOnlyList<InnerSemiJoinSpec>? semiJoins = null)
     {
         var args = new List<NpgsqlParameter>();
         var where = BuildWhereClause(q, args, tableName);
@@ -403,6 +493,9 @@ public static class QueryHelper
         // for attachments/histories inside AppendAclFilter (Python parity).
         if (userShortname is not null)
             AppendAclFilter(sqlBuilder, args, userShortname, tableName, queryPolicies);
+
+        if (semiJoins is { Count: > 0 })
+            AppendInnerSemiJoins(sqlBuilder, args, semiJoins);
 
         await using var conn = await db.OpenAsync(ct);
         await using var cmd = new NpgsqlCommand(sqlBuilder.ToString(), conn);

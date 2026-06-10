@@ -97,6 +97,14 @@ public sealed class DmartSettings
 
     public int MaxQueryLimit { get; set; } = 10000;
 
+    // When true (default), eligible INNER joins are pushed into SQL as a
+    // correlated EXISTS semi-join so the base query paginates/counts in the DB
+    // instead of materializing the full base set in memory. Setting false forces
+    // the in-memory filter-then-paginate fallback for every join — a zero-risk
+    // kill switch (the fallback is always correct). See
+    // docs/superpowers/specs/2026-06-10-sql-inner-join-pushdown-design.md.
+    public bool EnableInnerJoinPushdown { get; set; } = true;
+
     // Per-IP cap on auth-endpoint calls (login/otp-request) in a 60-second
     // window. Complements MaxFailedLoginAttempts (per-account) by stopping
     // username enumeration across many shortnames from one host. Bump for
