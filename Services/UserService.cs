@@ -143,8 +143,18 @@ public sealed class UserService(
         var displayname = attrs.TryGetValue("displayname", out var dn) ? ParseTranslation(dn) : null;
         var description = attrs.TryGetValue("description", out var desc) ? ParseTranslation(desc) : null;
         var payload = ExtractPayload(attrs);
-        var userType = Enum.TryParse<UserType>(ConvertToString(attrs.GetValueOrDefault("type")), ignoreCase: true, out var parsedType)
-            && parsedType != UserType.Bot ? parsedType : UserType.Web;
+        // Python parity: core.User.from_record honored a caller-supplied
+        // `type`. Public registration accepts only the benign client types;
+        // anything else (junk, numeric enum strings, omitted) defaults to web.
+        // "bot" is deliberately not honored — bot tokens bypass session
+        // validation and eviction (JwtBearerSetup.OnTokenValidated,
+        // ProcessLoginAsync), so an unauthenticated endpoint must not mint
+        // them. The managed/admin create path may still assign bot.
+        var userType = ConvertToString(attrs.GetValueOrDefault("type"))?.ToLowerInvariant() switch
+        {
+            "mobile" => UserType.Mobile,
+            _ => UserType.Web,
+        };
 
         var user = new User
         {
