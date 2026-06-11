@@ -68,6 +68,73 @@ export function generateSchemaFromObject(obj: any): any {
     return { type: "string" };
 }
 
+/**
+ * Infers a JSON-Schema type string from a runtime value. Used by the form
+ * renderer to render data props that the schema does not declare.
+ */
+export function inferType(value: any): string {
+    return generateSchemaFromObject(value).type;
+}
+
+/**
+ * Ordered union of a schema's declared property names and the keys actually
+ * present in the data object. Schema order comes first (preserving the schema's
+ * intended layout); any extra data-only keys are appended. This guarantees that
+ * every prop in the record data is rendered, even when absent from the schema.
+ */
+export function unionKeys(schema: any, value: any): string[] {
+    const keys: string[] = [];
+    const seen = new Set<string>();
+
+    if (schema && schema.properties) {
+        for (const key of Object.keys(schema.properties)) {
+            if (!seen.has(key)) {
+                seen.add(key);
+                keys.push(key);
+            }
+        }
+    }
+
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+        for (const key of Object.keys(value)) {
+            if (!seen.has(key)) {
+                seen.add(key);
+                keys.push(key);
+            }
+        }
+    }
+
+    return keys;
+}
+
+/**
+ * Builds a sensible default value for a schema node, used when adding a new
+ * array item. Objects are seeded from their properties, arrays start empty,
+ * and scalars use their declared default or a type-appropriate empty value.
+ */
+export function buildDefaultForSchema(schema: any): any {
+    if (!schema || !schema.type) {
+        // Unknown shape — claim nothing about it. The renderer falls back to
+        // a text input for null values anyway (inferType(null) === "string").
+        return null;
+    }
+    switch (schema.type) {
+        case "object":
+            return schema.properties ? (generateObjectFromSchema(schema) ?? {}) : {};
+        case "array":
+            return schema.default ?? [];
+        case "number":
+        case "integer":
+            return schema.default !== undefined ? schema.default : null;
+        case "boolean":
+            return schema.default !== undefined ? schema.default : false;
+        case "string":
+            return schema.default !== undefined ? schema.default : "";
+        default:
+            return null;
+    }
+}
+
 export function scrollToElById(elementId: string) {
     const el = document.getElementById(elementId);
     if (el) {
