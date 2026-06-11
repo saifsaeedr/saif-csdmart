@@ -143,6 +143,7 @@ public sealed class UserService(
         var displayname = attrs.TryGetValue("displayname", out var dn) ? ParseTranslation(dn) : null;
         var description = attrs.TryGetValue("description", out var desc) ? ParseTranslation(desc) : null;
         var payload = ExtractPayload(attrs);
+        var userType = Enum.TryParse<UserType>(ConvertToString(attrs.GetValueOrDefault("type")), ignoreCase: true, out var parsedType) ? parsedType : UserType.Web;
 
         var user = new User
         {
@@ -164,7 +165,7 @@ public sealed class UserService(
             Payload = payload,
             Roles = rolesList,
             Groups = groupsList,
-            Type = UserType.Web,
+            Type = userType,
             IsActive = true,
             IsEmailVerified = emailVerified,
             IsMsisdnVerified = msisdnVerified,
