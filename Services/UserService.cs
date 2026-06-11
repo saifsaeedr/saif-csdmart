@@ -143,7 +143,8 @@ public sealed class UserService(
         var displayname = attrs.TryGetValue("displayname", out var dn) ? ParseTranslation(dn) : null;
         var description = attrs.TryGetValue("description", out var desc) ? ParseTranslation(desc) : null;
         var payload = ExtractPayload(attrs);
-        var userType = Enum.TryParse<UserType>(ConvertToString(attrs.GetValueOrDefault("type")), ignoreCase: true, out var parsedType) ? parsedType : UserType.Web;
+        var userType = Enum.TryParse<UserType>(ConvertToString(attrs.GetValueOrDefault("type")), ignoreCase: true, out var parsedType)
+            && parsedType != UserType.Bot ? parsedType : UserType.Web;
 
         var user = new User
         {
