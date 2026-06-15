@@ -57,6 +57,20 @@ flowchart TD
     F -- pass --> Grant[return true]
 ```
 
+## All logged-in users: the implicit `logged_in` role
+
+Every authenticated (non-anonymous) user implicitly carries the role
+`logged_in` — `PermissionService.ResolvePermissionsAsync` appends the name to
+the user's role list (mirroring the Python SQL adapter's `get_user_roles`).
+To grant a permission to **all logged-in users**, attach it to the
+`management/roles/logged_in` role; no per-user assignment is involved.
+
+The implicit grant only resolves through an actual role row, so
+`AdminBootstrap` provisions an empty `logged_in` role on startup when one is
+missing. Bootstrap never touches an existing row — its `permissions` list
+belongs to the operator. (Contrast with `world` below, which is the
+*anonymous/public* surface, not the logged-in one.)
+
 ## Anonymous + `world`
 
 The contract is strict: for an anonymous caller to see anything at all,
