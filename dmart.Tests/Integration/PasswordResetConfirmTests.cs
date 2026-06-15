@@ -49,14 +49,16 @@ public sealed class PasswordResetConfirmTests : IClassFixture<DmartFactory>
                 DmartJsonContext.Default.PasswordResetRequest);
             reqResp.StatusCode.ShouldBe(HttpStatusCode.OK);
 
-            // Recover the OTP value the handler stored under pwd-reset:{msisdn}.
-            var code = await ReadOtpCodeAsync(msisdn);
-            code.ShouldNotBeNullOrEmpty();
+            // Codes are stored hashed, so the server-issued value can't be read
+            // back. Seed a known code at the reset key (overwriting the random
+            // one) and confirm with it — same verify+consume path.
+            const string knownOtp = "246813";
+            await SeedResetOtpAsync(msisdn, knownOtp);
 
             // 2. Confirm with the correct OTP + a valid new password.
             var confirmResp = await client.PostAsJsonAsync("/user/password-reset-confirm",
                 new PasswordResetConfirm(Shortname: shortname, Email: null, Msisdn: null,
-                    Otp: code!, Password: ValidPassword),
+                    Otp: knownOtp, Password: ValidPassword),
                 DmartJsonContext.Default.PasswordResetConfirm);
             confirmResp.StatusCode.ShouldBe(HttpStatusCode.OK);
 
@@ -68,7 +70,7 @@ public sealed class PasswordResetConfirmTests : IClassFixture<DmartFactory>
             hasher.Verify(ValidPassword, updated!.Password!).ShouldBeTrue();
 
             // OTP row must be consumed (atomic verify+delete in the repo).
-            (await ReadOtpCodeAsync(msisdn)).ShouldBeNull();
+            (await PeekResetHashAsync(msisdn)).ShouldBeNull();
         }
         finally { await CleanupAsync(shortname, email, msisdn); }
     }
@@ -88,21 +90,22 @@ public sealed class PasswordResetConfirmTests : IClassFixture<DmartFactory>
                 DmartJsonContext.Default.PasswordResetRequest);
             reqResp.StatusCode.ShouldBe(HttpStatusCode.OK);
 
-            var code = await ReadOtpCodeAsync(msisdn);
-            code.ShouldNotBeNullOrEmpty();
+            // Seed a known reset code so we can try to misuse it via login.
+            const string knownOtp = "135792";
+            await SeedResetOtpAsync(msisdn, knownOtp);
 
             // Attempt to log in with the reset code via the OTP path. Login
             // calls VerifyAndConsumeAsync(bareMsisdn, code) — that key has no
             // row, so login must fail.
             var loginResp = await client.PostAsJsonAsync("/user/login",
-                new UserLoginRequest(null, null, msisdn, null, code),
+                new UserLoginRequest(null, null, msisdn, null, knownOtp),
                 DmartJsonContext.Default.UserLoginRequest);
             loginResp.IsSuccessStatusCode.ShouldBeFalse(
                 "reset OTP at pwd-reset:{msisdn} must not authenticate a login");
 
             // The reset OTP must still be present (login's failed VerifyAndConsume
             // ran on the unrelated bare-msisdn key and didn't touch the reset row).
-            (await ReadOtpCodeAsync(msisdn)).ShouldNotBeNullOrEmpty();
+            (await PeekResetHashAsync(msisdn)).ShouldNotBeNullOrEmpty();
         }
         finally { await CleanupAsync(shortname, email, msisdn); }
     }
@@ -121,7 +124,7 @@ public sealed class PasswordResetConfirmTests : IClassFixture<DmartFactory>
                 new PasswordResetRequest(shortname, null, null),
                 DmartJsonContext.Default.PasswordResetRequest);
             first.StatusCode.ShouldBe(HttpStatusCode.OK);
-            var firstCode = await ReadOtpCodeAsync(msisdn);
+            var firstCode = await PeekResetHashAsync(msisdn);
             firstCode.ShouldNotBeNullOrEmpty();
 
             // Second call within the default 60s cooldown — must return 200
@@ -132,7 +135,7 @@ public sealed class PasswordResetConfirmTests : IClassFixture<DmartFactory>
                 DmartJsonContext.Default.PasswordResetRequest);
             second.StatusCode.ShouldBe(HttpStatusCode.OK);
 
-            var secondCode = await ReadOtpCodeAsync(msisdn);
+            var secondCode = await PeekResetHashAsync(msisdn);
             secondCode.ShouldBe(firstCode, "cooldown must be a true no-op — same OTP code persists");
         }
         finally { await CleanupAsync(shortname, email, msisdn); }
@@ -161,7 +164,7 @@ public sealed class PasswordResetConfirmTests : IClassFixture<DmartFactory>
 
             // The reset OTP must remain available (VerifyAndConsumeAsync only
             // deletes on success).
-            (await ReadOtpCodeAsync(msisdn)).ShouldNotBeNullOrEmpty();
+            (await PeekResetHashAsync(msisdn)).ShouldNotBeNullOrEmpty();
         }
         finally { await CleanupAsync(shortname, email, msisdn); }
     }
@@ -192,13 +195,15 @@ public sealed class PasswordResetConfirmTests : IClassFixture<DmartFactory>
             await client.PostAsJsonAsync("/user/password-reset-request",
                 new PasswordResetRequest(shortname, null, null),
                 DmartJsonContext.Default.PasswordResetRequest);
-            var code = await ReadOtpCodeAsync(msisdn);
-            code.ShouldNotBeNullOrEmpty();
+            // Password-rule failure runs before the OTP probe, so the exact code
+            // is irrelevant — seed a known one to satisfy "an OTP is pending".
+            const string knownOtp = "112358";
+            await SeedResetOtpAsync(msisdn, knownOtp);
 
             // 4 chars, no digit, no uppercase — fails the regex on multiple counts.
             var resp = await client.PostAsJsonAsync("/user/password-reset-confirm",
                 new PasswordResetConfirm(Shortname: shortname, Email: null, Msisdn: null,
-                    Otp: code!, Password: "weak"),
+                    Otp: knownOtp, Password: "weak"),
                 DmartJsonContext.Default.PasswordResetConfirm);
             resp.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
             var body = await resp.Content.ReadAsStringAsync();
@@ -206,7 +211,7 @@ public sealed class PasswordResetConfirmTests : IClassFixture<DmartFactory>
 
             // Password-rule failure runs before the OTP probe, so the reset
             // row must still be present.
-            (await ReadOtpCodeAsync(msisdn)).ShouldNotBeNullOrEmpty();
+            (await PeekResetHashAsync(msisdn)).ShouldNotBeNullOrEmpty();
         }
         finally { await CleanupAsync(shortname, email, msisdn); }
     }
@@ -221,7 +226,7 @@ public sealed class PasswordResetConfirmTests : IClassFixture<DmartFactory>
         try
         {
             // Sanity: no OTP exists for this user.
-            (await ReadOtpCodeAsync(msisdn)).ShouldBeNull();
+            (await PeekResetHashAsync(msisdn)).ShouldBeNull();
 
             var client = _factory.CreateClient();
             var resp = await client.PostAsJsonAsync("/user/password-reset-confirm",
@@ -282,10 +287,23 @@ public sealed class PasswordResetConfirmTests : IClassFixture<DmartFactory>
 
     // ---- helpers ----
 
-    private async Task<string?> ReadOtpCodeAsync(string dest)
+    // Returns the stored (hashed) reset OTP at pwd-reset:{dest}, or null when
+    // none is pending. Codes are stored hashed, so this is the HMAC — used only
+    // for presence/consumed assertions and for the cooldown no-op check (the
+    // deterministic hash is identical iff the underlying code is unchanged).
+    private async Task<string?> PeekResetHashAsync(string dest)
     {
         var repo = _factory.Services.GetRequiredService<OtpRepository>();
-        return await repo.GetCodeAsync(ResetPrefix + dest);
+        return await repo.PeekStoredHashAsync(ResetPrefix + dest);
+    }
+
+    // Seeds a KNOWN reset code at pwd-reset:{dest}. Because codes are stored
+    // hashed, a test can't read back a server-issued code to submit it — it
+    // seeds its own and submits that, exercising the real verify+consume path.
+    private async Task SeedResetOtpAsync(string dest, string code)
+    {
+        var repo = _factory.Services.GetRequiredService<OtpRepository>();
+        await repo.StoreAsync(ResetPrefix + dest, code, DateTime.UtcNow.AddMinutes(5));
     }
 
     private async Task<(string Shortname, string Email, string Msisdn)> CreateUserAsync(bool withMsisdn)
