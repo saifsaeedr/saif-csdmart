@@ -1830,6 +1830,8 @@ builder.Services.AddSingleton<SmtpSender>();
 builder.Services.AddSingleton<PasswordHasher>();
 builder.Services.AddSingleton<SessionTokenHasher>(sp =>
     new SessionTokenHasher(sp.GetRequiredService<IOptions<DmartSettings>>().Value));
+builder.Services.AddSingleton<OtpHasher>(sp =>
+    new OtpHasher(sp.GetRequiredService<IOptions<DmartSettings>>().Value));
 builder.Services.AddSingleton<OtpProvider>();
 builder.Services.AddSingleton<Dmart.Auth.OAuth.GoogleProvider>();
 builder.Services.AddSingleton<Dmart.Auth.OAuth.FacebookProvider>();

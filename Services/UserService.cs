@@ -94,8 +94,10 @@ public sealed class UserService(
         {
             if (s.IsOtpForCreateRequired)
             {
-                var stored = await otp.GetCodeAsync(msisdn, ct);
-                if (stored is null || stored != msisdnOtp)
+                // Peek-verify (no consume): codes are stored hashed, so we hand
+                // the candidate to the repo and it compares hashes — we can't
+                // fetch the plaintext to compare ourselves anymore.
+                if (!await otp.VerifyPeekAsync(msisdn, msisdnOtp ?? "", ct))
                     return Result<(User, string, string)>.Fail(
                         InternalErrorCode.SESSION, "Invalid MSISDN OTP", ErrorTypes.Create);
             }
@@ -105,8 +107,7 @@ public sealed class UserService(
         {
             if (s.IsOtpForCreateRequired)
             {
-                var stored = await otp.GetCodeAsync(email, ct);
-                if (stored is null || stored != emailOtp)
+                if (!await otp.VerifyPeekAsync(email, emailOtp ?? "", ct))
                     return Result<(User, string, string)>.Fail(
                         InternalErrorCode.SESSION, "Invalid Email OTP", ErrorTypes.Create);
             }
@@ -172,6 +173,14 @@ public sealed class UserService(
             UpdatedAt = TimeUtils.Now(),
         };
         await users.UpsertAsync(user, ct);
+
+        // Consume the OTP(s) used to verify this registration now that the
+        // account exists, so a still-valid code can't be replayed afterwards
+        // (e.g. against /user/otp-confirm). Only the supplied channels are
+        // cleared; DeleteAsync is a no-op when nothing was stored (e.g. when
+        // is_otp_for_create_required=false).
+        if (!string.IsNullOrEmpty(email)) await otp.DeleteAsync(email, ct);
+        if (!string.IsNullOrEmpty(msisdn)) await otp.DeleteAsync(msisdn, ct);
 
         // Auto-login (Python: process_user_login at the end of create_user).
         var access = jwt.IssueAccess(user.Shortname, user.Roles, user.Type);
@@ -300,6 +309,7 @@ public sealed class UserService(
                 InternalErrorCode.OTP_NEEDED, "New device detected, login with otp", "auth");
         }
 
+        if (RejectIfContactUnverified(user, req) is { } unverifiedReject) return unverifiedReject;
         return await ProcessLoginAsync(user, req, requestHeaders, ct);
     }
 
@@ -368,6 +378,7 @@ public sealed class UserService(
                     InternalErrorCode.PASSWORD_NOT_VALIDATED, "Invalid username or password", ErrorTypes.Auth);
         }
 
+        if (RejectIfContactUnverified(user, req) is { } unverifiedReject) return unverifiedReject;
         return await ProcessLoginAsync(user, req, requestHeaders, ct);
     }
 
@@ -387,6 +398,28 @@ public sealed class UserService(
             ? null
             : Result<(string, string, User)>.Fail(
                 InternalErrorCode.USER_ACCOUNT_LOCKED, "Account has been locked.", ErrorTypes.Auth);
+
+    // Channel-specific verification gate applied to BOTH login methods
+    // (password + OTP): a login via email requires is_email_verified, via
+    // msisdn requires is_msisdn_verified, while a shortname login carries no
+    // verification requirement (the identifier isn't a contact channel).
+    // Callers invoke this AFTER the credential check succeeds so an
+    // unauthenticated caller can't turn it into a verification oracle.
+    private static Result<(string Access, string Refresh, User User)>? RejectIfContactUnverified(
+        User user, UserLoginRequest req)
+    {
+        // Channel follows the same precedence ResolveUserAsync uses to pick the
+        // user (shortname > email > msisdn): a shortname login carries no
+        // verification requirement even if the body also echoes an email/msisdn.
+        if (!string.IsNullOrEmpty(req.Shortname)) return null;
+        if (!string.IsNullOrEmpty(req.Email) && !user.IsEmailVerified)
+            return Result<(string, string, User)>.Fail(
+                InternalErrorCode.USER_ISNT_VERIFIED, "Email is not verified.", ErrorTypes.Auth);
+        if (!string.IsNullOrEmpty(req.Msisdn) && !user.IsMsisdnVerified)
+            return Result<(string, string, User)>.Fail(
+                InternalErrorCode.USER_ISNT_VERIFIED, "MSISDN is not verified.", ErrorTypes.Auth);
+        return null;
+    }
 
     // Mirrors RejectIfNotActive but for the auto-lockout counter — surfaces
     // USER_ACCOUNT_LOCKED before any credential check so a correct credential
@@ -426,6 +459,32 @@ public sealed class UserService(
             InternalErrorCode.USER_ACCOUNT_LOCKED,
             "Account has been locked due to too many failed login attempts.",
             ErrorTypes.Auth), user);
+    }
+
+    // Read-style "is this account locked?" check for gates that are NOT
+    // themselves login attempts (currently /user/otp-request when a JWT is
+    // present). Uses the same "locked" determination as /user/login —
+    // attempt-counter lock honoring the cool-down auto-unlock, or a deactivated
+    // account (IsActive==false) — but, unlike RejectIfAttemptLockedAsync, it
+    // does NOT refresh the cool-down anchor, because merely requesting an OTP is
+    // not a failed login attempt and shouldn't extend a lockout window.
+    public async Task<bool> IsLockedAsync(User user, CancellationToken ct = default)
+    {
+        var maxAttempts = settings.Value.MaxFailedLoginAttempts;
+        if (maxAttempts > 0 && user.AttemptCount is int count && count >= maxAttempts)
+        {
+            var cooldown = settings.Value.LockoutCooldownSeconds;
+            if (cooldown > 0 && user.LastFailedLogin is DateTime lastFailed
+                && (TimeUtils.Now() - lastFailed).TotalSeconds > cooldown)
+            {
+                // Cool-down elapsed → auto-unlock, mirroring RejectIfAttemptLockedAsync.
+                await users.UnlockAfterCooldownAsync(user.Shortname, ct);
+                return false;
+            }
+            return true; // attempt-locked, cool-down still in effect (or no anchor set)
+        }
+        // Not attempt-locked → a manually deactivated account is still locked.
+        return !user.IsActive;
     }
 
     // Public wrapper around the private failed-attempt counter so out-of-class
@@ -667,8 +726,7 @@ public sealed class UserService(
                 if (string.IsNullOrEmpty(emailOtp))
                     return Result<User>.Fail(InternalErrorCode.SESSION,
                         "Email OTP is required to update your email", ErrorTypes.Create);
-                var storedOtp = await otp.GetCodeAsync(newEmail, ct);
-                if (storedOtp is null || storedOtp != emailOtp)
+                if (!await otp.VerifyPeekAsync(newEmail, emailOtp, ct))
                     return Result<User>.Fail(InternalErrorCode.SESSION,
                         "Invalid Email OTP", ErrorTypes.Create);
                 var collision = await users.GetByEmailAsync(newEmail, ct);
@@ -690,8 +748,7 @@ public sealed class UserService(
             if (string.IsNullOrEmpty(msisdnOtp))
                 return Result<User>.Fail(InternalErrorCode.SESSION,
                     "MSISDN OTP is required to update your msisdn", ErrorTypes.Create);
-            var storedOtp = await otp.GetCodeAsync(newMsisdn, ct);
-            if (storedOtp is null || storedOtp != msisdnOtp)
+            if (!await otp.VerifyPeekAsync(newMsisdn, msisdnOtp, ct))
                 return Result<User>.Fail(InternalErrorCode.SESSION,
                     "Invalid MSISDN OTP", ErrorTypes.Create);
             var collision = await users.GetByMsisdnAsync(newMsisdn, ct);
