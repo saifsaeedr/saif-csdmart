@@ -1856,6 +1856,7 @@ builder.Services.AddSingleton<Dmart.Api.Mcp.McpSessionStore>();
 builder.Services.AddSingleton<EmbeddingProvider>();
 builder.Services.AddSingleton<SemanticSearchService>();
 builder.Services.AddSingleton<SemanticIndexerService>();
+builder.Services.AddSingleton<ReindexJobTracker>();
 builder.Services.AddSingleton<IApiPlugin, DbSizeInfoPlugin>();
 
 // Native .so plugins from ~/.dmart/plugins/ — no rebuild needed.

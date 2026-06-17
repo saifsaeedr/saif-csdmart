@@ -56,15 +56,27 @@ public sealed class SemanticIndexerService(
         }
     }
 
+    // Returns null if embeddings are ready, or an error string if not.
+    // Used by the handler for a quick pre-flight before firing off the background job.
+    public async Task<string?> CheckEnabledAsync(CancellationToken ct = default)
+    {
+        if (await embeddings.IsEnabledAsync(ct)) return null;
+        return embeddings.IsProviderConfigured
+            ? "pgvector extension not installed"
+            : "EMBEDDING_API_URL not configured";
+    }
+
     // Bulk reindex. When spaceName is null, walks every space (the
     // semantic_indexer plugin's shipped filters cover __all_spaces__). When
     // spaceName is set, walks only that one. Per-space activation lists
     // are gone — scope is governed by the plugin's own filters block.
+    // stats is supplied by the caller (ReindexJobTracker) so live progress is
+    // visible to concurrent status reads. Pass null to get a fresh local object.
     public async Task<ReindexStats> ReindexAllAsync(
         string? spaceName, bool onlyMissing, int? maxPerSpace,
-        CancellationToken ct = default)
+        CancellationToken ct = default, ReindexStats? stats = null)
     {
-        var stats = new ReindexStats();
+        stats ??= new ReindexStats();
         if (!await embeddings.IsEnabledAsync(ct))
         {
             stats.Error = embeddings.IsProviderConfigured
