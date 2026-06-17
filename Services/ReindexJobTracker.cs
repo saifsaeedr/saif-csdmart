@@ -38,9 +38,12 @@ public sealed class ReindexJobTracker
 
     public bool IsRunning => _running == 1;
 
-    public (ReindexStats Stats, string Space, DateTimeOffset StartedAt)? GetRunningStatus()
+    public (ReindexStats Stats, string Space, DateTimeOffset StartedAt)? RunningStatus
     {
-        if (_running == 0 || _stats is null) return null;
-        return (_stats, _space ?? "__all__", _startedAt);
+        get
+        {
+            if (_running == 0 || _stats is null) return null;
+            return (_stats, _space ?? "__all__", _startedAt);
+        }
     }
 }

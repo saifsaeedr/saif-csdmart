@@ -89,7 +89,7 @@ public static class ReindexEmbeddingsHandler
             if (liveStats is null)
             {
                 // A job is already running — return its live progress instead of an error.
-                var running = tracker.GetRunningStatus();
+                var running = tracker.RunningStatus;
                 return Response.Ok(attributes: new()
                 {
                     ["status"]     = "already_running",
