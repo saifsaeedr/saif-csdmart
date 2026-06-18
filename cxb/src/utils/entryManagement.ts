@@ -76,15 +76,12 @@ export async function saveEntry(
         };
     }
 
-    if (resource_type === ResourceType.user && (content.password === null || (content.password && content.password.startsWith("$argon2id")) || content.password === '')) {
+    if (resource_type === ResourceType.user) {
+        // Admin UI does not set passwords — /managed/request rejects them. Strip
+        // any password/old_password (a loaded $argon2id hash or a stale field) so
+        // the update never carries one; users set their own via OTP / reset.
         delete content.password;
-    }
-
-    if (content.password && content.password !== '') {
-        if (!content.old_password) {
-            showToast(Level.warn, `Old password is required for password change`);
-            return { success: false, errorMessage: "Old password is required for password change" };
-        }
+        delete content.old_password;
     }
 
     if (originalJeContent) {

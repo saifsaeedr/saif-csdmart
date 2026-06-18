@@ -32,7 +32,6 @@
     formData = {
         ...formData,
         email: formData.email || null,
-        password: formData.password || null,
         msisdn: formData.msisdn || null,
         is_email_verified: formData.is_email_verified || false,
         is_msisdn_verified: formData.is_msisdn_verified || false,
@@ -45,16 +44,13 @@
         google_id: formData.google_id || null,
         facebook_id: formData.facebook_id || null,
         apple_id: formData.apple_id || null,
-        social_avatar_url: formData.social_avatar_url || null
+        social_avatar_url: formData.social_avatar_url || null,
+        // Admin UI never sets passwords (/managed/request rejects them); force
+        // these undefined so neither a loaded $argon2id hash nor a typed value is
+        // ever sent. Users set their own password via login OTP / password reset.
+        password: undefined,
+        old_password: undefined
     }
-
-    $effect(() => {
-        if (!isCreate) {
-            formData.old_password = formData.old_password || null;
-        } else {
-            delete formData.old_password;
-        }
-    });
 
     const userTypeOptions = ["bot", "mobile", "web", "admin", "api"]
         .map(type => ({ name: type.charAt(0).toUpperCase() + type.slice(1), value: type }));
@@ -210,39 +206,6 @@
         <h2 class="section-title">User Information</h2>
 
         <form bind:this={form} class="form-body">
-            {#if !isCreate}
-                <div class="field-group">
-                    <label for="old_password" class="field-label">
-                        <span class="required">*</span>Old Password
-                    </label>
-                    <input
-                        required
-                        id="old_password"
-                        type="password"
-                        class="input-field"
-                        placeholder="••••••••"
-                        bind:value={formData.old_password}
-                        minlength={8}
-                    />
-                </div>
-            {/if}
-
-            <div class="field-group">
-                <label for="password" class="field-label">
-                    <span class="required">*</span>New Password
-                </label>
-                <input
-                    required
-                    id="password"
-                    type="password"
-                    class="input-field"
-                    placeholder="••••••••"
-                    bind:value={formData.password}
-                    minlength={8}
-                />
-                <p class="field-help">Minimum 8 characters</p>
-            </div>
-
             <div class="field-group">
                 <label for="email" class="field-label">Email</label>
                 <input

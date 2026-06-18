@@ -630,7 +630,12 @@
       const _metaContent = $state.snapshot(metaContent);
       const shortname = _metaContent.shortname;
       delete _metaContent.shortname;
-      
+      // Admin UI does not set passwords — /managed/request rejects them. Strip
+      // both so neither create nor update ever sends one; users set their own
+      // password via login OTP / password reset.
+      delete _metaContent.password;
+      delete _metaContent.old_password;
+
       if (isEditingUserMode) {
         const response = await Dmart.request({
           space_name: "management",
