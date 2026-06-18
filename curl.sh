@@ -48,6 +48,10 @@ SPACE="${DMART_TEST_SPACE:-dummy}"
 SHORTNAME="97326c47"
 SUBPATH="posts"
 CT="Content-Type: application/json"
+# OTP code the smoke server's mocked email channel returns (MOCK_SMTP_API=true,
+# code = MOCK_OTP_CODE). Used by the limited-user OTP login below, since #96
+# means admin-provisioned users have no password.
+MOCK_OTP="${MOCK_OTP_CODE:-123456}"
 
 # ----------------------------------------------------------------------------
 # Per-run scratch dir for the inlined sample files. dmart's curl.sh references
@@ -534,7 +538,7 @@ expect_success "Reload security data:" "$RESP"
 # 21. Create / reset / delete a user via /managed/request
 # ============================================================================
 RESP=$(curl -s -H "$AUTH_HEADER" -H "$CT" \
-    -d "{\"space_name\":\"management\",\"request_type\":\"create\",\"records\":[{\"resource_type\":\"user\",\"subpath\":\"users\",\"shortname\":\"distributor\",\"attributes\":{\"roles\":[\"test_role\"],\"msisdn\":\"7895412658\",\"email\":\"distributor@example.local\",\"password\":\"Hunter22hunter\",\"is_active\":true}}]}" \
+    -d "{\"space_name\":\"management\",\"request_type\":\"create\",\"records\":[{\"resource_type\":\"user\",\"subpath\":\"users\",\"shortname\":\"distributor\",\"attributes\":{\"roles\":[\"test_role\"],\"msisdn\":\"7895412658\",\"email\":\"distributor@example.local\",\"is_active\":true}}]}" \
     "$API_URL/managed/request")
 expect_success "Create user from admin:" "$RESP"
 
@@ -1202,12 +1206,14 @@ SETUP2=$(curl -s -H "$CT" -H "$AUTH_HEADER" "$API_URL/managed/request" -d "{
     \"attributes\":{\"is_active\":true,\"permissions\":[\"$LPERM\"]}
   }]
 }")
-# Create user with that role
+# Create user with that role. #96: the managed path no longer accepts a
+# password, so the user is provisioned passwordless with a verified email and
+# logs in via OTP below.
 SETUP3=$(curl -s -H "$CT" -H "$AUTH_HEADER" "$API_URL/managed/request" -d "{
   \"space_name\":\"management\",\"request_type\":\"create\",\"records\":[{
     \"resource_type\":\"user\",\"subpath\":\"/users\",\"shortname\":\"$LUSER\",
     \"attributes\":{
-      \"is_active\":true,\"password\":\"Test1234\",
+      \"is_active\":true,\"email\":\"$LUSER@example.local\",\"is_email_verified\":true,
       \"roles\":[\"$LROLE\"],\"type\":\"web\"
     }
   }]
@@ -1221,8 +1227,11 @@ fi
 # Reload security data so the new permission/role/user are visible
 curl -s -H "$AUTH_HEADER" "$API_URL/managed/reload-security-data" > /dev/null 2>&1
 
-# Login as limited user
-LTOKEN=$(curl -s -H "$CT" "$API_URL/user/login" -d "{\"shortname\":\"$LUSER\",\"password\":\"Test1234\"}" | jq -r '.records[0].attributes.access_token // empty')
+# Login as the limited user via OTP (#96: admin-provisioned users have no
+# password). Request a login OTP — the smoke server's mocked email channel
+# returns MOCK_OTP — then log in with it.
+curl -s -H "$CT" "$API_URL/user/otp-request-login" -d "{\"email\":\"$LUSER@example.local\"}" > /dev/null
+LTOKEN=$(curl -s -H "$CT" "$API_URL/user/login" -d "{\"email\":\"$LUSER@example.local\",\"otp\":\"$MOCK_OTP\"}" | jq -r '.records[0].attributes.access_token // empty')
 LAUTH="Authorization: Bearer $LTOKEN"
 
 # 66. Limited user: spaces query returns permitted spaces

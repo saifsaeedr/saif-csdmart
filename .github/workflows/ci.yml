@@ -99,6 +99,12 @@ jobs:
           BUILD_DIR="bin/Release/net10.0"
           # config.env already populated in the "Copy host config" step.
           cp config.env "$BUILD_DIR/"
+          # #96: admin-provisioned users are passwordless and authenticate via
+          # OTP. The smoke "Limited user" flow logs in with the mock OTP code, so
+          # the smoke server must mock email-OTP delivery (code = MOCK_OTP_CODE,
+          # default 123456). Scoped to the smoke server's copy only — the unit /
+          # integration test step's config is left untouched.
+          echo 'MOCK_SMTP_API=true' >> "$BUILD_DIR/config.env"
           # Start server from the build output directory (apphost
           # finds its DLL + deps next to itself). BACKEND_ENV points at
           # the copied-in config.env explicitly — the cwd lookup that
