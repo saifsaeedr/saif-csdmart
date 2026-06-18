@@ -77,11 +77,12 @@ public sealed class SemanticIndexerService(
         CancellationToken ct = default, ReindexStats? stats = null)
     {
         stats ??= new ReindexStats();
-        if (!await embeddings.IsEnabledAsync(ct))
+        // Same gate the endpoint pre-flights with (CheckEnabledAsync) so the
+        // disabled-embeddings error string has a single source of truth.
+        var enabledError = await CheckEnabledAsync(ct);
+        if (enabledError is not null)
         {
-            stats.Error = embeddings.IsProviderConfigured
-                ? "pgvector extension not installed"
-                : "EMBEDDING_API_URL not configured";
+            stats.Error = enabledError;
             return stats;
         }
 
