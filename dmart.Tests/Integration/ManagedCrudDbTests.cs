@@ -131,7 +131,8 @@ public class ManagedCrudDbTests : IClassFixture<DmartFactory>
                     Shortname = shortname,
                     Attributes = new()
                     {
-                        ["password"] = "Pa55word!",
+                        // No "password" here: /managed/request rejects user-password
+                        // writes (#96). This test only exercises payload handling.
                         ["roles"] = JsonSerializer.SerializeToElement(Array.Empty<string>()),
                         ["msisdn"] = "9645" + Random.Shared.Next(1_000_000, 9_999_999).ToString(),
                     },
