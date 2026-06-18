@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text;
 using Dmart.Auth;
 using Dmart.DataAdapters.Sql;
 using Dmart.Models.Api;
@@ -108,7 +109,91 @@ public sealed class LoginVerifiedGateTests : IClassFixture<DmartFactory>
         finally { await DeleteUserAsync(shortname); }
     }
 
+    [FactIfPg]
+    public async Task AdminCreated_User_Defaults_Unverified_And_Is_Blocked_On_Email_Login()
+    {
+        // The realistic installed-base trigger the seed-based tests above don't
+        // cover: an admin creating a user via /managed/request does NOT pass
+        // is_email_verified, so RequestHandler defaults it to false. Such a user
+        // must then be blocked on email login by the verification gate — this is
+        // the behavior change that can lock out existing admin-provisioned users,
+        // pinned here end-to-end through the real create path.
+        var admin = await _factory.CreateLoggedInUserAsync();
+        string? shortname = null;
+        try
+        {
+            var created = await CreateUserViaManagedAsync(admin.Client, emailVerified: false);
+            shortname = created.Shortname;
+
+            // Document the default: the managed create path leaves email unverified.
+            var users = _factory.Services.GetRequiredService<UserRepository>();
+            (await users.GetByShortnameAsync(shortname))!.IsEmailVerified.ShouldBeFalse(
+                "managed/admin create must default is_email_verified to false");
+
+            // Correct password → credential check passes → the gate (which runs
+            // only after credentials) is what rejects the login.
+            var resp = await Login(new UserLoginRequest(null, created.Email, null, Password, null));
+            resp.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+            var body = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
+            body!.Status.ShouldBe(Status.Failed);
+            body.Error!.Code.ShouldBe(InternalErrorCode.USER_ISNT_VERIFIED);
+        }
+        finally
+        {
+            if (shortname is not null) await DeleteUserAsync(shortname);
+            await admin.Cleanup();
+        }
+    }
+
+    [FactIfPg]
+    public async Task AdminCreated_User_With_IsEmailVerified_Can_Email_Login()
+    {
+        // Positive control through the same managed path: when the admin sets
+        // is_email_verified=true, email login succeeds. Proves it's the flag —
+        // not the managed-create path itself — that gates the negative case.
+        var admin = await _factory.CreateLoggedInUserAsync();
+        string? shortname = null;
+        try
+        {
+            var created = await CreateUserViaManagedAsync(admin.Client, emailVerified: true);
+            shortname = created.Shortname;
+
+            var resp = await Login(new UserLoginRequest(null, created.Email, null, Password, null));
+            resp.StatusCode.ShouldBe(HttpStatusCode.OK);
+            (await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response))!
+                .Status.ShouldBe(Status.Success);
+        }
+        finally
+        {
+            if (shortname is not null) await DeleteUserAsync(shortname);
+            await admin.Cleanup();
+        }
+    }
+
     // ---- helpers ----
+
+    // Creates a Web user through the real admin path (POST /managed/request,
+    // resource_type=user) using an authenticated super-admin client. Mirrors the
+    // payload shape ManagedRequestCreateResponseTests drives. is_email_verified
+    // is only sent when emailVerified is true, so the false case exercises the
+    // RequestHandler default (the installed-base scenario under test).
+    private async Task<(string Shortname, string Email)> CreateUserViaManagedAsync(
+        HttpClient admin, bool emailVerified)
+    {
+        var shortname = $"agate_{Guid.NewGuid():N}"[..16];
+        var email = $"{shortname}@x.y";
+        var verifiedAttr = emailVerified ? ",\"is_email_verified\":true" : "";
+        var bodyJson = "{\"space_name\":\"management\",\"request_type\":\"create\",\"records\":[" +
+            "{\"resource_type\":\"user\",\"shortname\":\"" + shortname + "\",\"subpath\":\"/users\"," +
+            "\"attributes\":{\"email\":\"" + email + "\",\"password\":\"" + Password + "\""
+            + verifiedAttr + "}}]}";
+        var resp = await admin.PostAsync("/managed/request",
+            new StringContent(bodyJson, Encoding.UTF8, "application/json"));
+        resp.StatusCode.ShouldBe(HttpStatusCode.OK);
+        (await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response))!
+            .Status.ShouldBe(Status.Success);
+        return (shortname, email);
+    }
 
     private Task<HttpResponseMessage> Login(UserLoginRequest req) =>
         _factory.CreateClient().PostAsJsonAsync("/user/login", req, DmartJsonContext.Default.UserLoginRequest);
