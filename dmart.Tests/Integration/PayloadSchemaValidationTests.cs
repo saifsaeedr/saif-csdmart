@@ -199,4 +199,55 @@ public sealed class PayloadSchemaValidationTests : IClassFixture<DmartFactory>
             try { await users.DeleteAsync(shortname); } catch { }
         }
     }
+
+    [FactIfPg]
+    public async Task ManagedRequest_Update_User_With_Valid_Payload_Succeeds()
+    {
+        // Control: a schema-conforming update must still be accepted, so the gate
+        // rejects only genuine violations rather than blocking every user update.
+        var schema = await SeedSchemaAsync();
+        var admin = await _factory.CreateLoggedInUserAsync();
+        var users = _factory.Services.GetRequiredService<UserRepository>();
+        var shortname = $"itestu{Guid.NewGuid():N}"[..14];
+        try
+        {
+            await users.UpsertAsync(new User
+            {
+                Uuid = Guid.NewGuid().ToString(),
+                Shortname = shortname,
+                SpaceName = "management",
+                Subpath = "/users",
+                OwnerShortname = "dmart",
+                IsActive = true,
+                Language = Language.En,
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            });
+
+            var body =
+                "{\"space_name\":\"management\",\"request_type\":\"update\",\"records\":[{" +
+                "\"resource_type\":\"user\",\"subpath\":\"users\",\"shortname\":\"" + shortname + "\"," +
+                "\"attributes\":{\"payload\":{\"content_type\":\"json\"," +
+                "\"schema_shortname\":\"" + schema + "\",\"body\":{\"age\":42}}}}]}";
+            var resp = await admin.Client.PostAsync("/managed/request",
+                new StringContent(body, Encoding.UTF8, "application/json"));
+            var raw = await resp.Content.ReadAsStringAsync();
+            var result = JsonSerializer.Deserialize(raw, DmartJsonContext.Default.Response);
+
+            result!.Status.ShouldBe(Status.Success, $"valid update payload must be accepted; got: {raw}");
+
+            // The patch-declared schema must actually be persisted on the merged
+            // payload (MergeBody honoring schema_shortname), and the body applied.
+            var stored = await users.GetByShortnameAsync(shortname);
+            stored.ShouldNotBeNull();
+            stored!.Payload.ShouldNotBeNull();
+            stored.Payload!.SchemaShortname.ShouldBe(schema);
+            stored.Payload!.Body!.Value.GetProperty("age").GetInt32().ShouldBe(42);
+        }
+        finally
+        {
+            await admin.Cleanup();
+            try { await users.DeleteAsync(shortname); } catch { }
+        }
+    }
 }

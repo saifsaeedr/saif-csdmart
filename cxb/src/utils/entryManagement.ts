@@ -33,6 +33,14 @@ function stripUnchangedEmptyStrings(current: any, original: any): void {
             delete current[key];
         } else if (value && typeof value === "object" && !Array.isArray(value)) {
             stripUnchangedEmptyStrings(value, orig[key]);
+            // A nested object the strip emptied entirely (every prop was an
+            // unchanged empty) and that the original never carried is a spurious
+            // {} — drop it too, so editing a never-filled nested group doesn't
+            // write an empty object. A genuine change keeps at least one prop,
+            // so this only fires on no-op subtrees.
+            if (orig[key] === undefined && Object.keys(value).length === 0) {
+                delete current[key];
+            }
         }
     }
 }

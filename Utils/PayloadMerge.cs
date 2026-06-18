@@ -50,11 +50,14 @@ public static class PayloadMerge
         };
     }
 
-    // Lowercase wire tokens ("json"/"text"/"markdown"/"html") map onto the
-    // ContentType enum case-insensitively; anything unrecognized defaults to JSON,
-    // mirroring RequestHandler.ParseContentType so create and update agree.
-    private static ContentType ParseContentType(string value)
-        => Enum.TryParse<ContentType>(value, ignoreCase: true, out var ct) ? ct : ContentType.Json;
+    // Single source of truth for the wire `content_type` token → ContentType enum
+    // mapping. Lowercase tokens ("json"/"text"/"markdown"/"html", and any other
+    // enum member) map case-insensitively; null or anything unrecognized defaults
+    // to JSON. Shared by the create path (RequestHandler.ParsePayloadFromAttrs) and
+    // the update path (MergeBody) so the two can't disagree.
+    internal static ContentType ParseContentType(string? value)
+        => value is not null && Enum.TryParse<ContentType>(value, ignoreCase: true, out var ct)
+            ? ct : ContentType.Json;
 
     // Pull `payload.body` out of a request's `attributes["payload"]` value, which may
     // arrive as a JsonElement (source-gen JSON) or a Dictionary<string,object>.
