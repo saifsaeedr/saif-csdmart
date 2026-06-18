@@ -1,5 +1,4 @@
 using System.Text.Json;
-using Dmart.Auth;
 using Dmart.Config;
 using Dmart.DataAdapters.Sql;
 using Dmart.Models.Api;
@@ -29,7 +28,7 @@ public static class RequestHandler
         g.MapPost("/request",
             async Task<Response> (HttpRequest httpReq, EntryService entries, UserRepository users,
                                   AccessRepository access, SpaceRepository spaces,
-                                  AttachmentRepository attachments, PasswordHasher hasher,
+                                  AttachmentRepository attachments,
                                   Plugins.PluginManager plugins, PermissionService perms,
                                   UniquenessValidator uniqueness,
                                   FolderContentValidator folderContent,
@@ -152,7 +151,7 @@ public static class RequestHandler
                     {
                         var (resp, updated, diff) = await DispatchUpdateAsync(
                             rec, req.SpaceName, actor,
-                            entries, users, access, spaces, attachments, hasher, perms, uniqueness,
+                            entries, users, access, spaces, attachments, perms, uniqueness,
                             schemas, history, ct);
                         result = (resp, updated);
                         updateDiff = diff;
@@ -165,7 +164,7 @@ public static class RequestHandler
                                 await RetryOnShortnameCollisionAsync(
                                     IsAutoShortname(rec.Shortname),
                                     () => DispatchCreateAsync(rec, req.SpaceName, actor,
-                                        entries, users, access, spaces, attachments, hasher, perms, uniqueness, folderContent, schemas, ct),
+                                        entries, users, access, spaces, attachments, perms, uniqueness, folderContent, schemas, ct),
                                     r => r.Response.Error?.Code == InternalErrorCode.SHORTNAME_ALREADY_EXIST),
                             RequestType.Delete =>
                                 await DispatchDeleteAsync(rec, req.SpaceName, actor, managementSpace,
@@ -342,7 +341,7 @@ public static class RequestHandler
     private static async Task<(Response Response, Record UpdatedRecord)> DispatchCreateAsync(
         Record rec, string space, string actor,
         EntryService entries, UserRepository users, AccessRepository access,
-        SpaceRepository spaces, AttachmentRepository attachments, PasswordHasher hasher,
+        SpaceRepository spaces, AttachmentRepository attachments,
         PermissionService perms,
         UniquenessValidator uniqueness, FolderContentValidator folderContent,
         SchemaValidator schemas, CancellationToken ct)
@@ -420,7 +419,7 @@ public static class RequestHandler
         switch (rec.ResourceType)
         {
             case ResourceType.User:
-                return await CreateUserAsync(rec, space, actor, users, hasher, uniqueness, ct);
+                return await CreateUserAsync(rec, space, actor, users, uniqueness, ct);
             case ResourceType.Role:
                 return await CreateRoleAsync(rec, space, actor, access, uniqueness, ct);
             case ResourceType.Group:
@@ -461,11 +460,28 @@ public static class RequestHandler
             WithCreatedMetaAttributes(rec, saved.Uuid, saved.CreatedAt, saved.UpdatedAt, saved.OwnerShortname));
     }
 
+    // /managed/request must not set user passwords: those flow only through the
+    // user-driven paths (/user/create, the OTP password reset, /user/profile).
+    // Shared by the User create and update branches to reject — not silently
+    // drop — a password supplied on the generic CRUD path.
+    private const string PasswordNotAllowedMessage =
+        "password cannot be set via /managed/request; use /user/create, the OTP password-reset flow, or /user/profile";
+
+    private static bool HasPasswordAttribute(Dictionary<string, object> attrs)
+        => attrs.TryGetValue("password", out var p) && !string.IsNullOrEmpty(ConvertToString(p));
+
     private static async Task<(Response Response, Record UpdatedRecord)> CreateUserAsync(
-        Record rec, string space, string actor, UserRepository users, PasswordHasher hasher,
+        Record rec, string space, string actor, UserRepository users,
         UniquenessValidator uniqueness, CancellationToken ct)
     {
         var attrs = rec.Attributes ?? new();
+        // Reject (rather than silently ignore) an attempt to set a password here
+        // so the caller isn't misled into thinking it took effect — passwords are
+        // only settable through the user-driven flows above.
+        if (HasPasswordAttribute(attrs))
+            return (Response.Fail(InternalErrorCode.INVALID_DATA,
+                PasswordNotAllowedMessage, ErrorTypes.Request), rec);
+
         var existing = await users.GetByShortnameAsync(rec.Shortname, ct);
         if (existing is not null)
             return (Response.Fail(InternalErrorCode.SHORTNAME_ALREADY_EXIST,
@@ -485,8 +501,6 @@ public static class RequestHandler
         var groupsList = ExtractStringList(attrs, "groups");
         var languageStr = attrs.TryGetValue("language", out var lObj) ? ConvertToString(lObj) : null;
         var typeStr = attrs.TryGetValue("type", out var tObj) ? ConvertToString(tObj) : null;
-        var passwordRaw = attrs.TryGetValue("password", out var pObj) ? ConvertToString(pObj) : null;
-
         var user = new Dmart.Models.Core.User
         {
             Uuid = string.IsNullOrEmpty(rec.Uuid) ? Guid.NewGuid().ToString() : rec.Uuid,
@@ -505,7 +519,7 @@ public static class RequestHandler
             Payload = ParsePayloadFromAttrs(attrs),
             Email = attrs.TryGetValue("email", out var e) ? ConvertToString(e) : null,
             Msisdn = attrs.TryGetValue("msisdn", out var m) ? ConvertToString(m) : null,
-            Password = string.IsNullOrEmpty(passwordRaw) ? null : hasher.Hash(passwordRaw),
+            Password = null,
             Roles = rolesList ?? new(),
             Groups = groupsList ?? new(),
             Type = ParseUserType(typeStr),
@@ -742,7 +756,7 @@ public static class RequestHandler
     private static async Task<(Response Response, Record UpdatedRecord, Dictionary<string, object>? Diff)> DispatchUpdateAsync(
         Record rec, string space, string actor,
         EntryService entries, UserRepository users, AccessRepository access,
-        SpaceRepository spaces, AttachmentRepository attachments, PasswordHasher hasher,
+        SpaceRepository spaces, AttachmentRepository attachments,
         PermissionService perms, UniquenessValidator uniqueness,
         SchemaValidator schemas, HistoryRepository history, CancellationToken ct)
     {
@@ -759,6 +773,11 @@ public static class RequestHandler
                 var userLocator = new Locator(ResourceType.User, existing.SpaceName, existing.Subpath, existing.Shortname);
                 if (!await perms.CanUpdateAsync(actor, userLocator, PermissionService.FromUser(existing), attrs, ct))
                     return (Response.Fail(InternalErrorCode.NOT_ALLOWED, "not allowed to update user", ErrorTypes.Request), rec, null);
+                // Passwords are not settable through the managed CRUD path (see
+                // CreateUserAsync) — reject rather than silently keep the old one.
+                if (HasPasswordAttribute(attrs))
+                    return (Response.Fail(InternalErrorCode.INVALID_DATA,
+                        PasswordNotAllowedMessage, ErrorTypes.Request), rec, null);
                 var userFloor = await EnforcePrivilegeFloorAsync(ResourceType.User, attrs, actor, perms, users, ct);
                 if (userFloor is not null) return (userFloor, rec, null);
                 var userUniq = await uniqueness.ValidateRawAsync(
@@ -766,7 +785,6 @@ public static class RequestHandler
                     ResourceType.User, attrs, ActionType.Update, ct);
                 if (!userUniq.IsOk)
                     return (Response.Fail(userUniq.ErrorCode!, userUniq.ErrorMessage!, userUniq.ErrorType ?? ErrorTypes.Request), rec, null);
-                var passwordRaw = attrs.TryGetValue("password", out var p) ? ConvertToString(p) : null;
                 var newIsActive = attrs.TryGetValue("is_active", out var ia) ? !IsExplicitlyFalse(ia) : existing.IsActive;
                 var reactivating = !existing.IsActive && newIsActive;
                 // Python parity: payload, type, language, and force_password_change
@@ -786,7 +804,7 @@ public static class RequestHandler
                 {
                     Email = attrs.TryGetValue("email", out var e) ? ConvertToString(e) : existing.Email,
                     Msisdn = attrs.TryGetValue("msisdn", out var m) ? ConvertToString(m) : existing.Msisdn,
-                    Password = string.IsNullOrEmpty(passwordRaw) ? existing.Password : hasher.Hash(passwordRaw),
+                    Password = existing.Password,
                     Roles = ExtractStringList(attrs, "roles") ?? existing.Roles,
                     Groups = ExtractStringList(attrs, "groups") ?? existing.Groups,
                     Tags = ExtractStringList(attrs, "tags") ?? existing.Tags,

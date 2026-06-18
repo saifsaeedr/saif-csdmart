@@ -292,7 +292,7 @@ public class CurlScenarioTests : IClassFixture<DmartFactory>
         // 24. Create user
         // ---------------------------------------------------------------------
         (await PostJsonAsResponse(client, "/managed/request",
-            """{"space_name":"management","request_type":"create","records":[{"resource_type":"user","subpath":"users","shortname":"distributor","attributes":{"roles":["test_role"],"msisdn":"7895412658","email":"distributor@example.local","password":"Hunter22hunter","is_active":true}}]}"""))
+            """{"space_name":"management","request_type":"create","records":[{"resource_type":"user","subpath":"users","shortname":"distributor","attributes":{"roles":["test_role"],"msisdn":"7895412658","email":"distributor@example.local","is_active":true}}]}"""))
             .Status.ShouldBe(Status.Success);
 
         // ---------------------------------------------------------------------

@@ -29,7 +29,7 @@ public class ManagedRequestCreateResponseTests : IClassFixture<DmartFactory>
         var shortname = "u_" + Guid.NewGuid().ToString("N")[..8];
         var body = "{\"space_name\":\"management\",\"request_type\":\"create\",\"records\":[" +
             "{\"resource_type\":\"user\",\"shortname\":\"" + shortname + "\",\"subpath\":\"/users\"," +
-            "\"attributes\":{\"email\":\"" + shortname + "@x.y\",\"password\":\"Testtest1234\"}}]}";
+            "\"attributes\":{\"email\":\"" + shortname + "@x.y\"}}]}";
         var resp = await client.PostAsync("/managed/request",
             new StringContent(body, Encoding.UTF8, "application/json"));
         var result = JsonSerializer.Deserialize(
