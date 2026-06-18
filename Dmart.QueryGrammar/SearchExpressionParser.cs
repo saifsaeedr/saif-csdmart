@@ -272,43 +272,81 @@ public static class SearchExpressionParser
 
     // ── Phase 1: Parse ────────────────────────────────────────────────────
 
-    // True only when '(' or ')' appear outside a quoted span (i.e. are group delimiters).
-    private static bool HasGroupingParens(string search)
-    {
-        bool inQuote = false;
-        foreach (var c in search)
-        {
-            if (c == '"') { inQuote = !inQuote; continue; }
-            if (!inQuote && (c == '(' || c == ')')) return true;
-        }
-        return false;
-    }
-
-    // Inserts spaces around structural '(' / ')' only; parens inside quoted values are left untouched.
-    private static string NormalizeGroupingParens(string search)
+    // Single left-to-right pass that decides which '(' / ')' are group delimiters
+    // and pads them with spaces so the tokenizer sees them as standalone tokens.
+    //
+    // Parens are exempted ONLY inside an `@field:"…"` quoted value — the one form
+    // the grammar lets carry an arbitrary literal that may legitimately contain
+    // parens (e.g. @displayname.en:"*Pad 8/256GB(Blue)*"). Everywhere else parens
+    // stay structural, which is consistent with how the grammar already groups
+    // bare text: `hello (world)` is two groups. Recognising the quoted span as it
+    // actually opens (right after an `@field:` prefix, mirroring SearchTokenRegex's
+    // `-?@[^:\s]+:"…"` alternative) means a stray '"' in free text — e.g. `5"
+    // (@a:b)` — can't swallow the following group delimiters.
+    //
+    // Returns whether any structural paren was found and the space-padded string.
+    // Like the tokenizer, '"' is unescaped: the value ends at the next '"'.
+    private static (bool HasGroupingParens, string Normalized) ScanGroupingParens(string search)
     {
         var sb = new StringBuilder(search.Length + 16);
-        bool inQuote = false;
-        foreach (var c in search)
+        bool inQuotedValue = false;
+        bool hasGrouping = false;
+
+        for (int i = 0; i < search.Length; i++)
         {
-            if (c == '"') { inQuote = !inQuote; sb.Append(c); continue; }
-            if (!inQuote && (c == '(' || c == ')'))
+            var c = search[i];
+
+            if (inQuotedValue)
             {
-                sb.Append(' ');
                 sb.Append(c);
-                sb.Append(' ');
+                if (c == '"') inQuotedValue = false;   // closing quote of the value
+                continue;
+            }
+
+            if (c == '"' && OpensQuotedFieldValue(search, i))
+            {
+                inQuotedValue = true;
+                sb.Append(c);
+                continue;
+            }
+
+            if (c == '(' || c == ')')
+            {
+                hasGrouping = true;
+                sb.Append(' ').Append(c).Append(' ');
             }
             else
             {
                 sb.Append(c);
             }
         }
-        return sb.ToString();
+
+        return (hasGrouping, sb.ToString());
+    }
+
+    // True when the '"' at quoteIndex opens an `@field:"…"` value, i.e. the text
+    // immediately before it is a `-?@<field>:` prefix (field = one or more
+    // non-colon, non-space chars). Matches SearchTokenRegex's quoted alternative.
+    private static bool OpensQuotedFieldValue(string s, int quoteIndex)
+    {
+        var colon = quoteIndex - 1;
+        if (colon < 0 || s[colon] != ':') return false;          // must be …:"
+
+        // Walk back over the field name to the token boundary (space / start).
+        var fieldEnd = colon - 1;                                 // last field char
+        var j = fieldEnd;
+        while (j >= 0 && s[j] != ':' && !char.IsWhiteSpace(s[j])) j--;
+        var fieldStart = j + 1;
+
+        if (s[fieldStart] == '@') return fieldEnd > fieldStart;                  // @x:"
+        if (s[fieldStart] == '-' && fieldStart + 1 <= fieldEnd && s[fieldStart + 1] == '@')
+            return fieldEnd > fieldStart + 1;                                    // -@x:"
+        return false;
     }
 
     private static List<SearchGroup> ParseSearchExpression(string search)
     {
-        bool hasParens = HasGroupingParens(search);
+        var (hasParens, normalized) = ScanGroupingParens(search);
 
         if (!hasParens)
         {
@@ -330,7 +368,8 @@ public static class SearchExpressionParser
             return new List<SearchGroup> { group };
         }
 
-        var normalized = NormalizeGroupingParens(search);
+        // `normalized` from ScanGroupingParens above has spaces around the
+        // structural parens so the tokenizer sees them as standalone tokens.
         var allTokens = SearchTokenRegex.Matches(normalized);
         var groups = new List<SearchGroup>();
         var curFields = new List<string>();

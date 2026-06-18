@@ -551,4 +551,39 @@ public class SearchExpressionParserTests
         pattern.ShouldContain("(Blue)");
         pattern.ShouldNotContain("( Blue )");
     }
+
+    [Fact]
+    public void Grouping_Parens_And_Quoted_Parens_Coexist()
+    {
+        // A genuine group delimiter AND a quoted field value containing parens in
+        // the same expression: the group must still form (two groups → OR) while
+        // the quoted value's parens survive unspaced. This exercises the
+        // normalize path (not the no-paren fast path the test above hits).
+        var parsed = SearchExpressionParser.Parse(
+            "(@shortname:alice) @displayname.en:\"*x(Blue)y*\"", 0);
+
+        parsed.Clauses.Count.ShouldBe(1);
+        parsed.Clauses[0].ShouldContain(" OR ");   // two groups OR'd together
+
+        var pattern = parsed.Parameters
+            .Select(p => p.Value as string)
+            .FirstOrDefault(v => v is not null && v.Contains("Blue"));
+        pattern.ShouldNotBeNull();
+        pattern.ShouldContain("(Blue)");
+        pattern.ShouldNotContain("( Blue )");
+    }
+
+    [Fact]
+    public void Stray_Quote_In_Text_Does_Not_Suppress_Following_Group()
+    {
+        // A lone '"' in free text (here a 5" measurement) must not open a quoted
+        // span that swallows the group delimiters after it — a quote only opens a
+        // value when it directly follows an `@field:` prefix. The (@shortname:bob)
+        // group must still parse as a real field filter, not inert quoted text.
+        var parsed = SearchExpressionParser.Parse("size 5\" (@shortname:bob)", 0);
+
+        parsed.Clauses.Count.ShouldBe(1);
+        parsed.Clauses[0].ShouldContain("shortname");
+        parsed.Parameters.Any(p => (p.Value as string) == "bob").ShouldBeTrue();
+    }
 }
