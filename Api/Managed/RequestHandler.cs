@@ -33,6 +33,7 @@ public static class RequestHandler
                                   Plugins.PluginManager plugins, PermissionService perms,
                                   UniquenessValidator uniqueness,
                                   FolderContentValidator folderContent,
+                                  SchemaValidator schemas,
                                   HistoryRepository history,
                                   IOptions<DmartSettings> dmartSettings,
                                   HttpContext http, CancellationToken ct) =>
@@ -152,7 +153,7 @@ public static class RequestHandler
                         var (resp, updated, diff) = await DispatchUpdateAsync(
                             rec, req.SpaceName, actor,
                             entries, users, access, spaces, attachments, hasher, perms, uniqueness,
-                            history, ct);
+                            schemas, history, ct);
                         result = (resp, updated);
                         updateDiff = diff;
                     }
@@ -164,7 +165,7 @@ public static class RequestHandler
                                 await RetryOnShortnameCollisionAsync(
                                     IsAutoShortname(rec.Shortname),
                                     () => DispatchCreateAsync(rec, req.SpaceName, actor,
-                                        entries, users, access, spaces, attachments, hasher, perms, uniqueness, folderContent, ct),
+                                        entries, users, access, spaces, attachments, hasher, perms, uniqueness, folderContent, schemas, ct),
                                     r => r.Response.Error?.Code == InternalErrorCode.SHORTNAME_ALREADY_EXIST),
                             RequestType.Delete =>
                                 await DispatchDeleteAsync(rec, req.SpaceName, actor, managementSpace,
@@ -343,9 +344,24 @@ public static class RequestHandler
         EntryService entries, UserRepository users, AccessRepository access,
         SpaceRepository spaces, AttachmentRepository attachments, PasswordHasher hasher,
         PermissionService perms,
-        UniquenessValidator uniqueness, FolderContentValidator folderContent, CancellationToken ct)
+        UniquenessValidator uniqueness, FolderContentValidator folderContent,
+        SchemaValidator schemas, CancellationToken ct)
     {
         rec = ResolveAutoShortname(rec);
+        // Payload-vs-schema validation for the non-entry "principal" types. Entry
+        // types validate inside EntryService.CreateAsync; User/Role/Group/Permission/
+        // Space go through dedicated repos and would otherwise skip the schema gate
+        // that Python's serve_request_create applies uniformly (api/managed/utils.py).
+        // Create has no payload merge, so the incoming body is what gets persisted.
+        if (rec.ResourceType is ResourceType.User or ResourceType.Role or ResourceType.Group
+            or ResourceType.Permission or ResourceType.Space)
+        {
+            var principalSpace = rec.ResourceType == ResourceType.Space ? rec.Shortname : space;
+            var schemaError = await schemas.ValidatePayloadAsync(
+                principalSpace, rec.ResourceType, ParsePayloadFromAttrs(rec.Attributes ?? new()), ct);
+            if (schemaError is not null)
+                return (Response.Fail(InternalErrorCode.INVALID_DATA, schemaError, ErrorTypes.Request), rec);
+        }
         // Gate non-entry branches here. The entry path runs through EntryService
         // which has its own CanCreateAsync call. The attachment path inherits
         // the parent entry's permissions by convention; we gate with a locator
@@ -721,7 +737,7 @@ public static class RequestHandler
         EntryService entries, UserRepository users, AccessRepository access,
         SpaceRepository spaces, AttachmentRepository attachments, PasswordHasher hasher,
         PermissionService perms, UniquenessValidator uniqueness,
-        HistoryRepository history, CancellationToken ct)
+        SchemaValidator schemas, HistoryRepository history, CancellationToken ct)
     {
         var locator = new Locator(rec.ResourceType, space, rec.Subpath, rec.Shortname);
 
@@ -752,6 +768,13 @@ public static class RequestHandler
                 // patches the existing body instead of replacing it — shared with the
                 // entry and self-service /user/profile paths via PayloadMerge.
                 var newPayload = PayloadMerge.MergeBody(existing.Payload, attrs.GetValueOrDefault("payload"));
+                // Python parity (serve_request_update): validate the MERGED payload
+                // body against its schema before persisting. User updates merge the
+                // incoming payload but bypass EntryService, so this gate was missing.
+                var payloadSchemaError = await schemas.ValidatePayloadAsync(
+                    existing.SpaceName, ResourceType.User, newPayload, ct);
+                if (payloadSchemaError is not null)
+                    return (Response.Fail(InternalErrorCode.INVALID_DATA, payloadSchemaError, ErrorTypes.Request), rec, null);
                 var updated = existing with
                 {
                     Email = attrs.TryGetValue("email", out var e) ? ConvertToString(e) : existing.Email,

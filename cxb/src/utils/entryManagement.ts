@@ -18,6 +18,26 @@ export function getParentSubpath(path: string): string {
 }
 
 /**
+ * Recursively drops props whose value is an empty string now AND was an empty
+ * string (or absent) before. Keeps a field that was cleared from a real value
+ * to "" (originalValue is non-empty) — that's a genuine change. Arrays, nested
+ * non-object values, null, and non-empty values are left untouched. Mutates
+ * `current` in place.
+ */
+function stripUnchangedEmptyStrings(current: any, original: any): void {
+    if (!current || typeof current !== "object" || Array.isArray(current)) return;
+    const orig = (original && typeof original === "object" && !Array.isArray(original)) ? original : {};
+    for (const key of Object.keys(current)) {
+        const value = current[key];
+        if (value === "" && (orig[key] === "" || orig[key] === undefined)) {
+            delete current[key];
+        } else if (value && typeof value === "object" && !Array.isArray(value)) {
+            stripUnchangedEmptyStrings(value, orig[key]);
+        }
+    }
+}
+
+/**
  * Handles saving entry data with proper content processing
  */
 export async function saveEntry(
@@ -60,8 +80,8 @@ export async function saveEntry(
     }
 
     if (originalJeContent) {
+        const originalContent = jsonEditorContentParser(originalJeContent);
         if (originalJeContent?.payload?.content_type === 'json') {
-            const originalContent = jsonEditorContentParser(originalJeContent);
             if (originalContent.payload && originalContent.payload.body && content.payload && content.payload.body) {
                 const originalKeys = Object.keys(originalContent.payload.body);
                 const currentKeys = Object.keys(content.payload.body);
@@ -71,6 +91,11 @@ export async function saveEntry(
                 });
             }
         }
+        // Don't send props that are an empty string now and were empty/absent
+        // before — editing must not write spurious "" for never-filled or
+        // already-empty fields. (A field cleared from a real value to "" is
+        // kept by the helper, since that's a genuine change.)
+        stripUnchangedEmptyStrings(content, originalContent);
     }
     let _subpath = resource_type === ResourceType.folder ? getParentSubpath(subpath) : subpath
     _subpath = _subpath.replaceAll('-', '/')

@@ -52,6 +52,26 @@ public sealed class SchemaValidator(EntryRepository entries, ILogger<SchemaValid
         return errors.Count > 0 ? errors : null;
     }
 
+    /// <summary>
+    /// Payload-level gate for the non-entry "principal" paths
+    /// (User/Role/Group/Permission/Space) that don't run through EntryService.
+    /// Mirrors EntryService.ValidatePayloadAsync: returns null when there is
+    /// nothing to validate (no payload / no schema_shortname / no body / the
+    /// entry IS a schema) or the body is valid; an error message on failure.
+    /// </summary>
+    public async Task<string?> ValidatePayloadAsync(
+        string spaceName, ResourceType resourceType, Payload? payload, CancellationToken ct = default)
+    {
+        if (payload is null) return null;
+        if (string.IsNullOrEmpty(payload.SchemaShortname)) return null;
+        if (payload.Body is null) return null;
+        if (resourceType == ResourceType.Schema) return null;  // schemas are themselves JSON Schemas
+
+        var errors = await ValidateAsync(spaceName, payload.SchemaShortname, payload.Body.Value, ct);
+        if (errors is null) return null;
+        return "payload failed schema validation: " + string.Join("; ", errors);
+    }
+
     private static void Collect(EvaluationResults r, List<string> errors)
     {
         if (r.Errors is not null)

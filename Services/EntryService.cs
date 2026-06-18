@@ -170,17 +170,10 @@ public sealed class EntryService(
         return Result<Entry>.Ok(toSave);
     }
 
-    private async Task<string?> ValidatePayloadAsync(Entry entry, CancellationToken ct)
-    {
-        if (entry.Payload is null) return null;
-        if (string.IsNullOrEmpty(entry.Payload.SchemaShortname)) return null;
-        if (entry.Payload.Body is null) return null;
-        if (entry.ResourceType == ResourceType.Schema) return null;  // schemas are themselves JSON Schemas
-
-        var errors = await schemas.ValidateAsync(entry.SpaceName, entry.Payload.SchemaShortname, entry.Payload.Body.Value, ct);
-        if (errors is null) return null;
-        return "payload failed schema validation: " + string.Join("; ", errors);
-    }
+    // Delegates to the shared SchemaValidator gate so entry-type and non-entry
+    // (User/Role/Group/Permission/Space) writes validate payloads identically.
+    private Task<string?> ValidatePayloadAsync(Entry entry, CancellationToken ct)
+        => schemas.ValidatePayloadAsync(entry.SpaceName, entry.ResourceType, entry.Payload, ct);
 
     // Walks the relationships list and verifies each related_to locator
     // resolves to a row in `entries`. Returns null on success, a single-line

@@ -18,6 +18,7 @@ public sealed class UserService(
     JwtIssuer jwt,
     HistoryRepository history,
     PluginManager plugins,
+    SchemaValidator schemas,
     IOptions<DmartSettings> settings,
     ILogger<UserService> log)
 {
@@ -144,6 +145,15 @@ public sealed class UserService(
         var displayname = attrs.TryGetValue("displayname", out var dn) ? ParseTranslation(dn) : null;
         var description = attrs.TryGetValue("description", out var desc) ? ParseTranslation(desc) : null;
         var payload = ExtractPayload(attrs);
+
+        // Python parity (serve_request_create): validate payload.body against
+        // payload.schema_shortname before persisting. /user/create runs through
+        // this service, not EntryService, so without this gate the declared
+        // schema was never enforced on self-registration.
+        var payloadSchemaError = await schemas.ValidatePayloadAsync(MgmtSpace, ResourceType.User, payload, ct);
+        if (payloadSchemaError is not null)
+            return Result<(User, string, string)>.Fail(
+                InternalErrorCode.INVALID_DATA, payloadSchemaError, ErrorTypes.Request);
 
         var user = new User
         {
