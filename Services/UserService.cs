@@ -18,6 +18,7 @@ public sealed class UserService(
     JwtIssuer jwt,
     HistoryRepository history,
     PluginManager plugins,
+    SchemaValidator schemas,
     IOptions<DmartSettings> settings,
     ILogger<UserService> log)
 {
@@ -144,6 +145,15 @@ public sealed class UserService(
         var displayname = attrs.TryGetValue("displayname", out var dn) ? ParseTranslation(dn) : null;
         var description = attrs.TryGetValue("description", out var desc) ? ParseTranslation(desc) : null;
         var payload = ExtractPayload(attrs);
+
+        // Python parity (serve_request_create): validate payload.body against
+        // payload.schema_shortname before persisting. /user/create runs through
+        // this service, not EntryService, so without this gate the declared
+        // schema was never enforced on self-registration.
+        var payloadSchemaError = await schemas.ValidatePayloadAsync(MgmtSpace, ResourceType.User, payload, ct);
+        if (payloadSchemaError is not null)
+            return Result<(User, string, string)>.Fail(
+                InternalErrorCode.INVALID_DATA, payloadSchemaError, ErrorTypes.Request);
 
         var user = new User
         {
@@ -761,10 +771,18 @@ public sealed class UserService(
 
         // Python parity: deep-merge patch.payload.body into user.payload.body
         // (creating a default Payload if the user had none), via the shared
-        // PayloadMerge used by the managed-user and entry update paths. Schema
-        // validation is intentionally omitted — UserService has no SchemaService
-        // dependency and Python only runs it for schema-bearing payloads.
+        // PayloadMerge used by the managed-user and entry update paths.
         var resolvedPayload = PayloadMerge.MergeBody(user.Payload, patch.GetValueOrDefault("payload"));
+
+        // Validate the MERGED payload against its declared schema, matching the
+        // admin /managed/request User-update path (RequestHandler.DispatchUpdateAsync).
+        // MergeBody honors a patch-declared schema_shortname, so a self-service
+        // profile update can (re)declare a schema; gate it the same way every other
+        // write path does. No-ops when the payload carries no schema_shortname/body.
+        var profilePayloadSchemaError = await schemas.ValidatePayloadAsync(
+            user.SpaceName, ResourceType.User, resolvedPayload, ct);
+        if (profilePayloadSchemaError is not null)
+            return Result<User>.Fail(InternalErrorCode.INVALID_DATA, profilePayloadSchemaError, ErrorTypes.Request);
 
         // Roles and Groups are intentionally absent from this `with` block: a
         // user can never change their own access via self-service

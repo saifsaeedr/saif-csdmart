@@ -33,6 +33,7 @@ public static class RequestHandler
                                   Plugins.PluginManager plugins, PermissionService perms,
                                   UniquenessValidator uniqueness,
                                   FolderContentValidator folderContent,
+                                  SchemaValidator schemas,
                                   HistoryRepository history,
                                   IOptions<DmartSettings> dmartSettings,
                                   HttpContext http, CancellationToken ct) =>
@@ -152,7 +153,7 @@ public static class RequestHandler
                         var (resp, updated, diff) = await DispatchUpdateAsync(
                             rec, req.SpaceName, actor,
                             entries, users, access, spaces, attachments, hasher, perms, uniqueness,
-                            history, ct);
+                            schemas, history, ct);
                         result = (resp, updated);
                         updateDiff = diff;
                     }
@@ -164,7 +165,7 @@ public static class RequestHandler
                                 await RetryOnShortnameCollisionAsync(
                                     IsAutoShortname(rec.Shortname),
                                     () => DispatchCreateAsync(rec, req.SpaceName, actor,
-                                        entries, users, access, spaces, attachments, hasher, perms, uniqueness, folderContent, ct),
+                                        entries, users, access, spaces, attachments, hasher, perms, uniqueness, folderContent, schemas, ct),
                                     r => r.Response.Error?.Code == InternalErrorCode.SHORTNAME_ALREADY_EXIST),
                             RequestType.Delete =>
                                 await DispatchDeleteAsync(rec, req.SpaceName, actor, managementSpace,
@@ -343,7 +344,8 @@ public static class RequestHandler
         EntryService entries, UserRepository users, AccessRepository access,
         SpaceRepository spaces, AttachmentRepository attachments, PasswordHasher hasher,
         PermissionService perms,
-        UniquenessValidator uniqueness, FolderContentValidator folderContent, CancellationToken ct)
+        UniquenessValidator uniqueness, FolderContentValidator folderContent,
+        SchemaValidator schemas, CancellationToken ct)
     {
         rec = ResolveAutoShortname(rec);
         // Gate non-entry branches here. The entry path runs through EntryService
@@ -393,6 +395,27 @@ public static class RequestHandler
                     return (Response.Fail(content.ErrorCode, content.ErrorMessage!, content.ErrorType ?? ErrorTypes.Request), rec);
                 break;
             }
+        }
+        // Payload-vs-schema validation for the non-entry "principal" types. Entry
+        // types validate inside EntryService.CreateAsync; User/Role/Group/Permission/
+        // Space go through dedicated repos and would otherwise skip the schema gate
+        // that Python's serve_request_create applies uniformly (api/managed/utils.py).
+        // Create has no payload merge, so the incoming body is what gets persisted.
+        // Runs AFTER the authz/floor/folder-content gate above so an unauthorized
+        // caller can't probe schema existence or harvest validation feedback —
+        // matching EntryService.CreateAsync (CanCreate then ValidatePayload).
+        if (rec.ResourceType is ResourceType.User or ResourceType.Role or ResourceType.Group
+            or ResourceType.Permission or ResourceType.Space)
+        {
+            // Space targets its own self-referential space_name, which doesn't
+            // exist yet at create time, so a Space payload's schema lookup always
+            // misses and passes through — the branch is kept for parity uniformity
+            // with Python, but is effectively a no-op for Space today.
+            var principalSpace = rec.ResourceType == ResourceType.Space ? rec.Shortname : space;
+            var schemaError = await schemas.ValidatePayloadAsync(
+                principalSpace, rec.ResourceType, ParsePayloadFromAttrs(rec.Attributes ?? new()), ct);
+            if (schemaError is not null)
+                return (Response.Fail(InternalErrorCode.INVALID_DATA, schemaError, ErrorTypes.Request), rec);
         }
         switch (rec.ResourceType)
         {
@@ -721,7 +744,7 @@ public static class RequestHandler
         EntryService entries, UserRepository users, AccessRepository access,
         SpaceRepository spaces, AttachmentRepository attachments, PasswordHasher hasher,
         PermissionService perms, UniquenessValidator uniqueness,
-        HistoryRepository history, CancellationToken ct)
+        SchemaValidator schemas, HistoryRepository history, CancellationToken ct)
     {
         var locator = new Locator(rec.ResourceType, space, rec.Subpath, rec.Shortname);
 
@@ -752,6 +775,13 @@ public static class RequestHandler
                 // patches the existing body instead of replacing it — shared with the
                 // entry and self-service /user/profile paths via PayloadMerge.
                 var newPayload = PayloadMerge.MergeBody(existing.Payload, attrs.GetValueOrDefault("payload"));
+                // Python parity (serve_request_update): validate the MERGED payload
+                // body against its schema before persisting. User updates merge the
+                // incoming payload but bypass EntryService, so this gate was missing.
+                var payloadSchemaError = await schemas.ValidatePayloadAsync(
+                    existing.SpaceName, ResourceType.User, newPayload, ct);
+                if (payloadSchemaError is not null)
+                    return (Response.Fail(InternalErrorCode.INVALID_DATA, payloadSchemaError, ErrorTypes.Request), rec, null);
                 var updated = existing with
                 {
                     Email = attrs.TryGetValue("email", out var e) ? ConvertToString(e) : existing.Email,
@@ -1360,17 +1390,9 @@ public static class RequestHandler
         return null;
     }
 
-    private static ContentType ParseContentType(string? value)
-        => value is null ? ContentType.Json
-            : Enum.TryParse<ContentType>(value, true, out var ct) ? ct
-            : value switch
-            {
-                "json" => ContentType.Json,
-                "text" => ContentType.Text,
-                "markdown" => ContentType.Markdown,
-                "html" => ContentType.Html,
-                _ => ContentType.Json,
-            };
+    // Wire content_type → enum mapping lives in PayloadMerge.ParseContentType so
+    // the create (here) and update (MergeBody) paths share one definition.
+    private static ContentType ParseContentType(string? value) => PayloadMerge.ParseContentType(value);
 
     // Normalize attrs["payload"] to a Payload record regardless of the input
     // shape the source-gen deserializer produced. In-process callers may hand

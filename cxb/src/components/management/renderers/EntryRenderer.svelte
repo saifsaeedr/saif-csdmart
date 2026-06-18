@@ -833,19 +833,25 @@
     <div class="mt-2">
         <div class={activeTab === TabMode.list ? "" : "hidden"} role="tabpanel">
             {#if [ResourceType.folder, ResourceType.space].includes(resource_type)}
-                <ListView
-                        {space_name}
-                        {subpath}
-                        folderColumns={entry?.payload?.body?.index_attributes ??
-                        null}
-                        sort_by={entry?.payload?.body?.sort_by ?? null}
-                        sort_order={entry?.payload?.body?.sort_type ?? null}
-                        query={entry?.payload?.body?.query ?? null}
-                        stream={entry?.payload?.body?.stream === true}
-                        onStreamUpdate={() => (hasStreamChanges = true)}
-                        {canDelete}
-                        exact_subpath={entry?.payload?.body?.expand_children !== true}
-                />
+<!-- Re-mount on refresh (coinTriggerRefresh toggles in refreshEntry) so
+                     editing the folder's index_attributes and hitting Refresh rebuilds
+                     the columns from the new attributes AND reloads the data, instead of
+                     keeping the columns computed at first mount. -->
+                {#key coinTriggerRefresh}
+                    <ListView
+                            {space_name}
+                            {subpath}
+                            folderColumns={entry?.payload?.body?.index_attributes ??
+                            null}
+                            sort_by={entry?.payload?.body?.sort_by ?? null}
+                            sort_order={entry?.payload?.body?.sort_type ?? null}
+                            query={entry?.payload?.body?.query ?? null}
+                            stream={entry?.payload?.body?.stream === true}
+                            onStreamUpdate={() => (hasStreamChanges = true)}
+                            {canDelete}
+                            exact_subpath={entry?.payload?.body?.expand_children !== true}
+                    />
+                {/key}
             {:else}
                 <Table2Cols
                         entry={{ "Resource type": resource_type, ...entry }}

@@ -23,15 +23,41 @@ public static class PayloadMerge
     public static Payload? MergeBody(Payload? existing, object? payloadRaw)
     {
         var patchBody = ExtractBody(payloadRaw);
-        if (patchBody is null || patchBody.Value.ValueKind == JsonValueKind.Null)
+        var hasBody = patchBody is not null && patchBody.Value.ValueKind != JsonValueKind.Null;
+        // The schema/content-type the patch DECLARES, if any. Honoring these is
+        // what makes serve_request_update's schema gate meaningful: an update that
+        // (re)declares schema_shortname must validate the merged body against it,
+        // and the declared schema must be the one persisted. Body-only patches omit
+        // these, so we fall back to the existing values rather than clearing them.
+        var patchSchema = ExtractString(payloadRaw, "schema_shortname");
+        var patchContentType = ExtractString(payloadRaw, "content_type");
+
+        // Nothing usable in the patch payload (no body, no metadata) → leave the
+        // resource untouched, matching Python's Payload.update no-op on empty input.
+        if (!hasBody && patchSchema is null && patchContentType is null)
             return existing;
 
         var basePayload = existing ?? new Payload { ContentType = ContentType.Json };
         return basePayload with
         {
-            Body = JsonMerge.DeepMergeAndStripNulls(basePayload.Body, patchBody.Value),
+            Body = hasBody
+                ? JsonMerge.DeepMergeAndStripNulls(basePayload.Body, patchBody!.Value)
+                : basePayload.Body,
+            SchemaShortname = patchSchema ?? basePayload.SchemaShortname,
+            ContentType = patchContentType is not null
+                ? ParseContentType(patchContentType)
+                : basePayload.ContentType,
         };
     }
+
+    // Single source of truth for the wire `content_type` token → ContentType enum
+    // mapping. Lowercase tokens ("json"/"text"/"markdown"/"html", and any other
+    // enum member) map case-insensitively; null or anything unrecognized defaults
+    // to JSON. Shared by the create path (RequestHandler.ParsePayloadFromAttrs) and
+    // the update path (MergeBody) so the two can't disagree.
+    internal static ContentType ParseContentType(string? value)
+        => value is not null && Enum.TryParse<ContentType>(value, ignoreCase: true, out var ct)
+            ? ct : ContentType.Json;
 
     // Pull `payload.body` out of a request's `attributes["payload"]` value, which may
     // arrive as a JsonElement (source-gen JSON) or a Dictionary<string,object>.
@@ -45,6 +71,23 @@ public static class PayloadMerge
         if (payloadRaw is Dictionary<string, object> pd && pd.TryGetValue("body", out var bodyObj)
             && bodyObj is JsonElement bje)
             return bje;
+        return null;
+    }
+
+    // Pull a string-valued payload field (schema_shortname / content_type) out of
+    // the request's `attributes["payload"]` value, handling the same JsonElement
+    // and Dictionary<string,object> shapes as ExtractBody. Returns null when the
+    // field is absent or not a JSON string.
+    private static string? ExtractString(object? payloadRaw, string property)
+    {
+        if (payloadRaw is JsonElement pe && pe.ValueKind == JsonValueKind.Object
+            && pe.TryGetProperty(property, out var el) && el.ValueKind == JsonValueKind.String)
+            return el.GetString();
+        if (payloadRaw is Dictionary<string, object> pd && pd.TryGetValue(property, out var obj))
+        {
+            if (obj is string s) return s;
+            if (obj is JsonElement je && je.ValueKind == JsonValueKind.String) return je.GetString();
+        }
         return null;
     }
 }
