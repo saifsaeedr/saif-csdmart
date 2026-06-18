@@ -1856,6 +1856,12 @@ builder.Services.AddSingleton<Dmart.Api.Mcp.McpSessionStore>();
 builder.Services.AddSingleton<EmbeddingProvider>();
 builder.Services.AddSingleton<SemanticSearchService>();
 builder.Services.AddSingleton<SemanticIndexerService>();
+builder.Services.AddSingleton<ReindexJobTracker>();
+// Same singleton instance is both injected into the endpoint (TryEnqueue) and
+// run by the host as a BackgroundService, so the host drains an in-flight
+// reindex on shutdown instead of the request thread firing-and-forgetting it.
+builder.Services.AddSingleton<ReindexBackgroundService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<ReindexBackgroundService>());
 builder.Services.AddSingleton<IApiPlugin, DbSizeInfoPlugin>();
 
 // Native .so plugins from ~/.dmart/plugins/ — no rebuild needed.
