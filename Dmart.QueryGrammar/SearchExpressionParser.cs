@@ -272,9 +272,43 @@ public static class SearchExpressionParser
 
     // ── Phase 1: Parse ────────────────────────────────────────────────────
 
+    // True only when '(' or ')' appear outside a quoted span (i.e. are group delimiters).
+    private static bool HasGroupingParens(string search)
+    {
+        bool inQuote = false;
+        foreach (var c in search)
+        {
+            if (c == '"') { inQuote = !inQuote; continue; }
+            if (!inQuote && (c == '(' || c == ')')) return true;
+        }
+        return false;
+    }
+
+    // Inserts spaces around structural '(' / ')' only; parens inside quoted values are left untouched.
+    private static string NormalizeGroupingParens(string search)
+    {
+        var sb = new StringBuilder(search.Length + 16);
+        bool inQuote = false;
+        foreach (var c in search)
+        {
+            if (c == '"') { inQuote = !inQuote; sb.Append(c); continue; }
+            if (!inQuote && (c == '(' || c == ')'))
+            {
+                sb.Append(' ');
+                sb.Append(c);
+                sb.Append(' ');
+            }
+            else
+            {
+                sb.Append(c);
+            }
+        }
+        return sb.ToString();
+    }
+
     private static List<SearchGroup> ParseSearchExpression(string search)
     {
-        bool hasParens = search.Contains('(') || search.Contains(')');
+        bool hasParens = HasGroupingParens(search);
 
         if (!hasParens)
         {
@@ -296,7 +330,7 @@ public static class SearchExpressionParser
             return new List<SearchGroup> { group };
         }
 
-        var normalized = search.Replace("(", " ( ").Replace(")", " ) ");
+        var normalized = NormalizeGroupingParens(search);
         var allTokens = SearchTokenRegex.Matches(normalized);
         var groups = new List<SearchGroup>();
         var curFields = new List<string>();

@@ -534,4 +534,21 @@ public class SearchExpressionParserTests
         combined.ShouldContain("payload::jsonb @>");
         combined.ShouldNotContain("ILIKE");
     }
+
+    [Fact]
+    public void Quoted_Value_With_Parens_Not_Treated_As_Group_Delimiters()
+    {
+        // Parens inside a quoted field value are part of the literal and must
+        // not be treated as group delimiters or have spaces injected around them.
+        var parsed = SearchExpressionParser.Parse(
+            "@displayname.en:\"*Poco Pad M1 8/256GB(Blue)*\"", 0);
+
+        parsed.Clauses.Count.ShouldBe(1);
+        // Pattern must preserve the parens without surrounding spaces.
+        parsed.Parameters.Count.ShouldBe(1);
+        var pattern = parsed.Parameters[0].Value as string;
+        pattern.ShouldNotBeNull();
+        pattern.ShouldContain("(Blue)");
+        pattern.ShouldNotContain("( Blue )");
+    }
 }
