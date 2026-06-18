@@ -241,6 +241,37 @@ public sealed class AdminBootstrap(
                 await access.UpsertRoleAsync(role, ct);
                 log.LogInformation("admin bootstrap: upserted super_admin role with super_manager permission");
             }
+
+            // 5. Ensure the `logged_in` role row exists. PermissionService
+            // injects this role NAME implicitly for every authenticated user,
+            // but the implicit grant resolves to nothing unless an actual
+            // management/roles row exists — so provision it (empty) on every
+            // deployment. CREATE-IF-MISSING ONLY: unlike super_admin above,
+            // its permissions list belongs entirely to the operator ("grant X
+            // to all logged-in users" = attach X here), so bootstrap must
+            // never repair or reset it.
+            var loggedIn = await access.GetRoleAsync(
+                Services.PermissionService.ImplicitAuthenticatedRole, ct);
+            if (loggedIn is null)
+            {
+                await access.UpsertRoleAsync(new Role
+                {
+                    Uuid = Guid.NewGuid().ToString(),
+                    Shortname = Services.PermissionService.ImplicitAuthenticatedRole,
+                    SpaceName = MgmtSpace,
+                    Subpath = "/roles",
+                    OwnerShortname = AdminShortname,
+                    Permissions = new(),
+                    IsActive = true,
+                    Displayname = new Translation(En: "Logged in"),
+                    Description = new Translation(
+                        En: "Implicitly held by every authenticated user — attach permissions here to grant them to all logged-in users"),
+                    CreatedAt = TimeUtils.Now(),
+                    UpdatedAt = TimeUtils.Now(),
+                }, ct);
+                log.LogInformation(
+                    "admin bootstrap: created empty logged_in role (implicitly held by every authenticated user)");
+            }
         }
         catch (Exception ex)
         {

@@ -418,8 +418,16 @@ public sealed class PreflightService
             var schema = await GetCompiledAsync(space, schemaShortname, ct);
             if (schema is null) return;  // schema absent — lenient, same as runtime
 
-            var bodyEl = JsonDocument.Parse(body.ToJsonString()).RootElement;
-            var result = schema.Evaluate(bodyEl, EvalOptions);
+            // Serialize the node straight to UTF-8 bytes and reparse — avoids
+            // the UTF-16 string detour of ToJsonString(), and disposes the
+            // JsonDocument (the old code parsed it into a throwaway temporary
+            // that was never disposed). JsonSchema.Net 9.1.4 evaluates a
+            // JsonElement, so we still need a document here.
+            var buffer = new System.Buffers.ArrayBufferWriter<byte>();
+            using (var writer = new Utf8JsonWriter(buffer))
+                body.WriteTo(writer);
+            using var bodyDoc = JsonDocument.Parse(buffer.WrittenMemory);
+            var result = schema.Evaluate(bodyDoc.RootElement, EvalOptions);
             if (result.IsValid) return;
 
             var errors = new List<string>();

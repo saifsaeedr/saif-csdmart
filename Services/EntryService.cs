@@ -17,7 +17,8 @@ public sealed class EntryService(
     SchemaValidator schemas,
     WorkflowEngine workflows,
     ILogger<EntryService> log,
-    UniquenessValidator? uniqueness = null)
+    UniquenessValidator? uniqueness = null,
+    FolderContentValidator? folderContent = null)
 {
     public async Task<Entry?> GetAsync(Locator l, string? actor, CancellationToken ct = default)
     {
@@ -108,6 +109,17 @@ public sealed class EntryService(
                 return Result<Entry>.Fail(uniqRes.ErrorCode, uniqRes.ErrorMessage!, uniqRes.ErrorType!);
         }
 
+        // Folder-level content policy: the parent folder may restrict which
+        // resource types / schemas / workflows it accepts. Runs after uniqueness
+        // and before ticket-state init + plugins, so a before-create hook sees a
+        // request that already satisfies the folder's declared constraints.
+        if (folderContent is not null)
+        {
+            var fcRes = await folderContent.ValidateAsync(entry, ct);
+            if (!fcRes.IsOk)
+                return Result<Entry>.Fail(fcRes.ErrorCode, fcRes.ErrorMessage!, fcRes.ErrorType!);
+        }
+
         // Ticket initialization: resolve initial_state from the workflow definition
         // and set is_open = true. Mirrors Python's set_init_state_from_record().
         var ticketState = entry.State;
@@ -158,17 +170,10 @@ public sealed class EntryService(
         return Result<Entry>.Ok(toSave);
     }
 
-    private async Task<string?> ValidatePayloadAsync(Entry entry, CancellationToken ct)
-    {
-        if (entry.Payload is null) return null;
-        if (string.IsNullOrEmpty(entry.Payload.SchemaShortname)) return null;
-        if (entry.Payload.Body is null) return null;
-        if (entry.ResourceType == ResourceType.Schema) return null;  // schemas are themselves JSON Schemas
-
-        var errors = await schemas.ValidateAsync(entry.SpaceName, entry.Payload.SchemaShortname, entry.Payload.Body.Value, ct);
-        if (errors is null) return null;
-        return "payload failed schema validation: " + string.Join("; ", errors);
-    }
+    // Delegates to the shared SchemaValidator gate so entry-type and non-entry
+    // (User/Role/Group/Permission/Space) writes validate payloads identically.
+    private Task<string?> ValidatePayloadAsync(Entry entry, CancellationToken ct)
+        => schemas.ValidatePayloadAsync(entry.SpaceName, entry.ResourceType, entry.Payload, ct);
 
     // Walks the relationships list and verifies each related_to locator
     // resolves to a row in `entries`. Returns null on success, a single-line
@@ -390,6 +395,16 @@ public sealed class EntryService(
                 return Result<Entry>.Fail(uniqRes.ErrorCode, uniqRes.ErrorMessage!, uniqRes.ErrorType!);
         }
 
+        // Folder-level content policy on the MERGED entry — a patch can change
+        // payload.schema_shortname or a ticket's workflow_shortname, so re-check
+        // against the parent folder's declared constraints.
+        if (folderContent is not null)
+        {
+            var fcRes = await folderContent.ValidateAsync(merged, ct);
+            if (!fcRes.IsOk)
+                return Result<Entry>.Fail(fcRes.ErrorCode, fcRes.ErrorMessage!, fcRes.ErrorType!);
+        }
+
         var beforeEvent = BuildEvent(merged, ActionType.Update, actor, isBulkImport);
         try { await plugins.BeforeActionAsync(beforeEvent, ct); }
         catch (Exception ex)
@@ -526,6 +541,18 @@ public sealed class EntryService(
         if (!await perms.CanUpdateAsync(actor, from, srcCtx, null, ct) ||
             !await perms.CanCreateAsync(actor, to, EntryToAttributesDict(srcEntry), ct))
             return Result<Entry>.Fail(InternalErrorCode.NOT_ALLOWED, "no move access", ErrorTypes.Auth);
+
+        // Folder content policy of the DESTINATION parent — without this,
+        // create-in-an-unconstrained-folder + move would bypass the policy the
+        // create/update paths enforce. Validate the source entry rebased onto
+        // the target locator (resource type / schema / workflow travel with it).
+        if (folderContent is not null)
+        {
+            var fcRes = await folderContent.ValidateAsync(
+                srcEntry with { SpaceName = to.SpaceName, Subpath = to.Subpath, Shortname = to.Shortname }, ct);
+            if (!fcRes.IsOk)
+                return Result<Entry>.Fail(fcRes.ErrorCode, fcRes.ErrorMessage!, fcRes.ErrorType!);
+        }
         // Python fires a single "move" event keyed on the destination subpath and
         // passes the source shortname as an attribute. Mirror that so hook
         // plugins can see both the old and new names on the same event.

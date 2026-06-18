@@ -81,6 +81,13 @@
   </Target>
 
   <ItemGroup>
+    <!-- Git worktrees created under .claude/worktrees/ are full repo checkouts.
+         The Web SDK's default Compile glob would otherwise pull their .cs files
+         into this assembly, causing duplicate-symbol errors whenever a worktree
+         exists. Exclude the whole .claude/ dir from all item globs. -->
+    <Compile Remove=".claude/**" />
+    <Content Remove=".claude/**" />
+    <None Remove=".claude/**" />
     <!-- The test project lives under dmart.Tests/ inside this project's source tree.
          The Web SDK's default Compile glob would otherwise pull its .cs files into the
          main assembly, causing duplicate-symbol and missing-using errors. -->
@@ -204,6 +211,8 @@
     <DirectPInvoke Include="libc" />
     <PackageReference Include="Npgsql" Version="10.0.2" />
     <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" Version="10.0.5" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.15.3" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.15.3" />
     <!-- CLI subcommand (merged from dmart.Cli) -->
     <PackageReference Include="ReadLine" Version="2.0.1" />
     <PackageReference Include="Spectre.Console" Version="0.50.0" />

@@ -19,6 +19,15 @@ public sealed class DmartSettings
     // the same thing in Python dmart and csdmart.
     public int JwtAccessExpires { get; set; } = 30 * 86400;
     public int JwtRefreshDays { get; set; } = 30;
+    // Strict token_use enforcement. When true, a JWT lacking the token_use
+    // claim is rejected wherever a specific use is required (bearer auth,
+    // WebSocket auth, the OAuth refresh grant). Default false: claimless
+    // tokens minted before the 2026-06 hardening are still accepted, but
+    // each acceptance is counted and warn-logged by LegacyTokenMonitor.
+    // Flip to true once deployments stop seeing legacy-token warnings for
+    // a full JwtAccessExpires window (Python dmart, which never wrote the
+    // claim, is EOL — every current issuer tags its tokens).
+    public bool JwtRequireTokenUse { get; set; }
 
     // Full Npgsql connection string. If unset, Db builds one from the
     // individual DATABASE_* components below (matching Python's behavior
@@ -79,6 +88,13 @@ public sealed class DmartSettings
     public int MaxSessionsPerUser { get; set; } = 5;
     public int MaxFailedLoginAttempts { get; set; } = 5;
 
+    // Wrong guesses allowed against a single OTP code before it is invalidated.
+    // Caps brute force on the 6-digit code independently of the per-IP rate
+    // limit (a distributed attacker spreads guesses across IPs). C#-only
+    // hardening; the wire response is unchanged (exhausted == expired). 0
+    // disables the cap.
+    public int MaxOtpVerifyAttempts { get; set; } = 5;
+
     // Seconds an account stays auto-locked after MaxFailedLoginAttempts before a
     // login attempt is allowed to clear the lock and try again. The window is
     // measured from the LAST failed/blocked attempt, so each attempt while locked
@@ -89,6 +105,14 @@ public sealed class DmartSettings
     public int LockoutCooldownSeconds { get; set; } = 900; // 15 minutes
 
     public int MaxQueryLimit { get; set; } = 10000;
+
+    // When true (default), eligible INNER joins are pushed into SQL as a
+    // correlated EXISTS semi-join so the base query paginates/counts in the DB
+    // instead of materializing the full base set in memory. Setting false forces
+    // the in-memory filter-then-paginate fallback for every join — a zero-risk
+    // kill switch (the fallback is always correct). See
+    // docs/superpowers/specs/2026-06-10-sql-inner-join-pushdown-design.md.
+    public bool EnableInnerJoinPushdown { get; set; } = true;
 
     // Per-IP cap on auth-endpoint calls (login/otp-request) in a 60-second
     // window. Complements MaxFailedLoginAttempts (per-account) by stopping
@@ -105,6 +129,12 @@ public sealed class DmartSettings
     // Bearer-header (Authorization) callers are never affected. Set false only
     // if a first-party browser client genuinely can't send those signals.
     public bool CsrfProtectCookieAuth { get; set; } = true;
+
+    // OTLP collector endpoint for metrics/traces export (e.g.
+    // "http://localhost:4317"). Empty (default) = observability fully off, zero
+    // overhead — no meters wired, no exporter started. When set, dmart exports
+    // the built-in ASP.NET Core / Kestrel / Npgsql meters via OpenTelemetry.
+    public string OtlpEndpoint { get; set; } = "";
 
     // ---- reverse proxy / real client IP ----
     // When dmart runs behind nginx (or any L7 proxy / load balancer),
@@ -388,6 +418,16 @@ public sealed class DmartSettings
     // CSV list of "space.schema" pairs allowed for public /submit endpoints.
     // Empty means allow all. Python: allowed_submit_models.
     public string AllowedSubmitModels { get; set; } = "";
+
+    // Enforce a folder's content-policy arrays (content_resource_types,
+    // content_schema_shortnames, workflow_shortnames in the folder's
+    // payload.body) on create/update/move inside that folder. Default TRUE —
+    // a declared folder policy means what it says. Set false to run
+    // FolderContentValidator in DRY-RUN mode (violations warn-logged,
+    // "folder-content policy violation (NOT enforced)", but allowed) while
+    // migrating legacy data; `dmart check` reports the non-compliant stock
+    // either way (folder_content_violations).
+    public bool EnforceFolderContentPolicy { get; set; } = true;
 
     // CSV list of payload field names users can't update via POST /user/profile.
     // Python: user_profile_payload_protected_fields.

@@ -177,7 +177,7 @@ public sealed class PasswordResetRequestTests : IClassFixture<DmartFactory>
     private async Task<bool> OtpExistsAsync(string dest)
     {
         var repo = _factory.Services.GetRequiredService<OtpRepository>();
-        return await repo.GetCodeAsync(ResetPrefix + dest) is not null;
+        return await repo.PeekStoredHashAsync(ResetPrefix + dest) is not null;
     }
 
     private async Task<(string Shortname, string Email, string Msisdn)> CreateUserAsync(bool withMsisdn)

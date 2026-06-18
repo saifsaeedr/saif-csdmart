@@ -79,16 +79,24 @@ public static class RequestLoggingMiddleware
         var correlationId = ctx.Response.Headers["X-Correlation-ID"].ToString();
         var durationMs = sw.ElapsedMilliseconds;
 
-        if (status >= 500)
-            log.LogError("HTTP {Method} {Path} → {Status} ({Duration}ms) user={User} cid={Cid}",
-                ctx.Request.Method, ctx.Request.Path.Value, status, durationMs, user, correlationId);
-        else if (status >= 400)
-            log.LogWarning("HTTP {Method} {Path} → {Status} ({Duration}ms) user={User} cid={Cid}",
-                ctx.Request.Method, ctx.Request.Path.Value, status, durationMs, user, correlationId);
-        else
-            log.LogInformation("HTTP {Method} {Path} → {Status} ({Duration}ms) user={User} cid={Cid}",
-                ctx.Request.Method, ctx.Request.Path.Value, status, durationMs, user, correlationId);
+        log.Log(MapLevel(status, clientAborted: false),
+            "HTTP {Method} {Path} → {Status} ({Duration}ms) user={User} cid={Cid}",
+            ctx.Request.Method, ctx.Request.Path.Value, status, durationMs, user, correlationId);
     }
+
+    // Maps a response to its log level — shared by the lightweight console
+    // path and the Python-parity JSON sink path so the policy can't drift.
+    //
+    // 4xx policy: only the auth/abuse signals (401 unauthorized, 403
+    // forbidden, 429 rate-limited) are warnings. Every other 4xx is a routine
+    // client error — production measurement showed 77% of one deployment's
+    // WARNING volume was 404s from users fetching their own never-uploaded
+    // avatar. Those are normal business flow: still logged, at Information.
+    public static LogLevel MapLevel(int status, bool clientAborted)
+        => clientAborted ? LogLevel.Information
+         : status >= 500 ? LogLevel.Error
+         : status is 401 or 403 or 429 ? LogLevel.Warning
+         : LogLevel.Information;
 
     private static async Task LogWithBodyCapture(HttpContext ctx, LogSink sink, Func<Task> next)
     {
@@ -137,10 +145,7 @@ public static class RequestLoggingMiddleware
             && ctx.RequestAborted.IsCancellationRequested;
 
         var status = ctx.Response.StatusCode;
-        var level = clientAborted ? LogLevel.Information
-                  : status >= 500 ? LogLevel.Error
-                  : status >= 400 ? LogLevel.Warning
-                  : LogLevel.Information;
+        var level = MapLevel(status, clientAborted);
         var user = ctx.ActorOrAnonymous();
         var correlationId = ctx.Response.Headers["X-Correlation-ID"].ToString();
 

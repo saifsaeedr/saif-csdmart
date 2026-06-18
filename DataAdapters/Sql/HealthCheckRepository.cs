@@ -67,6 +67,45 @@ public sealed class HealthCheckRepository(Db db)
             )
             """, spaceName, sampleLimit, ct));
 
+        // Folder content compliance: entries violating their PARENT folder's
+        // declared policy arrays (content_resource_types /
+        // content_schema_shortnames / workflow_shortnames). Mirrors
+        // FolderContentValidator's rules — empty/absent array means
+        // unrestricted, an absent incoming value skips that dimension — so the
+        // report and the write-path gate agree on what "non-compliant" means.
+        // This surfaces legacy rows that predate enforcement (and anything
+        // written during an ENFORCE_FOLDER_CONTENT_POLICY=false dry-run).
+        // The parent split duplicates FolderContentValidator.SplitSubpath in
+        // SQL: '/a/b' -> folder 'b' under '/a'; '/a' -> folder 'a' under '/'.
+        results.Add(await RunCheck(conn, "folder_content_violations", """
+            SELECT e.subpath || '/' || e.shortname FROM entries e
+            JOIN entries f
+              ON f.space_name = e.space_name
+             AND f.resource_type = 'folder'
+             AND f.shortname = regexp_replace(e.subpath, '^.*/', '')
+             AND f.subpath = COALESCE(NULLIF(left(e.subpath,
+                   greatest(length(e.subpath) - length(regexp_replace(e.subpath, '^.*/', '')) - 1, 0)), ''), '/')
+            WHERE e.space_name = $1
+              AND e.subpath <> '/'
+              AND jsonb_typeof(f.payload->'body') = 'object'
+              AND (
+                (jsonb_typeof(f.payload->'body'->'content_resource_types') = 'array'
+                 AND jsonb_array_length(f.payload->'body'->'content_resource_types') > 0
+                 AND NOT (f.payload->'body'->'content_resource_types' @> to_jsonb(e.resource_type::text)))
+                OR
+                ((e.payload->>'schema_shortname') IS NOT NULL
+                 AND jsonb_typeof(f.payload->'body'->'content_schema_shortnames') = 'array'
+                 AND jsonb_array_length(f.payload->'body'->'content_schema_shortnames') > 0
+                 AND NOT (f.payload->'body'->'content_schema_shortnames' @> to_jsonb(e.payload->>'schema_shortname')))
+                OR
+                (e.resource_type = 'ticket'
+                 AND e.workflow_shortname IS NOT NULL
+                 AND jsonb_typeof(f.payload->'body'->'workflow_shortnames') = 'array'
+                 AND jsonb_array_length(f.payload->'body'->'workflow_shortnames') > 0
+                 AND NOT (f.payload->'body'->'workflow_shortnames' @> to_jsonb(e.workflow_shortname)))
+              )
+            """, spaceName, sampleLimit, ct));
+
         return results;
     }
 

@@ -234,4 +234,27 @@
     :global(.on-custom-dark a[aria-current="page"] + div) {
         background: #ffffff;
     }
+
+    /* The circular header controls (language switcher + dark-mode toggle) take their
+       colors from the app theme tokens (--color-surface/--color-bg/--color-text),
+       which aren't aware of a dark custom navbar background — so they render faint
+       (low contrast) on it. Give them an explicit translucent-white treatment so
+       they stay legible on any dark custom header, regardless of light/dark mode. */
+    :global(.on-custom-dark [role="tablist"]) {
+        background: rgba(255, 255, 255, 0.15);
+    }
+    :global(.on-custom-dark button[aria-pressed]) {
+        background: rgba(255, 255, 255, 0.15);
+        color: #ffffff;
+    }
+    :global(.on-custom-dark button[aria-pressed]:hover) {
+        background: rgba(255, 255, 255, 0.28);
+    }
+    /* Selected language: solid so the active language reads clearly. Higher
+       specificity than the white-text rule above, so its label isn't washed out. */
+    :global(.on-custom-dark button[role="tab"][aria-selected="true"]) {
+        background: #ffffff;
+        color: var(--color-primary);
+        border-color: #ffffff;
+    }
 </style>

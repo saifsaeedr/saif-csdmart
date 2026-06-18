@@ -33,7 +33,13 @@ public static class WebSocketHandler
                 return;
             }
 
-            // Authenticate via query string token (Python: ?token=...)
+            var wsLog = ctx.RequestServices.GetRequiredService<ILoggerFactory>()
+                .CreateLogger("Dmart.WebSocketHandler");
+
+            // Authenticate via query string token (Python: ?token=...).
+            // requireTokenUse: "access" rejects a refresh token presented here —
+            // bots skip the session check below, so without it a leaked bot
+            // refresh token could keep opening a /ws socket until its exp.
             var token = ctx.Request.Query["token"].ToString();
             string? userShortname = null;
             string? authedToken = null;
@@ -41,11 +47,11 @@ public static class WebSocketHandler
             {
                 try
                 {
-                    var principal = jwt.Validate(token);
+                    var principal = jwt.Validate(token, requireTokenUse: "access");
                     userShortname = principal?.Identity?.Name;
                     if (!string.IsNullOrEmpty(userShortname)) authedToken = token;
                 }
-                catch { /* invalid token */ }
+                catch (Exception ex) { wsLog.LogDebug(ex, "ws token validation threw"); }
             }
             // Also try cookie (CXB sends auth_token cookie)
             if (string.IsNullOrEmpty(userShortname))
@@ -55,11 +61,11 @@ public static class WebSocketHandler
                 {
                     try
                     {
-                        var principal = jwt.Validate(cookieToken);
+                        var principal = jwt.Validate(cookieToken, requireTokenUse: "access");
                         userShortname = principal?.Identity?.Name;
                         if (!string.IsNullOrEmpty(userShortname)) authedToken = cookieToken;
                     }
-                    catch { /* invalid cookie */ }
+                    catch (Exception ex) { wsLog.LogDebug(ex, "ws cookie validation threw"); }
                 }
             }
 
@@ -98,6 +104,14 @@ public static class WebSocketHandler
                     return;
                 }
             }
+
+            // In tolerant mode a claimless legacy token (pre-2026-06
+            // hardening) reaches here; record it so operators can tell when
+            // the installed base has aged out. Strict mode never gets this
+            // far — jwt.Validate(requireTokenUse: "access") already rejected.
+            if (TokenUse.Read(authedToken) is null)
+                ctx.RequestServices.GetRequiredService<LegacyTokenMonitor>()
+                    .Record(userShortname, "websocket");
 
             var ws = await ctx.WebSockets.AcceptWebSocketAsync();
             await mgr.ConnectAsync(ws, userShortname);

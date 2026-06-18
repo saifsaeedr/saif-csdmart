@@ -53,7 +53,18 @@ public sealed class Db(IOptions<DmartSettings> settings)
     // fallback — the operator explicitly opted into `--fast`.
     public async Task<FastImportSession> BeginFastImportSessionAsync(CancellationToken ct = default)
     {
-        var session = new FastImportSession(this);
+        var session = new FastImportSession(this, bypassConstraints: true);
+        await session.OpenAsync(ct);
+        return session;
+    }
+
+    // Same reconnectable, batch-committing session WITHOUT the replica role —
+    // FK constraints and triggers stay enforced. This is the default import
+    // path: it gets the bulk COPY + merge batching, while integrity errors
+    // still surface (and are isolated per row by the importer's fallback).
+    public async Task<FastImportSession> BeginBatchImportSessionAsync(CancellationToken ct = default)
+    {
+        var session = new FastImportSession(this, bypassConstraints: false);
         await session.OpenAsync(ct);
         return session;
     }
@@ -67,11 +78,22 @@ public sealed class Db(IOptions<DmartSettings> settings)
     public sealed class FastImportSession : IAsyncDisposable
     {
         private readonly Db _db;
+        private readonly bool _bypassConstraints;
         private NpgsqlConnection _conn = null!;
         private NpgsqlTransaction _tx = null!;
         private bool _success;
 
-        internal FastImportSession(Db db) => _db = db;
+        internal FastImportSession(Db db, bool bypassConstraints)
+        {
+            _db = db;
+            _bypassConstraints = bypassConstraints;
+        }
+
+        // True when the session runs in replica role (--fast): FK constraints
+        // and triggers are bypassed, so integrity errors can't occur and the
+        // importer's per-row fallback must not engage (its autonomous per-row
+        // connections WOULD enforce FKs, silently changing --fast semantics).
+        public bool BypassConstraints => _bypassConstraints;
 
         // The live connection. NOT stable across a reconnect — callers issuing
         // DB I/O must read this at the point of use, never cache it, or a
@@ -83,7 +105,7 @@ public sealed class Db(IOptions<DmartSettings> settings)
             _conn = await _db.OpenAsync(ct);
             try
             {
-                await SetReplicaRoleAsync(_conn, ct);
+                if (_bypassConstraints) await SetReplicaRoleAsync(_conn, ct);
                 // Npgsql auto-associates the open transaction with any
                 // NpgsqlCommand built on _conn, so the repos and bulk helpers
                 // don't need to know about it.
@@ -160,8 +182,39 @@ public sealed class Db(IOptions<DmartSettings> settings)
             try { await _tx.DisposeAsync(); }   catch { /* already broken */ }
             try { await _conn.DisposeAsync(); } catch { /* already broken */ }
             _conn = await _db.OpenAsync(ct);
-            await SetReplicaRoleAsync(_conn, ct);
+            if (_bypassConstraints) await SetReplicaRoleAsync(_conn, ct);
             _tx = await _conn.BeginTransactionAsync(ct);
+        }
+
+        // Recover from a deterministically-aborted transaction (e.g. an
+        // integrity violation surfaced by the batch merge or its deferred-FK
+        // commit): roll the dead transaction back and open a fresh one so the
+        // session can keep batching. The connection itself is still healthy.
+        public async Task ResetTransactionAsync(CancellationToken ct)
+        {
+            try { await _tx.RollbackAsync(ct); } catch { /* already aborted server-side */ }
+            await _tx.DisposeAsync();
+            _tx = await _conn.BeginTransactionAsync(ct);
+        }
+
+        // Run one statement inside a savepoint so a per-row/per-line failure
+        // (e.g. one bad history line) aborts only the savepoint, not the
+        // session's open transaction. Without this, the first bad line poisons
+        // the transaction and every subsequent statement fails with 25P02.
+        public async Task RunInSavepointAsync(
+            Func<NpgsqlConnection, CancellationToken, Task> body, CancellationToken ct)
+        {
+            await _tx.SaveAsync("sp_import_row", ct);
+            try
+            {
+                await body(_conn, ct);
+                await _tx.ReleaseAsync("sp_import_row", ct);
+            }
+            catch
+            {
+                await _tx.RollbackAsync("sp_import_row", ct);
+                throw;
+            }
         }
 
         public async ValueTask DisposeAsync()
@@ -180,14 +233,17 @@ public sealed class Db(IOptions<DmartSettings> settings)
             {
                 await _tx.DisposeAsync();
             }
-            try
+            if (_bypassConstraints)
             {
-                await using var cmd = new NpgsqlCommand("SET session_replication_role = DEFAULT", _conn);
-                await cmd.ExecuteNonQueryAsync();
-            }
-            catch
-            {
-                // Same reasoning as above.
+                try
+                {
+                    await using var cmd = new NpgsqlCommand("SET session_replication_role = DEFAULT", _conn);
+                    await cmd.ExecuteNonQueryAsync();
+                }
+                catch
+                {
+                    // Same reasoning as above.
+                }
             }
             await _conn.DisposeAsync();
         }

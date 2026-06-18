@@ -11,14 +11,18 @@ namespace Dmart.Tests.Unit.Auth;
 
 public class JwtIssuerTests
 {
-    private static JwtIssuer NewIssuer() => new(Options.Create(new DmartSettings
+    private static DmartSettings TestSettings(bool requireTokenUse = false) => new()
     {
         JwtSecret = "test-secret-test-secret-test-secret-32",
         JwtIssuer = "dmart",
         JwtAudience = "dmart",
         JwtAccessExpires = 300,
         JwtRefreshDays = 1,
-    }));
+        JwtRequireTokenUse = requireTokenUse,
+    };
+
+    private static JwtIssuer NewIssuer() => new(Options.Create(TestSettings()));
+    private static JwtIssuer NewStrictIssuer() => new(Options.Create(TestSettings(requireTokenUse: true)));
 
     [Fact]
     public void IssueAccess_Returns_Three_Segments()
@@ -102,6 +106,98 @@ public class JwtIssuerTests
         var principal = issuer.Validate(token);
         principal.ShouldNotBeNull();
         principal!.Identity!.Name.ShouldBe("alice");
+    }
+
+    [Fact]
+    public void Access_Token_Carries_TokenUse_Access_And_Refresh_Carries_Refresh()
+    {
+        var issuer = NewIssuer();
+        DecodePayload(issuer.IssueAccess("alice")).GetProperty("token_use").GetString()
+            .ShouldBe("access");
+        DecodePayload(issuer.IssueRefresh("alice")).GetProperty("token_use").GetString()
+            .ShouldBe("refresh");
+    }
+
+    [Fact]
+    public void Validate_Rejects_Refresh_Token_When_Access_Required()
+    {
+        var issuer = NewIssuer();
+        var refresh = issuer.IssueRefresh("alice");
+        issuer.Validate(refresh, requireTokenUse: "access").ShouldBeNull();
+    }
+
+    [Fact]
+    public void Validate_Accepts_Access_Token_When_Access_Required()
+    {
+        var issuer = NewIssuer();
+        var access = issuer.IssueAccess("alice");
+        var principal = issuer.Validate(access, requireTokenUse: "access");
+        principal.ShouldNotBeNull();
+        principal!.Identity!.Name.ShouldBe("alice");
+    }
+
+    [Fact]
+    public void Validate_Rejects_Access_Token_When_Refresh_Required()
+    {
+        var issuer = NewIssuer();
+        var access = issuer.IssueAccess("alice");
+        issuer.Validate(access, requireTokenUse: "refresh").ShouldBeNull();
+    }
+
+    // Claimless tokens (minted before the 2026-06 hardening; Python dmart
+    // never wrote token_use) are tolerated by DEFAULT so the installed base
+    // can age out — but only while JwtRequireTokenUse stays false.
+    [Fact]
+    public void Validate_Accepts_Claimless_Token_When_Access_Required()
+    {
+        var token = MintTokenWithoutTokenUse("alice");
+        var principal = NewIssuer().Validate(token, requireTokenUse: "access");
+        principal.ShouldNotBeNull();
+        principal!.Identity!.Name.ShouldBe("alice");
+    }
+
+    [Fact]
+    public void Validate_Rejects_Claimless_Token_When_Strict()
+    {
+        var token = MintTokenWithoutTokenUse("alice");
+        NewStrictIssuer().Validate(token, requireTokenUse: "access").ShouldBeNull();
+    }
+
+    [Fact]
+    public void Validate_Accepts_Tagged_Access_Token_When_Strict()
+    {
+        var issuer = NewStrictIssuer();
+        var principal = issuer.Validate(issuer.IssueAccess("alice"), requireTokenUse: "access");
+        principal.ShouldNotBeNull();
+        principal!.Identity!.Name.ShouldBe("alice");
+    }
+
+    // requireTokenUse: null callers only need signature + exp — e.g. the
+    // OAuth refresh grant validates first and applies its own token_use
+    // guard. Strict mode must not change that contract.
+    [Fact]
+    public void Validate_Without_Required_Use_Skips_TokenUse_Check_Even_When_Strict()
+    {
+        var token = MintTokenWithoutTokenUse("alice");
+        NewStrictIssuer().Validate(token).ShouldNotBeNull();
+    }
+
+    // Hand-rolled HS256 token with the same secret as NewIssuer() but no
+    // token_use claim — simulates a Python-dmart-issued token.
+    private static string MintTokenWithoutTokenUse(string subject)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var exp = now.AddMinutes(5).ToUnixTimeSeconds();
+        var payload = $$"""
+            {"sub":"{{subject}}","iss":"dmart","aud":"dmart","iat":{{now.ToUnixTimeSeconds()}},"exp":{{exp}},"data":{"shortname":"{{subject}}","type":"web"},"expires":{{exp}}}
+            """;
+        const string headerJson = """{"alg":"HS256","typ":"JWT"}""";
+        var header = JwtIssuer.Base64UrlEncode(Encoding.UTF8.GetBytes(headerJson));
+        var body = JwtIssuer.Base64UrlEncode(Encoding.UTF8.GetBytes(payload));
+        using var hmac = new System.Security.Cryptography.HMACSHA256(
+            Encoding.UTF8.GetBytes("test-secret-test-secret-test-secret-32"));
+        var sig = JwtIssuer.Base64UrlEncode(hmac.ComputeHash(Encoding.UTF8.GetBytes($"{header}.{body}")));
+        return $"{header}.{body}.{sig}";
     }
 
     private static JsonElement DecodePayload(string token)

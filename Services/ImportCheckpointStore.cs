@@ -59,7 +59,8 @@ public sealed class ImportCheckpointStore
     // Load an existing checkpoint or return a fresh one. Path-aware:
     // when no file exists the returned store is empty and writes will
     // create the file on first MarkXxxDone().
-    public static ImportCheckpointStore LoadOrCreate(string path, string sourcePath)
+    public static ImportCheckpointStore LoadOrCreate(
+        string path, string sourcePath, Microsoft.Extensions.Logging.ILogger? log = null)
     {
         if (File.Exists(path))
         {
@@ -83,11 +84,18 @@ public sealed class ImportCheckpointStore
                     return store;
                 }
             }
-            catch
+            catch (Exception ex)
             {
                 // Corrupt checkpoint — treat as a fresh start. The operator
                 // can delete it manually if they want a clean run; we don't
-                // touch the source files on a parse failure.
+                // touch the source files on a parse failure. Surface it so a
+                // multi-hour import silently restarting from scratch is
+                // visible rather than a mystery.
+                if (log is not null)
+                    Microsoft.Extensions.Logging.LoggerExtensions.LogWarning(
+                        log, ex,
+                        "import: corrupt checkpoint at {Path} — ignoring it and starting fresh; delete the file to silence this",
+                        path);
             }
         }
         return new ImportCheckpointStore(path)

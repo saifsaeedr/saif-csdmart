@@ -39,9 +39,10 @@ public static class ResourceWithPayloadHandler
             async Task<Response> (HttpRequest req, EntryService entries,
                                   AttachmentRepository attachments,
                                   PermissionService perms,
+                                  FolderContentValidator folderContent,
                                   ILogger<ResourceWithPayloadMarker> log, HttpContext http,
                                   CancellationToken ct) =>
-                await HandleAsync(req, entries, attachments, perms, http.ActorOrAnonymous(), log, ct))
+                await HandleAsync(req, entries, attachments, perms, folderContent, http.ActorOrAnonymous(), log, ct))
           .Produces<Response>()
           .DisableAntiforgery();
 
@@ -81,7 +82,7 @@ public static class ResourceWithPayloadHandler
 
     public static async Task<Response> HandleAsync(
         HttpRequest req, EntryService entries, AttachmentRepository attachments,
-        PermissionService perms, string actor, ILogger log, CancellationToken ct)
+        PermissionService perms, FolderContentValidator folderContent, string actor, ILogger log, CancellationToken ct)
     {
         if (!req.HasFormContentType)
             return Response.Fail(InternalErrorCode.INVALID_DATA, "expected multipart/form-data", ErrorTypes.Request);
@@ -147,7 +148,7 @@ public static class ResourceWithPayloadHandler
                 wasAuto,
                 () => StoreAttachmentAsync(
                     RequestHandler.ResolveAutoShortname(record), spaceName, actor, fileBytes, ext,
-                    resourceContentType, checksum, sha, schemaShortname, attachments, perms, log,
+                    resourceContentType, checksum, sha, schemaShortname, attachments, perms, folderContent, log,
                     failOnConflict: wasAuto, ct),
                 r => r.Error?.Code == InternalErrorCode.SHORTNAME_ALREADY_EXIST);
 
@@ -164,13 +165,22 @@ public static class ResourceWithPayloadHandler
     public static async Task<Response> StoreAttachmentAsync(
         Record record, string spaceName, string actor, byte[] fileBytes, string ext,
         ContentType contentType, string checksum, string? clientChecksum, string? schemaShortname,
-        AttachmentRepository attachments, PermissionService perms, ILogger log,
+        AttachmentRepository attachments, PermissionService perms, FolderContentValidator folderContent, ILogger log,
         bool failOnConflict, CancellationToken ct)
     {
         var gateLocator = new Locator(record.ResourceType, spaceName, "/" + record.Subpath.TrimStart('/'), record.Shortname);
         if (!await perms.CanCreateAsync(actor, gateLocator, record.Attributes, ct))
             return Response.Fail(InternalErrorCode.NOT_ALLOWED,
                 $"not allowed to create {record.ResourceType}", ErrorTypes.Request);
+
+        // Folder content policy — the same gate the JSON /managed/request attachment
+        // path applies (RequestHandler.DispatchCreateAsync). Without it, a folder's
+        // content_resource_types / content_schema_shortnames could be bypassed by
+        // uploading the attachment via multipart instead of JSON.
+        var contentCheck = await folderContent.ValidateRawAsync(
+            spaceName, gateLocator.Subpath, record.Shortname, record.ResourceType, record.Attributes, ct);
+        if (!contentCheck.IsOk)
+            return Response.Fail(contentCheck.ErrorCode, contentCheck.ErrorMessage!, contentCheck.ErrorType ?? ErrorTypes.Request);
 
         var bodyRef = $"{record.Shortname}.{ext}";
         // Pull meta-level fields out of attributes — same shape entries get via

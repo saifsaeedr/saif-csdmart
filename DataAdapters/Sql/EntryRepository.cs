@@ -824,6 +824,20 @@ public sealed class EntryRepository(Db db)
         => QueryHelper.RunCountAsync(db, "entries", q, ct,
             userShortname: actor, queryPolicies: queryPolicies);
 
+    // Pushdown overloads: inject INNER-join EXISTS semi-joins into the SELECT
+    // and COUNT so the base query paginates/counts post-filter in SQL.
+    public Task<List<Entry>> QueryAsync(
+        Query q, string actor, List<string>? queryPolicies,
+        IReadOnlyList<InnerSemiJoinSpec>? semiJoins, CancellationToken ct = default)
+        => QueryHelper.RunQueryAsync(db, SelectAllColumns, q, Hydrate, ct,
+            tableName: "entries", userShortname: actor, queryPolicies: queryPolicies, semiJoins: semiJoins);
+
+    public Task<int> CountQueryAsync(
+        Query q, string actor, List<string>? queryPolicies,
+        IReadOnlyList<InnerSemiJoinSpec>? semiJoins, CancellationToken ct = default)
+        => QueryHelper.RunCountAsync(db, "entries", q, ct,
+            userShortname: actor, queryPolicies: queryPolicies, semiJoins: semiJoins);
+
     public async Task<long> CountAsync(string spaceName, string subpath, CancellationToken ct = default)
     {
         await using var conn = await db.OpenAsync(ct);

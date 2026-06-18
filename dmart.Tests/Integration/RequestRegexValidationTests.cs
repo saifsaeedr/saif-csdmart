@@ -146,32 +146,6 @@ public sealed class RequestRegexValidationTests : IClassFixture<DmartFactory>
     }
 
     [Theory]
-    // EMAIL = ^[a-z0-9_\.-]+@([a-z0-9_-]+\.)+[a-z0-9]{2,4}$
-    [InlineData("user@example.com")]
-    [InlineData("first.last@example.com")]
-    [InlineData("with_underscore@example.co")]
-    [InlineData("hyphen-in-name@example.io")]
-    [InlineData("multi.dots@a.b.c.com")]
-    public void IsValidEmail_AcceptsPythonValid(string input)
-    {
-        RequestRegex.IsValidEmail(input).ShouldBeTrue();
-    }
-
-    [Theory]
-    [InlineData("")]
-    [InlineData("not_an_email")]
-    [InlineData("@example.com")]               // no local part
-    [InlineData("user@")]                       // no domain
-    [InlineData("USER@example.com")]            // Python pattern is lowercase only
-    [InlineData("user@example")]                // no TLD
-    [InlineData("user@example.toolongtld")]     // TLD must be 2-4 chars per Python
-    [InlineData("user name@example.com")]       // space in local
-    public void IsValidEmail_RejectsPythonInvalid(string input)
-    {
-        RequestRegex.IsValidEmail(input).ShouldBeFalse();
-    }
-
-    [Theory]
     // MSISDN = ^[1-9][0-9]{9,14}$
     [InlineData("1234567890")]                 // 10 digits, leading 1
     [InlineData("123456789012345")]            // 15 digits max

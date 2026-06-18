@@ -84,7 +84,7 @@ public sealed class JwtIssuer(IOptions<DmartSettings> settings)
     // Validate a JWT and return a ClaimsPrincipal. Used by the WebSocket
     // handler to authenticate the ?token= query parameter (outside the normal
     // JwtBearer middleware pipeline).
-    public System.Security.Claims.ClaimsPrincipal? Validate(string token)
+    public System.Security.Claims.ClaimsPrincipal? Validate(string token, string? requireTokenUse = null)
     {
         var parts = token.Split('.');
         if (parts.Length != 3) return null;
@@ -105,6 +105,25 @@ public sealed class JwtIssuer(IOptions<DmartSettings> settings)
         {
             var expTime = DateTimeOffset.FromUnixTimeSeconds(exp.GetInt64());
             if (expTime < DateTimeOffset.UtcNow) return null;
+        }
+
+        // token_use guard (e.g. requireTokenUse: "access" on the WebSocket
+        // path rejects a refresh token presented as an access token). A token
+        // WITHOUT the claim predates the 2026-06 hardening (the EOL Python
+        // implementation never wrote token_use); it passes only while
+        // JwtRequireTokenUse is false, so the legacy installed base can age
+        // out — callers record those acceptances via LegacyTokenMonitor.
+        // Mirrors the refresh-grant guard in OAuthEndpoints.
+        if (requireTokenUse is not null)
+        {
+            if (payload.TryGetProperty("token_use", out var tu))
+            {
+                if (tu.GetString() != requireTokenUse) return null;
+            }
+            else if (_s.JwtRequireTokenUse)
+            {
+                return null;
+            }
         }
 
         var sub = payload.TryGetProperty("sub", out var s) ? s.GetString() : null;

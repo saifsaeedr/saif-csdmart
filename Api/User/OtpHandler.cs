@@ -25,7 +25,8 @@ public static class OtpHandler
         // requests currently no-op on the send side — matches get_otp_key()
         // returning "" for shortname.
         g.MapPost("/otp-request", async (SendOTPRequest req, OtpProvider otp, OtpRepository repo,
-            UserRepository users, IOptions<DmartSettings> settings, CancellationToken ct) =>
+            UserRepository users, UserService userService, HttpContext http,
+            IOptions<DmartSettings> settings, CancellationToken ct) =>
         {
             var provided = (string.IsNullOrEmpty(req.Shortname) ? 0 : 1)
                          + (string.IsNullOrEmpty(req.Msisdn) ? 0 : 1)
@@ -56,9 +57,29 @@ public static class OtpHandler
             }
 
             var s = settings.Value;
-            if (user is null && !s.IsRegistrable)
+            // OTP-request gate:
+            //   * A JWT-bearing caller may always request an OTP (e.g. a
+            //     logged-in user verifying/changing a contact) — UNLESS that
+            //     account is locked, in which case issuance is refused with the
+            //     same posture as /user/login.
+            //   * An anonymous caller (no JWT) is gated by is_registrable: when
+            //     self-registration is disabled there's no self-service reason
+            //     to mint an OTP, regardless of whether the supplied identifier
+            //     maps to an existing user (USERNAME_NOT_EXIST keeps that
+            //     response identical to the old not-found branch — no oracle).
+            var actor = http.Actor();
+            if (actor is not null)
+            {
+                var jwtUser = await users.GetByShortnameAsync(actor, ct);
+                if (jwtUser is not null && await userService.IsLockedAsync(jwtUser, ct))
+                    return Response.Fail(InternalErrorCode.USER_ACCOUNT_LOCKED,
+                        "Account has been locked.", ErrorTypes.Auth);
+            }
+            else if (!s.IsRegistrable)
+            {
                 return Response.Fail(InternalErrorCode.USERNAME_NOT_EXIST,
                     "No user found with the provided information", ErrorTypes.Request);
+            }
 
             if (dest is not null)
             {
@@ -221,7 +242,7 @@ public static class OtpHandler
         // without tripping the account lockout.
         g.MapPost("/password-reset-confirm", async (PasswordResetConfirm req,
             UserRepository users, OtpRepository repo, PasswordHasher hasher,
-            UserService userService, CancellationToken ct) =>
+            UserService userService, IOptions<DmartSettings> settings, CancellationToken ct) =>
         {
             // Exactly one of {Shortname, Email, Msisdn} — mirrors the shape
             // rules /otp-request and /password-reset-request use.
@@ -287,7 +308,8 @@ public static class OtpHandler
                 return Response.Fail(InternalErrorCode.OTP_INVALID,
                     "code mismatch or expired", ErrorTypes.Auth);
 
-            var ok = await repo.VerifyAndConsumeAsync(ResetOtpKey(dest), req.Otp, ct);
+            var ok = await repo.VerifyAndConsumeAsync(
+                ResetOtpKey(dest), req.Otp, settings.Value.MaxOtpVerifyAttempts, ct);
             if (!ok)
             {
                 // Wrong OTP counts against the failed-attempt counter — same
@@ -319,10 +341,12 @@ public static class OtpHandler
         // Python's otp-confirm verifies the OTP and then marks the email/msisdn
         // as verified on the user row. We need the user context to do that.
         g.MapPost("/otp-confirm", async (ConfirmOTPRequest req, OtpRepository repo,
-            UserRepository users, HttpContext http, CancellationToken ct) =>
+            UserRepository users, HttpContext http, IOptions<DmartSettings> settings,
+            CancellationToken ct) =>
         {
             var dest = req.Msisdn ?? req.Email ?? "";
-            var ok = await repo.VerifyAndConsumeAsync(dest, req.Code, ct);
+            var ok = await repo.VerifyAndConsumeAsync(
+                dest, req.Code, settings.Value.MaxOtpVerifyAttempts, ct);
             if (!ok)
                 return Response.Fail(InternalErrorCode.OTP_INVALID,
                     "code mismatch or expired", ErrorTypes.Auth);

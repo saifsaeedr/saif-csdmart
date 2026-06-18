@@ -776,7 +776,7 @@ public sealed class ImportExportService(
         if (resume)
         {
             var path = checkpointPath ?? ImportCheckpointStore.DefaultPathFor(folderPath);
-            checkpoint = ImportCheckpointStore.LoadOrCreate(path, folderPath);
+            checkpoint = ImportCheckpointStore.LoadOrCreate(path, folderPath, log);
         }
 
         // Validation context: when enabled (default), per-entry validators
@@ -1054,10 +1054,14 @@ public sealed class ImportExportService(
         }
         else
         {
-            // Non-fast slow path: one pass over all tail entries; the repos
-            // open their own per-call connections (historical behaviour, no
-            // bulk COPY, no resume).
-            await RunTailPassesAsync(null, "serial", tailEntries, preserveExisting, results, batchSize, validation, importTags, skipHistory, ct);
+            // Default (non --fast) path: the same bulk COPY + merge batching
+            // as fast mode, but on a plain session — FK constraints and
+            // triggers stay enforced. A batch whose merge (or deferred-FK
+            // commit) trips an integrity error is replayed row-by-row by the
+            // flush helpers, so one bad row fails alone instead of sinking
+            // its batch. Histories ride the shared session connection rather
+            // than opening one connection per line.
+            await ImportShardTailAsync("serial", tailEntries, preserveExisting, results, batchSize, validation, importTags, skipHistory, bypassConstraints: false, ct);
         }
 
         // Fast mode deferred the per-role/per-permission cache invalidations
@@ -1191,7 +1195,7 @@ public sealed class ImportExportService(
     {
         try
         {
-            await ImportShardTailAsync(shardKey, shardEntries, preserveExisting, results, batchSize, validation, importTags, skipHistory, ct);
+            await ImportShardTailAsync(shardKey, shardEntries, preserveExisting, results, batchSize, validation, importTags, skipHistory, bypassConstraints: true, ct);
             // Per-shard commit landed. Record it so a future --resume skips this
             // shard. MarkTailDone is lock-protected and atomically rewrites the
             // sidecar.
@@ -1221,9 +1225,12 @@ public sealed class ImportExportService(
         ImportValidationContext? validation,
         IReadOnlyList<string>? importTags,
         bool skipHistory,
+        bool bypassConstraints,
         CancellationToken ct)
     {
-        var session = await db.BeginFastImportSessionAsync(ct);
+        var session = bypassConstraints
+            ? await db.BeginFastImportSessionAsync(ct)      // --fast: replica role
+            : await db.BeginBatchImportSessionAsync(ct);    // default: FKs enforced
         try
         {
             await RunTailPassesAsync(session, label, shardEntries, preserveExisting, results, batchSize, validation, importTags, skipHistory, ct);
@@ -1236,13 +1243,16 @@ public sealed class ImportExportService(
     }
 
     // Runs Pass 3 (entries), Pass 4 (attachments), Pass 5 (histories) for a
-    // given entry slice. `session` is optional: null on the slow (non-fast)
-    // path, where the repos open their own connection per call. When non-null
-    // we're in a fast session (replica mode) and bulk COPY kicks in, flushing
-    // each batch through session.RunBatchAsync (commit-per-batch + reconnect).
+    // given entry slice. Every import now runs on a session — bulk COPY +
+    // merge, flushed per batch through session.RunBatchAsync (commit-per-
+    // batch + reconnect). The DEFAULT path uses a constraint-enforcing
+    // session (FKs/triggers live, integrity errors isolated per row by the
+    // flush fallback); --fast uses a replica-role session that bypasses them.
     //
-    // Used by BOTH the non-fast serial pass (session null, all tail entries)
-    // AND the per-shard worker (session non-null, one shard's tail entries).
+    // Used by BOTH the default serial pass (one session, all tail entries)
+    // AND the per-shard --fast worker (one session per shard). The session
+    // parameter stays nullable for the historical per-row contract of the
+    // Try* helpers, but no current caller passes null.
     private async Task RunTailPassesAsync(
         Db.FastImportSession? session,
         string label,
@@ -1313,9 +1323,9 @@ public sealed class ImportExportService(
         // the session's trailing transaction, committed once at shard end
         // (MarkSuccess ⇒ DisposeAsync). A crash before that commit rolls the
         // whole history slice back, so a --resume re-run can't double-insert.
-        // Read session.Connection HERE so we pick up any connection swapped in
-        // by a reconnect during Pass 3/4 — never a cached reference.
-        var histConn = session?.Connection;
+        // The session is passed (not a cached connection) so each line reads
+        // the live connection and runs inside a savepoint — one bad line
+        // aborts its savepoint, not the whole trailing transaction.
         // Zip: history.jsonl files are explicit members of the entry list.
         // FS lean walk: history.jsonl was never enumerated (we walked only
         // meta.*.json), so derive it as the meta's SIBLING for each
@@ -1323,7 +1333,7 @@ public sealed class ImportExportService(
         // exclusive — zip refs have no AbsolutePath, and an FS metas-only
         // list contains no history.jsonl members — so neither double-imports.
         foreach (var ze in zes.Where(z => z.Name == "history.jsonl"))
-            await TryImportHistoryAsync(ze, results, histConn, ct);
+            await TryImportHistoryAsync(ze, results, session, ct);
         foreach (var ze in zes.Where(z => z.AbsolutePath is not null && IsHistoryBearingMeta(z)))
         {
             var dir = Path.GetDirectoryName(ze.AbsolutePath);
@@ -1335,7 +1345,7 @@ public sealed class ImportExportService(
             // from a zip-listed history.jsonl.
             var slash = ze.FullName.LastIndexOf('/');
             var histFull = (slash < 0 ? "" : ze.FullName[..slash]) + "/history.jsonl";
-            await TryImportHistoryAsync(ImportEntryRef.FromFile(histFull, historyDisk), results, histConn, ct);
+            await TryImportHistoryAsync(ImportEntryRef.FromFile(histFull, historyDisk), results, session, ct);
         }
     }
 
@@ -1349,8 +1359,29 @@ public sealed class ImportExportService(
         bool preserveExisting, ImportStats results, CancellationToken ct)
     {
         var count = batch.Count;
-        var (affected, skipped) = await session.RunBatchAsync(
-            (c, t) => BulkInsertEntriesAsync(c, batch, preserveExisting, t), log, ct);
+        int affected, skipped;
+        try
+        {
+            (affected, skipped) = await session.RunBatchAsync(
+                (c, t) => BulkInsertEntriesAsync(c, batch, preserveExisting, t), log, ct);
+        }
+        catch (PostgresException ex) when (!session.BypassConstraints && IsIntegrityViolation(ex))
+        {
+            // Default-path batches run with constraints enforced, so one bad
+            // row (unknown owner → FK at the deferred commit, duplicate uuid
+            // → PK at the merge) aborts its whole batch. Replay the batch
+            // row-by-row on autonomous connections: the good rows land, the
+            // offender(s) fail alone into results.Failed — the same per-row
+            // semantics the importer's default path always had. Not engaged
+            // under --fast (BypassConstraints): replica mode skips FK checks,
+            // and a per-row replay WOULD enforce them, silently changing what
+            // --fast imports.
+            log.LogWarning(
+                "import[{Label}]: entry batch of {Count} hit integrity violation {State} ({Constraint}); replaying row-by-row to isolate the offender(s)",
+                label, count, ex.SqlState, ex.ConstraintName ?? "?");
+            await session.ResetTransactionAsync(ct);
+            (affected, skipped) = await ReplayEntriesPerRowAsync(batch, preserveExisting, results, ct);
+        }
         results.AddEntries(affected);
         if (preserveExisting) results.AddSkipped(skipped);
         results.AddProcessed(count);
@@ -1364,14 +1395,102 @@ public sealed class ImportExportService(
         bool preserveExisting, ImportStats results, CancellationToken ct)
     {
         var count = batch.Count;
-        var (affected, skipped) = await session.RunBatchAsync(
-            (c, t) => BulkInsertAttachmentsAsync(c, batch, preserveExisting, t), log, ct);
+        int affected, skipped;
+        try
+        {
+            (affected, skipped) = await session.RunBatchAsync(
+                (c, t) => BulkInsertAttachmentsAsync(c, batch, preserveExisting, t), log, ct);
+        }
+        catch (PostgresException ex) when (!session.BypassConstraints && IsIntegrityViolation(ex))
+        {
+            // See FlushEntriesAsync — same per-row isolation fallback.
+            log.LogWarning(
+                "import[{Label}]: attachment batch of {Count} hit integrity violation {State} ({Constraint}); replaying row-by-row to isolate the offender(s)",
+                label, count, ex.SqlState, ex.ConstraintName ?? "?");
+            await session.ResetTransactionAsync(ct);
+            (affected, skipped) = await ReplayAttachmentsPerRowAsync(batch, preserveExisting, results, ct);
+        }
         results.AddAttachments(affected);
         if (preserveExisting) results.AddSkipped(skipped);
         results.AddProcessed(count);
         batch.Clear();
         log.LogInformation("import[{Label}]: attachments +{Batch} (inserted {Inserted}, processed {Proc}/{Total} = {Pct}%)",
             label, affected, results.AttachmentsInserted, results.Processed, results.TotalToProcess, results.ProgressPct());
+    }
+
+    // 23xxx — integrity constraint violations (23503 FK, 23505 unique/PK,
+    // 23502 not-null, …): deterministic, so RunBatchAsync won't retry them;
+    // the flush helpers catch them and fall back to per-row replay instead.
+    private static bool IsIntegrityViolation(PostgresException ex)
+        => ex.SqlState?.StartsWith("23", StringComparison.Ordinal) == true;
+
+    // Replay a failed batch one row at a time on autonomous connections (the
+    // repos' own per-call connections, autocommit per row) so each offending
+    // row fails alone and is pinned into results.Failed, while every good row
+    // still lands. Mirrors TryImportEntryAsync's historical per-row path,
+    // including the preserveExisting existence check.
+    private async Task<(int Affected, int Skipped)> ReplayEntriesPerRowAsync(
+        List<Entry> batch, bool preserveExisting, ImportStats results, CancellationToken ct)
+    {
+        int affected = 0, skipped = 0;
+        foreach (var e in batch)
+        {
+            try
+            {
+                if (preserveExisting && await entries.GetAsync(
+                        e.SpaceName, e.Subpath, e.Shortname, e.ResourceType, ct) is not null)
+                {
+                    skipped++;
+                    continue;
+                }
+                await entries.UpsertAsync(e, ct);
+                affected++;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                log.LogWarning(ex, "import entry failed at {Space}{Subpath}/{Shortname}",
+                    e.SpaceName, e.Subpath, e.Shortname);
+                results.AddFailure(new()
+                {
+                    ["path"] = $"{e.SpaceName}{e.Subpath}/{e.Shortname}",
+                    ["kind"] = "entry",
+                    ["error"] = ex.Message,
+                });
+            }
+        }
+        return (affected, skipped);
+    }
+
+    private async Task<(int Affected, int Skipped)> ReplayAttachmentsPerRowAsync(
+        List<Attachment> batch, bool preserveExisting, ImportStats results, CancellationToken ct)
+    {
+        int affected = 0, skipped = 0;
+        foreach (var a in batch)
+        {
+            try
+            {
+                if (preserveExisting && await attachments.GetAsync(
+                        a.SpaceName, a.Subpath, a.Shortname, ct) is not null)
+                {
+                    skipped++;
+                    continue;
+                }
+                await attachments.UpsertAsync(a, ct);
+                affected++;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                log.LogWarning(ex, "import attachment failed at {Space}{Subpath}/{Shortname}",
+                    a.SpaceName, a.Subpath, a.Shortname);
+                results.AddFailure(new()
+                {
+                    ["path"] = $"{a.SpaceName}{a.Subpath}/{a.Shortname}",
+                    ["kind"] = "attachment",
+                    ["error"] = ex.Message,
+                });
+            }
+        }
+        return (affected, skipped);
     }
 
     // ---- Shard partitioning ----------------------------------------------
@@ -2047,7 +2166,7 @@ public sealed class ImportExportService(
         }
     }
 
-    private async Task TryImportHistoryAsync(ImportEntryRef ze, ImportStats st, NpgsqlConnection? conn, CancellationToken ct)
+    private async Task TryImportHistoryAsync(ImportEntryRef ze, ImportStats st, Db.FastImportSession? session, CancellationToken ct)
     {
         try
         {
@@ -2092,10 +2211,16 @@ public sealed class ImportExportService(
                     Dictionary<string, object>? reqHeaders = null;
                     if (hNode["request_headers"] is JsonObject rh)
                         reqHeaders = rh.Deserialize(DmartJsonContext.Default.DictionaryStringObject);
-                    if (conn is null)
+                    if (session is null)
                         await histories.AppendAsync(spaceName, subpath, sn, owner, reqHeaders, diff, ct);
                     else
-                        await histories.AppendAsync(spaceName, subpath, sn, owner, reqHeaders, diff, conn, ct);
+                        // Savepoint-wrapped: a line PG rejects aborts only its
+                        // savepoint, not the session's trailing transaction —
+                        // without this the first bad line poisons the tx and
+                        // every later line dies with 25P02, then the shard-end
+                        // commit rolls back the whole history slice.
+                        await session.RunInSavepointAsync(
+                            (c, t) => histories.AppendAsync(spaceName, subpath, sn, owner, reqHeaders, diff, c, t), ct);
                     st.IncHistories();
                 }
                 // Swallow only genuine PER-LINE data errors (bad JSON, a value PG
@@ -2105,7 +2230,7 @@ public sealed class ImportExportService(
                 // without reconnect (append isn't idempotent), so a broken
                 // connection here is terminal for this shard.
                 catch (Exception ex) when (ex is not OperationCanceledException
-                                           && (conn is null || conn.State == System.Data.ConnectionState.Open))
+                                           && (session is null || session.Connection.State == System.Data.ConnectionState.Open))
                 {
                     log.LogWarning(ex, "history line skipped in {Path}", ze.FullName);
                     st.AddFailure(new() { ["path"] = ze.FullName, ["kind"] = "history_line", ["error"] = ex.Message });
@@ -2116,7 +2241,7 @@ public sealed class ImportExportService(
         // (terminal for the shard), a per-file error (e.g. unreadable file) is
         // logged and skipped.
         catch (Exception ex) when (ex is not OperationCanceledException
-                                   && (conn is null || conn.State == System.Data.ConnectionState.Open))
+                                   && (session is null || session.Connection.State == System.Data.ConnectionState.Open))
         {
             log.LogWarning(ex, "import history failed at {Path}", ze.FullName);
             st.AddFailure(new() { ["path"] = ze.FullName, ["kind"] = "history", ["error"] = ex.Message });
@@ -2124,12 +2249,13 @@ public sealed class ImportExportService(
     }
 
     // ========================================================================
-    // Bulk inserters — used only by the `--fast` import path. Replace the
-    // per-row `INSERT ... ON CONFLICT` loop with a single binary COPY into a
-    // temp table followed by one `INSERT ... SELECT ... ON CONFLICT` merge.
+    // Bulk inserters — used by EVERY import path (default and --fast; the
+    // paths differ only in whether the session enforces constraints). Replace
+    // the per-row `INSERT ... ON CONFLICT` loop with a single binary COPY into
+    // a temp table followed by one `INSERT ... SELECT ... ON CONFLICT` merge.
     // For the two high-cardinality tables (entries, attachments) this
     // collapses N protocol round-trips into roughly two, which is where the
-    // order-of-magnitude speedup in `--fast` actually lives.
+    // order-of-magnitude speedup actually lives.
     //
     // SQL parity contract: the column list AND the per-row WriteAsync calls
     // below MUST stay in lockstep with each other and with the per-row

@@ -534,4 +534,56 @@ public class SearchExpressionParserTests
         combined.ShouldContain("payload::jsonb @>");
         combined.ShouldNotContain("ILIKE");
     }
+
+    [Fact]
+    public void Quoted_Value_With_Parens_Not_Treated_As_Group_Delimiters()
+    {
+        // Parens inside a quoted field value are part of the literal and must
+        // not be treated as group delimiters or have spaces injected around them.
+        var parsed = SearchExpressionParser.Parse(
+            "@displayname.en:\"*Poco Pad M1 8/256GB(Blue)*\"", 0);
+
+        parsed.Clauses.Count.ShouldBe(1);
+        // Pattern must preserve the parens without surrounding spaces.
+        parsed.Parameters.Count.ShouldBe(1);
+        var pattern = parsed.Parameters[0].Value as string;
+        pattern.ShouldNotBeNull();
+        pattern.ShouldContain("(Blue)");
+        pattern.ShouldNotContain("( Blue )");
+    }
+
+    [Fact]
+    public void Grouping_Parens_And_Quoted_Parens_Coexist()
+    {
+        // A genuine group delimiter AND a quoted field value containing parens in
+        // the same expression: the group must still form (two groups → OR) while
+        // the quoted value's parens survive unspaced. This exercises the
+        // normalize path (not the no-paren fast path the test above hits).
+        var parsed = SearchExpressionParser.Parse(
+            "(@shortname:alice) @displayname.en:\"*x(Blue)y*\"", 0);
+
+        parsed.Clauses.Count.ShouldBe(1);
+        parsed.Clauses[0].ShouldContain(" OR ");   // two groups OR'd together
+
+        var pattern = parsed.Parameters
+            .Select(p => p.Value as string)
+            .FirstOrDefault(v => v is not null && v.Contains("Blue"));
+        pattern.ShouldNotBeNull();
+        pattern.ShouldContain("(Blue)");
+        pattern.ShouldNotContain("( Blue )");
+    }
+
+    [Fact]
+    public void Stray_Quote_In_Text_Does_Not_Suppress_Following_Group()
+    {
+        // A lone '"' in free text (here a 5" measurement) must not open a quoted
+        // span that swallows the group delimiters after it — a quote only opens a
+        // value when it directly follows an `@field:` prefix. The (@shortname:bob)
+        // group must still parse as a real field filter, not inert quoted text.
+        var parsed = SearchExpressionParser.Parse("size 5\" (@shortname:bob)", 0);
+
+        parsed.Clauses.Count.ShouldBe(1);
+        parsed.Clauses[0].ShouldContain("shortname");
+        parsed.Parameters.Any(p => (p.Value as string) == "bob").ShouldBeTrue();
+    }
 }

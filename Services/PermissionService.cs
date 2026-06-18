@@ -86,7 +86,8 @@ public sealed class PermissionService(UserRepository users, AccessRepository acc
     // which is what grants access_personal/access_protected/etc. to ordinary
     // logins. Without this, roles like 'sub_dealer' with no explicit personal-space
     // grants would be locked out of their own /people/{shortname}/* subtree.
-    private const string ImplicitAuthenticatedRole = "logged_in";
+    // Internal so AdminBootstrap provisions the role row under the same name.
+    internal const string ImplicitAuthenticatedRole = "logged_in";
     // Python dmart treats unauthenticated callers as user_shortname="anonymous".
     // Public endpoints (/public/query, /public/entry) route through this path so
     // that __all_spaces__ / __all_subpaths__ magic words in the anonymous user's

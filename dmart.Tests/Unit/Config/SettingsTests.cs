@@ -19,6 +19,20 @@ public class SettingsTests
     }
 
     [Fact]
+    public void EnableInnerJoinPushdown_DefaultsTrue()
+    {
+        new DmartSettings().EnableInnerJoinPushdown.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Observability_Is_Off_By_Default()
+    {
+        // OTLP export must default to fully off so existing deployments — and
+        // every test — incur zero telemetry overhead unless explicitly opted in.
+        new DmartSettings().OtlpEndpoint.ShouldBeEmpty();
+    }
+
+    [Fact]
     public void DmartSettings_Binds_From_Configuration()
     {
         var cfg = new ConfigurationBuilder()

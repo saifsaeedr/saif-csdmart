@@ -78,17 +78,78 @@ public sealed class QueryService(
         if (string.IsNullOrEmpty(q.SpaceName))
             return Response.Fail(InternalErrorCode.INVALID_DATA, "space_name is required", ErrorTypes.Request);
 
-        var response = q.Type switch
+        // Fast path: push eligible INNER joins into SQL as EXISTS semi-joins so
+        // the base query paginates/counts in the DB instead of materializing the
+        // full base set. Falls back to the in-memory path below when ineligible.
+        // See docs/superpowers/specs/2026-06-10-sql-inner-join-pushdown-design.md.
+        if (settings.Value.EnableInnerJoinPushdown && q.Join is { Count: > 0 })
         {
-            QueryType.Spaces => await QuerySpacesAsync(q, actor, ct),
-            QueryType.History => await QueryHistoryAsync(q, actor, ct),
-            QueryType.Attachments => await QueryAttachmentsAsync(q, actor, ct),
-            QueryType.Tags => await QueryTagsAsync(q, actor, ct),
-            QueryType.Aggregation => await QueryAggregationAsync(q, actor, "entries", ct),
-            QueryType.AttachmentsAggregation => await QueryAggregationAsync(q, actor, "attachments", ct),
-            QueryType.Counters => await QueryCountersAsync(q, actor, ct),
-            QueryType.Events => await QueryEventsAsync(q, actor, ct),
-            _ => await DispatchTableQuery(q, actor, ct),
+            var plan = await TryPlanInnerJoinPushdownAsync(q, actor, ct);
+            if (plan is not null)
+            {
+                if (plan.AlwaysEmpty) return EmptyQueryResponse();
+
+                var fast = await QueryEntriesAsync(q, actor, ct, plan.SemiJoins);
+                if (fast.Status != Status.Success || fast.Records is not { Count: > 0 })
+                    return fast;  // empty page or failure — nothing to attach
+
+                // Attach matches for the page only. Pushed inner joins (and any
+                // left joins) attach as Left: SQL already decided membership, so
+                // the in-memory pass must never drop a row (its 1000-row narrowed
+                // pull could otherwise miss a match SQL legitimately kept).
+                var attachJoins = q.Join.Select(j => j with { Type = JoinType.Left }).ToList();
+                try
+                {
+                    var (joined, jqFail) = await ApplyClientJoinsAsync(fast.Records, attachJoins, actor, ct);
+                    if (jqFail is not null) return jqFail;
+                    var attrs = fast.Attributes is not null
+                        ? new Dictionary<string, object>(fast.Attributes, StringComparer.Ordinal)
+                        : new Dictionary<string, object>(StringComparer.Ordinal);
+                    attrs["returned"] = joined.Count;
+                    return fast with { Records = joined, Attributes = attrs };
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "client_join attach failed on pushdown fast-path");
+                    return fast;  // page is correct; join decoration absent
+                }
+            }
+        }
+
+        // A cardinality-changing join (inner/right/outer) filters or appends
+        // records AFTER the base query runs. If we let the base query apply
+        // SQL LIMIT/OFFSET first, the join would then drop/append rows INSIDE
+        // an already-paged window — producing short pages, a `total` that
+        // reflects the pre-join base count, and rows silently skipped across
+        // pages. To get "inner-join then paginate" semantics we fetch the base
+        // set unpaginated (up to MaxQueryLimit), run the join over the whole
+        // set, then page the JOINED result below. This is a deliberate
+        // divergence from Python's adapter.py, which paginates BEFORE
+        // _apply_client_joins (same latent bug). A `left` join keeps base
+        // cardinality, so it stays on the cheap SQL-paged path untouched.
+        var userLimit = limit;
+        var userOffset = q.Offset;
+        var repaginateAfterJoin = q.Join is { Count: > 0 } jset
+            && jset.Any(j => (j.Type ?? JoinType.Left) is JoinType.Inner or JoinType.Right or JoinType.Outer);
+        var baseCap = maxLimit > 0 ? maxLimit : 10000;
+
+        // For the re-paginated path, fetch the full base set (offset 0, capped)
+        // and skip the base COUNT — `total` is recomputed post-join below.
+        var dispatchQuery = repaginateAfterJoin
+            ? q with { Limit = baseCap, Offset = 0, RetrieveTotal = false }
+            : q;
+
+        var response = dispatchQuery.Type switch
+        {
+            QueryType.Spaces => await QuerySpacesAsync(dispatchQuery, actor, ct),
+            QueryType.History => await QueryHistoryAsync(dispatchQuery, actor, ct),
+            QueryType.Attachments => await QueryAttachmentsAsync(dispatchQuery, actor, ct),
+            QueryType.Tags => await QueryTagsAsync(dispatchQuery, actor, ct),
+            QueryType.Aggregation => await QueryAggregationAsync(dispatchQuery, actor, "entries", ct),
+            QueryType.AttachmentsAggregation => await QueryAggregationAsync(dispatchQuery, actor, "attachments", ct),
+            QueryType.Counters => await QueryCountersAsync(dispatchQuery, actor, ct),
+            QueryType.Events => await QueryEventsAsync(dispatchQuery, actor, ct),
+            _ => await DispatchTableQuery(dispatchQuery, actor, ct),
         };
 
         // Python parity: client-side joins run against the materialized result
@@ -101,6 +162,12 @@ public sealed class QueryService(
             && response.Status == Status.Success
             && response.Records is { Count: > 0 } records)
         {
+            // No silent caps: when the base scan hits the cap the join+paginate
+            // window is incomplete for pages beyond it — surface it in the log.
+            if (repaginateAfterJoin && records.Count >= baseCap)
+                logger.LogWarning(
+                    "client_join base set hit the {Cap}-row cap; join pagination beyond it is incomplete",
+                    baseCap);
             try
             {
                 var (joined, jqFail) = await ApplyClientJoinsAsync(records, joins, actor, ct);
@@ -109,24 +176,42 @@ public sealed class QueryService(
                     // the client asked for a filter and we couldn't honor it, so
                     // returning un-filtered data would be misleading.
                     return jqFail;
-                // After Inner/Right/Outer joins the response cardinality
-                // differs from `returned` (which the per-type query set
-                // before the join ran). Resync it so consumers iterating
-                // Records match the attribute. `total` keeps its meaning
-                // as the base-table count.
-                Dictionary<string, object>? newAttrs = null;
-                if (response.Attributes is not null && response.Attributes.ContainsKey("returned"))
+
+                if (repaginateAfterJoin)
                 {
-                    newAttrs = new Dictionary<string, object>(response.Attributes, StringComparer.Ordinal)
+                    // Inner/right/outer: page the JOINED set and recompute
+                    // `total` as the post-join cardinality. The base COUNT was
+                    // suppressed above — it would have been the pre-join
+                    // base-table count, meaningless once the join drops/appends.
+                    var total = joined.Count;
+                    var page = joined.Skip(Math.Max(0, userOffset)).Take(Math.Max(1, userLimit)).ToList();
+                    var pagedAttrs = response.Attributes is not null
+                        ? new Dictionary<string, object>(response.Attributes, StringComparer.Ordinal)
+                        : new Dictionary<string, object>(StringComparer.Ordinal);
+                    pagedAttrs["total"] = total;
+                    pagedAttrs["returned"] = page.Count;
+                    response = response with { Records = page, Attributes = pagedAttrs };
+                }
+                else
+                {
+                    // Left join keeps base cardinality, so the SQL page is still
+                    // the correct window; just resync `returned` (the join only
+                    // attaches data, never changes the count) and keep `total`
+                    // as the base-table count.
+                    Dictionary<string, object>? newAttrs = null;
+                    if (response.Attributes is not null && response.Attributes.ContainsKey("returned"))
                     {
-                        ["returned"] = joined.Count,
+                        newAttrs = new Dictionary<string, object>(response.Attributes, StringComparer.Ordinal)
+                        {
+                            ["returned"] = joined.Count,
+                        };
+                    }
+                    response = response with
+                    {
+                        Records = joined,
+                        Attributes = newAttrs ?? response.Attributes,
                     };
                 }
-                response = response with
-                {
-                    Records = joined,
-                    Attributes = newAttrs ?? response.Attributes,
-                };
             }
             catch (Exception ex)
             {
@@ -135,6 +220,19 @@ public sealed class QueryService(
                 // whole query. jq failures are already handled above via the
                 // tuple return — this catch is for join-algorithm bugs only.
                 logger.LogWarning(ex, "client_join join failed");
+                if (repaginateAfterJoin)
+                {
+                    // The base set was fetched unpaginated for the join; on a
+                    // join failure, fall back to the user's page window over the
+                    // un-joined base records rather than dumping the whole capped
+                    // scan (up to MaxQueryLimit rows) at the caller.
+                    var page = records.Skip(Math.Max(0, userOffset)).Take(Math.Max(1, userLimit)).ToList();
+                    var attrs = response.Attributes is not null
+                        ? new Dictionary<string, object>(response.Attributes, StringComparer.Ordinal)
+                        : new Dictionary<string, object>(StringComparer.Ordinal);
+                    attrs["returned"] = page.Count;
+                    response = response with { Records = page, Attributes = attrs };
+                }
             }
         }
 
@@ -596,7 +694,9 @@ public sealed class QueryService(
     // ENTRIES (default path)
     // ====================================================================
 
-    private async Task<Response> QueryEntriesAsync(Query q, string? actor, CancellationToken ct)
+    private async Task<Response> QueryEntriesAsync(
+        Query q, string? actor, CancellationToken ct,
+        IReadOnlyList<DataAdapters.Sql.InnerSemiJoinSpec>? semiJoins = null)
     {
         // Python parity (adapter.py:1500-1520, query_policies_helper.py:63-112):
         // skip the resource_type-specific preflight — it locked out every
@@ -616,10 +716,10 @@ public sealed class QueryService(
         q = await MergeFilterFieldsValuesAsync(q, policies, actor, ct);
 
         var effectiveActor = actor ?? PermissionService.AnonymousUser;
-        var pageTask = entries.QueryAsync(q, effectiveActor, policies, ct);
+        var pageTask = entries.QueryAsync(q, effectiveActor, policies, semiJoins, ct);
         var totalTask = q.RetrieveTotal == false
             ? Task.FromResult(-1)
-            : entries.CountQueryAsync(q, effectiveActor, policies, ct);
+            : entries.CountQueryAsync(q, effectiveActor, policies, semiJoins, ct);
         await Task.WhenAll(pageTask, totalTask);
 
         var records = (await pageTask)
@@ -1183,6 +1283,106 @@ public sealed class QueryService(
             result.Add((left, lArr, right, rArr));
         }
         return result;
+    }
+
+    // Result of pushdown planning. AlwaysEmpty short-circuits to an empty
+    // response (the actor cannot see the right side at all → no inner match
+    // can exist), mirroring QueryEntriesAsync's policies.Count==0 bail.
+    private sealed record JoinPushdownPlan
+    {
+        public required List<DataAdapters.Sql.InnerSemiJoinSpec> SemiJoins { get; init; }
+        public bool AlwaysEmpty { get; init; }
+    }
+
+    // A query that resolves to the shared `entries` table (not spaces/history/
+    // aggregation/counters/events, and not a management-table subpath).
+    private bool IsEntriesQuery(Query q)
+    {
+        switch (q.Type)
+        {
+            case QueryType.Spaces:
+            case QueryType.History:
+            case QueryType.Attachments:
+            case QueryType.Tags:
+            case QueryType.Aggregation:
+            case QueryType.AttachmentsAggregation:
+            case QueryType.Counters:
+            case QueryType.Events:
+                return false;
+        }
+        if (string.Equals(q.SpaceName, settings.Value.ManagementSpace, StringComparison.Ordinal))
+        {
+            var sub = (q.Subpath ?? "/").TrimStart('/');
+            foreach (var t in new[] { "users", "roles", "groups", "permissions" })
+                if (sub == t || sub.StartsWith(t + "/", StringComparison.Ordinal))
+                    return false;
+        }
+        return true;
+    }
+
+    // Decide whether q's joins can be pushed into SQL as INNER semi-joins.
+    // Returns a plan (one spec per inner join) when EVERY inner join is
+    // pushable and there are no right/outer joins; otherwise null → fallback.
+    // Never throws: any unexpected shape resolves to null.
+    private async Task<JoinPushdownPlan?> TryPlanInnerJoinPushdownAsync(
+        Query q, string? actor, CancellationToken ct)
+    {
+        if (q.Join is not { Count: > 0 } joins) return null;
+        if (!IsEntriesQuery(q)) return null;
+
+        var anyInner = false;
+        foreach (var j in joins)
+        {
+            var t = j.Type ?? JoinType.Left;
+            if (t is JoinType.Right or JoinType.Outer) return null;  // fallback owns these
+            if (t is JoinType.Inner) anyInner = true;
+        }
+        if (!anyInner) return null;  // pure-left is already cheap; leave to fallback
+
+        var specs = new List<DataAdapters.Sql.InnerSemiJoinSpec>();
+        foreach (var j in joins)
+        {
+            if ((j.Type ?? JoinType.Left) != JoinType.Inner) continue;  // left attaches post-page
+            if (string.IsNullOrEmpty(j.JoinOn) || string.IsNullOrEmpty(j.Alias) || j.Query is null)
+                return null;
+
+            List<(string lPath, bool lArr, string rPath, bool rArr)> pairs;
+            try { pairs = ParseJoinOn(j.JoinOn); }
+            catch { return null; }
+            if (pairs.Count == 0) return null;
+            if (pairs.Any(p => p.lArr || p.rArr)) return null;  // array keys → fallback
+
+            Query? rq;
+            try { rq = JsonSerializer.Deserialize(j.Query.Value, DmartJsonContext.Default.Query); }
+            catch { return null; }
+            if (rq is null || !IsEntriesQuery(rq)) return null;
+
+            var corr = new List<(string, string)>();
+            foreach (var (lPath, _, rPath, _) in pairs)
+            {
+                if (!DataAdapters.Sql.QueryHelper.TryJoinKeyToSql(lPath, "entries.", out var lExpr)
+                    || !DataAdapters.Sql.QueryHelper.TryJoinKeyToSql(rPath, "r.", out var rExpr))
+                    return null;
+                corr.Add((lExpr, rExpr));
+            }
+
+            // Right-side policies + filter-field merge, parity with how the right
+            // sub-query would be run standalone in QueryEntriesAsync.
+            var rPolicies = await perms.BuildUserQueryPoliciesAsync(actor, rq.SpaceName, rq.Subpath ?? "/", ct);
+            if (actor is not null && rPolicies.Count == 0)
+                return new JoinPushdownPlan { SemiJoins = specs, AlwaysEmpty = true };
+            var rqMerged = await MergeFilterFieldsValuesAsync(rq, rPolicies, actor, ct);
+
+            specs.Add(new DataAdapters.Sql.InnerSemiJoinSpec
+            {
+                RightQuery = rqMerged,
+                Actor = actor ?? PermissionService.AnonymousUser,
+                RightQueryPolicies = rPolicies,
+                Correlations = corr,
+            });
+        }
+
+        return specs.Count == 0 ? null : new JoinPushdownPlan { SemiJoins = specs, AlwaysEmpty = false };
     }
 
     // Pulls values from a Record at the given dotted path. Matches Python's
@@ -1863,23 +2063,40 @@ internal static class HistoryMapper
                         foreach (var kv in state.Value.EnumerateObject())
                         {
                             if (kv.Name == "headers") continue;
-                            scrubbed[kv.Name] = System.Text.Json.Nodes.JsonNode.Parse(kv.Value.GetRawText());
+                            scrubbed[kv.Name] = ElementToNode(kv.Value);
                         }
                         changeNode[state.Name] = scrubbed;
                     }
                     else
                     {
-                        changeNode[state.Name] = System.Text.Json.Nodes.JsonNode.Parse(state.Value.GetRawText());
+                        changeNode[state.Name] = ElementToNode(state.Value);
                     }
                 }
                 outNode[prop.Name] = changeNode;
             }
             else
             {
-                outNode[prop.Name] = System.Text.Json.Nodes.JsonNode.Parse(prop.Value.GetRawText());
+                outNode[prop.Name] = ElementToNode(prop.Value);
             }
         }
-        using var doc2 = JsonDocument.Parse(outNode.ToJsonString());
+        // Serialize the node tree straight to UTF-8 bytes and reparse — avoids
+        // the UTF-16 string detour of ToJsonString() → Parse().
+        var buffer = new System.Buffers.ArrayBufferWriter<byte>();
+        using (var writer = new Utf8JsonWriter(buffer))
+            outNode.WriteTo(writer);
+        using var doc2 = JsonDocument.Parse(buffer.WrittenMemory);
         return doc2.RootElement.Clone();
     }
+
+    // JsonElement → JsonNode without round-tripping through a string. The BCL
+    // Create() factories clone the element's tokens directly and are AOT-safe
+    // (no serializer metadata). JSON null maps to a null node, matching the
+    // prior JsonNode.Parse("null") behavior.
+    private static System.Text.Json.Nodes.JsonNode? ElementToNode(JsonElement el) => el.ValueKind switch
+    {
+        JsonValueKind.Object => System.Text.Json.Nodes.JsonObject.Create(el),
+        JsonValueKind.Array => System.Text.Json.Nodes.JsonArray.Create(el),
+        JsonValueKind.Null => null,
+        _ => System.Text.Json.Nodes.JsonValue.Create(el),
+    };
 }
