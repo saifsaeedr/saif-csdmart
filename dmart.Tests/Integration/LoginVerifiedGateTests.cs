@@ -173,10 +173,13 @@ public sealed class LoginVerifiedGateTests : IClassFixture<DmartFactory>
     // ---- helpers ----
 
     // Creates a Web user through the real admin path (POST /managed/request,
-    // resource_type=user) using an authenticated super-admin client. Mirrors the
-    // payload shape ManagedRequestCreateResponseTests drives. is_email_verified
-    // is only sent when emailVerified is true, so the false case exercises the
-    // RequestHandler default (the installed-base scenario under test).
+    // resource_type=user) using an authenticated super-admin client.
+    // is_email_verified is only sent when emailVerified is true, so the false
+    // case exercises the RequestHandler default (the installed-base scenario
+    // under test). #96: the managed path no longer accepts a password, so the
+    // user is created passwordless and we set the test password directly
+    // afterwards — the verification gate under test runs on the password-login
+    // path, and an admin-provisioned user is otherwise passwordless.
     private async Task<(string Shortname, string Email)> CreateUserViaManagedAsync(
         HttpClient admin, bool emailVerified)
     {
@@ -185,13 +188,20 @@ public sealed class LoginVerifiedGateTests : IClassFixture<DmartFactory>
         var verifiedAttr = emailVerified ? ",\"is_email_verified\":true" : "";
         var bodyJson = "{\"space_name\":\"management\",\"request_type\":\"create\",\"records\":[" +
             "{\"resource_type\":\"user\",\"shortname\":\"" + shortname + "\",\"subpath\":\"/users\"," +
-            "\"attributes\":{\"email\":\"" + email + "\",\"password\":\"" + Password + "\""
-            + verifiedAttr + "}}]}";
+            "\"attributes\":{\"email\":\"" + email + "\"" + verifiedAttr + "}}]}";
         var resp = await admin.PostAsync("/managed/request",
             new StringContent(bodyJson, Encoding.UTF8, "application/json"));
         resp.StatusCode.ShouldBe(HttpStatusCode.OK);
         (await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response))!
             .Status.ShouldBe(Status.Success);
+
+        // Give the passwordless admin-created user the test password via the repo
+        // (the only non-OTP path now) without disturbing the managed-set
+        // is_email_verified state the gate assertions depend on.
+        var users = _factory.Services.GetRequiredService<UserRepository>();
+        var hasher = _factory.Services.GetRequiredService<PasswordHasher>();
+        var created = (await users.GetByShortnameAsync(shortname))!;
+        await users.UpsertAsync(created with { Password = hasher.Hash(Password) });
         return (shortname, email);
     }
 
