@@ -170,13 +170,19 @@ public class SearchExpressionParserTests
     }
 
     [Fact]
-    public void Parenthesised_Groups_OR_Together()
+    public void Parenthesised_Groups_AND_Together()
     {
+        // BREAKING CHANGE (2026-06-20): whitespace between paren groups now
+        // means AND, not OR. OR is expressed only via the `or` keyword or
+        // value-level alternation `|`. Two single-field groups juxtaposed are
+        // AND'd; neither field has an internal OR, so the only OR/AND that can
+        // appear is the join between them.
         var parsed = SearchExpressionParser.Parse("(@shortname:alice) (@shortname:bob)", 0);
 
-        // Two groups → top-level should contain " OR " between them.
         parsed.Clauses.Count.ShouldBe(1);
-        parsed.Clauses[0].ShouldContain(" OR ");
+        parsed.Clauses[0].ShouldContain(" AND ");
+        parsed.Clauses[0].ShouldNotContain(" OR ");
+        parsed.Parameters.Count.ShouldBe(2);
     }
 
     [Fact]
@@ -556,14 +562,18 @@ public class SearchExpressionParserTests
     public void Grouping_Parens_And_Quoted_Parens_Coexist()
     {
         // A genuine group delimiter AND a quoted field value containing parens in
-        // the same expression: the group must still form (two groups → OR) while
-        // the quoted value's parens survive unspaced. This exercises the
-        // normalize path (not the no-paren fast path the test above hits).
+        // the same expression: the group still forms while the quoted value's
+        // parens survive unspaced. This exercises the normalize path (not the
+        // no-paren fast path the test above hits).
+        //
+        // BREAKING CHANGE (2026-06-20): `(A) B` is now AND, not OR — neither
+        // operand has an internal OR, so the join is a bare AND.
         var parsed = SearchExpressionParser.Parse(
             "(@shortname:alice) @displayname.en:\"*x(Blue)y*\"", 0);
 
         parsed.Clauses.Count.ShouldBe(1);
-        parsed.Clauses[0].ShouldContain(" OR ");   // two groups OR'd together
+        parsed.Clauses[0].ShouldContain(" AND ");  // group AND'd with the next selector
+        parsed.Clauses[0].ShouldNotContain(" OR ");
 
         var pattern = parsed.Parameters
             .Select(p => p.Value as string)
@@ -585,5 +595,407 @@ public class SearchExpressionParserTests
         parsed.Clauses.Count.ShouldBe(1);
         parsed.Clauses[0].ShouldContain("shortname");
         parsed.Parameters.Any(p => (p.Value as string) == "bob").ShouldBeTrue();
+    }
+
+    // ── `or` boolean keyword ──────────────────────────────────────────────
+    // Added 2026-06-20. `or` (case-insensitive, standalone token) introduces
+    // disjunction between adjacent terms/groups. Whitespace remains AND; AND
+    // binds tighter than OR. The keyword is recognized ONLY as a bare token —
+    // never inside a field value. See
+    // docs/superpowers/specs/2026-06-20-query-search-or-keyword-design.md.
+
+    // Helper: count non-overlapping occurrences of a separator in a string.
+    private static int Occurrences(string haystack, string needle)
+        => System.Text.RegularExpressions.Regex
+            .Matches(haystack, System.Text.RegularExpressions.Regex.Escape(needle)).Count;
+
+    [Fact]
+    public void Or_Keyword_Between_Two_Selectors_Emits_Top_Level_Or()
+    {
+        var parsed = SearchExpressionParser.Parse("@shortname:alice or @shortname:bob", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain(" OR ");
+        // `or` must NOT be treated as a free-text term (which would emit an
+        // ILIKE for "%or%") — this is the core regression vs the old parser.
+        combined.ShouldNotContain("ILIKE");
+        parsed.Parameters.Count.ShouldBe(2);
+        parsed.Parameters[0].Value.ShouldBe("alice");
+        parsed.Parameters[1].Value.ShouldBe("bob");
+    }
+
+    [Theory]
+    [InlineData("or")]
+    [InlineData("OR")]
+    [InlineData("Or")]
+    [InlineData("oR")]
+    public void Or_Keyword_Is_Case_Insensitive(string kw)
+    {
+        var parsed = SearchExpressionParser.Parse($"@shortname:alice {kw} @shortname:bob", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain(" OR ");
+        combined.ShouldNotContain("ILIKE");
+        parsed.Parameters.Count.ShouldBe(2);
+    }
+
+    [Fact]
+    public void And_Binds_Tighter_Than_Or()
+    {
+        // a b or c d  ⇒  (a AND b) OR (c AND d).
+        // Use scalar text columns (each emits `field::text = @s_n`, no internal
+        // OR/AND) so the only OR/AND in the output is structural.
+        var parsed = SearchExpressionParser.Parse("@aa:1 @bb:2 or @cc:3 @dd:4", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        // Exactly one structural OR (between the two AND-groups) and two ANDs.
+        Occurrences(combined, " OR ").ShouldBe(1);
+        Occurrences(combined, " AND ").ShouldBe(2);
+        // Left of the OR are aa/bb; right are cc/dd.
+        var orIdx = combined.IndexOf(" OR ", System.StringComparison.Ordinal);
+        var left = combined[..orIdx];
+        var right = combined[orIdx..];
+        left.ShouldContain("aa::text");
+        left.ShouldContain("bb::text");
+        right.ShouldContain("cc::text");
+        right.ShouldContain("dd::text");
+        parsed.Parameters.Count.ShouldBe(4);
+    }
+
+    [Fact]
+    public void Parens_Override_Precedence_Or_Group_Anded_With_Term()
+    {
+        // (x or y) z  ⇒  (x OR y) AND z. The user's headline example shape.
+        var parsed = SearchExpressionParser.Parse("(@xx:1 or @yy:2) @zz:3", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        Occurrences(combined, " OR ").ShouldBe(1);
+        Occurrences(combined, " AND ").ShouldBe(1);
+        // The OR (between x and y) is nested inside; the AND joins that group
+        // with z. So the OR appears textually before the AND.
+        var orIdx = combined.IndexOf(" OR ", System.StringComparison.Ordinal);
+        var andIdx = combined.IndexOf(" AND ", System.StringComparison.Ordinal);
+        orIdx.ShouldBeLessThan(andIdx);
+        // z is on the AND side, outside the OR group.
+        combined.ShouldContain("zz::text");
+        parsed.Parameters.Count.ShouldBe(3);
+    }
+
+    [Fact]
+    public void Trailing_Or_Is_Dropped_Reduces_To_Left()
+    {
+        var parsed = SearchExpressionParser.Parse("@shortname:alice or", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain("shortname::text = @s_0");
+        combined.ShouldNotContain(" OR ");
+        combined.ShouldNotContain("ILIKE");
+        parsed.Parameters.Count.ShouldBe(1);
+    }
+
+    [Fact]
+    public void Leading_Or_Is_Dropped_Reduces_To_Right()
+    {
+        var parsed = SearchExpressionParser.Parse("or @shortname:alice", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain("shortname::text = @s_0");
+        combined.ShouldNotContain(" OR ");
+        combined.ShouldNotContain("ILIKE");
+        parsed.Parameters.Count.ShouldBe(1);
+    }
+
+    [Fact]
+    public void Double_Or_Drops_Empty_Operand()
+    {
+        var parsed = SearchExpressionParser.Parse("@shortname:alice or or @shortname:bob", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        Occurrences(combined, " OR ").ShouldBe(1);
+        combined.ShouldNotContain("ILIKE");
+        parsed.Parameters.Count.ShouldBe(2);
+    }
+
+    [Fact]
+    public void Empty_Group_Alone_Yields_No_Clauses()
+    {
+        var parsed = SearchExpressionParser.Parse("()", 0);
+
+        parsed.Clauses.Count.ShouldBe(0);
+        parsed.Parameters.Count.ShouldBe(0);
+    }
+
+    [Fact]
+    public void Or_With_Empty_Group_Reduces_To_Other_Side()
+    {
+        var parsed = SearchExpressionParser.Parse("(@shortname:alice) or ()", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain("shortname::text = @s_0");
+        combined.ShouldNotContain(" OR ");
+        parsed.Parameters.Count.ShouldBe(1);
+    }
+
+    [Fact]
+    public void Empty_Group_On_Left_Of_Or_Reduces_To_Right()
+    {
+        var parsed = SearchExpressionParser.Parse("() or @shortname:alice", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain("shortname::text = @s_0");
+        combined.ShouldNotContain(" OR ");
+        parsed.Parameters.Count.ShouldBe(1);
+    }
+
+    [Fact]
+    public void Unclosed_Paren_Is_Auto_Closed()
+    {
+        var parsed = SearchExpressionParser.Parse("(@shortname:alice or @shortname:bob", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain(" OR ");
+        combined.ShouldNotContain("ILIKE");
+        parsed.Parameters.Count.ShouldBe(2);
+    }
+
+    [Fact]
+    public void Stray_Close_Paren_Is_Ignored_And_Terms_And_Together()
+    {
+        var parsed = SearchExpressionParser.Parse("@shortname:alice) @shortname:bob", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        // Stray ')' dropped; the two selectors AND together (whitespace = AND).
+        combined.ShouldContain(" AND ");
+        combined.ShouldNotContain(" OR ");
+        combined.ShouldNotContain("ILIKE");
+        parsed.Parameters.Count.ShouldBe(2);
+    }
+
+    [Fact]
+    public void Stray_Close_Paren_Before_Or_Preserves_Or()
+    {
+        // A stray ')' must be ignored WITHOUT changing the boolean meaning of a
+        // following `or`. (Regression guard: a buggy recovery path once dropped
+        // the `or` and silently AND'd the operands instead.)
+        var parsed = SearchExpressionParser.Parse("@shortname:alice) or @shortname:bob", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain(" OR ");
+        combined.ShouldNotContain(" AND ");
+        combined.ShouldNotContain("ILIKE");
+        parsed.Parameters.Count.ShouldBe(2);
+    }
+
+    [Fact]
+    public void Over_Closed_Group_Before_Or_Preserves_Or()
+    {
+        // Realistic typo: an extra ')' after a balanced group, then `or`.
+        var parsed = SearchExpressionParser.Parse("(@shortname:alice)) or @shortname:bob", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain(" OR ");
+        combined.ShouldNotContain(" AND ");
+        parsed.Parameters.Count.ShouldBe(2);
+    }
+
+    [Fact]
+    public void Free_Text_Term_Can_Be_An_Or_Operand()
+    {
+        var parsed = SearchExpressionParser.Parse("foo or @shortname:bob", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain(" OR ");
+        // Left branch is the free-text fan-out (ILIKE); right is the selector.
+        combined.ShouldContain("shortname ILIKE @s_0");
+        combined.ShouldContain("shortname::text = @s_1");
+        parsed.Parameters[0].Value.ShouldBe("%foo%");
+        parsed.Parameters[1].Value.ShouldBe("bob");
+    }
+
+    [Fact]
+    public void Nested_Groups_Respect_Structure()
+    {
+        // ((a or b) c) or d  ⇒  (((a OR b) AND c) OR d).
+        var parsed = SearchExpressionParser.Parse("((@aa:1 or @bb:2) @cc:3) or @dd:4", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        Occurrences(combined, " OR ").ShouldBe(2); // (a OR b) and (... OR d)
+        Occurrences(combined, " AND ").ShouldBe(1); // (... AND c)
+        combined.ShouldNotContain("ILIKE");
+        parsed.Parameters.Count.ShouldBe(4);
+
+        // Structure (not just counts): cc is AND'd onto the (aa OR bb) group, and
+        // dd is the right operand of the OUTER, last OR. Counts alone can't tell
+        // `(((a OR b) AND c) OR d)` apart from `((a OR b) OR (c AND d))`.
+        var lastOr = combined.LastIndexOf(" OR ", System.StringComparison.Ordinal);
+        var andIdx = combined.IndexOf(" AND ", System.StringComparison.Ordinal);
+        andIdx.ShouldBeLessThan(lastOr);                 // the AND is inside the left operand of the outer OR
+        combined.IndexOf("aa::text", System.StringComparison.Ordinal).ShouldBeLessThan(andIdx);
+        combined.IndexOf("bb::text", System.StringComparison.Ordinal).ShouldBeLessThan(andIdx);
+        combined.IndexOf("cc::text", System.StringComparison.Ordinal).ShouldBeLessThan(lastOr); // c is left of the outer OR
+        combined.IndexOf("dd::text", System.StringComparison.Ordinal).ShouldBeGreaterThan(lastOr); // d is the outer-OR right operand
+    }
+
+    [Fact]
+    public void Three_Way_Or_Flattens_To_Single_Or_Level()
+    {
+        // N-ary OR (3 operands) flattens into one OrNode → `(a OR b OR c)`,
+        // not pairwise-nested. Counts: two " OR " separators, three params.
+        var parsed = SearchExpressionParser.Parse("@aa:1 or @bb:2 or @cc:3", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        Occurrences(combined, " OR ").ShouldBe(2);
+        Occurrences(combined, " AND ").ShouldBe(0);
+        parsed.Parameters.Count.ShouldBe(3);
+    }
+
+    [Theory]
+    [InlineData("and")]
+    [InlineData("or")]
+    [InlineData("and and")]
+    [InlineData("(   )")]
+    public void Bare_Operators_And_Empty_Groups_Yield_No_Clauses(string input)
+    {
+        // Lenient contract: operator-only / empty-group-only input never throws
+        // and produces no clause (same as empty input).
+        var parsed = SearchExpressionParser.Parse(input, 0);
+
+        parsed.Clauses.Count.ShouldBe(0);
+        parsed.Parameters.Count.ShouldBe(0);
+    }
+
+    [Fact]
+    public void Or_As_Field_Value_Is_Literal_Not_Keyword()
+    {
+        var parsed = SearchExpressionParser.Parse("@shortname:or", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain("shortname::text = @s_0");
+        combined.ShouldNotContain(" OR ");
+        parsed.Parameters.Count.ShouldBe(1);
+        parsed.Parameters[0].Value.ShouldBe("or");
+    }
+
+    [Fact]
+    public void Quoted_Value_Containing_Or_Keyword_Is_Literal()
+    {
+        // A quoted value is one token (the regex's `@…:"…"` alternative), so a
+        // whitespace-delimited `or` *inside* the quotes is part of the value,
+        // not the boolean keyword.
+        var parsed = SearchExpressionParser.Parse("@shortname:\"alice or bob\"", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain("shortname::text = @s_0");
+        combined.ShouldNotContain(" OR ");
+        parsed.Parameters.Count.ShouldBe(1);
+        parsed.Parameters[0].Value.ShouldBe("alice or bob");
+    }
+
+    [Fact]
+    public void And_Keyword_Between_Groups_Is_A_No_Op_And()
+    {
+        // The literal `and` between paren groups is the optional no-op synonym
+        // for whitespace — both mean AND. (`(A) and (B)` == `(A) (B)`.)
+        var withKeyword = SearchExpressionParser.Parse("(@is_active:true) and (@is_open:false)", 0);
+        var withSpace = SearchExpressionParser.Parse("(@is_active:true) (@is_open:false)", 0);
+
+        var a = string.Join(" ", withKeyword.Clauses);
+        var b = string.Join(" ", withSpace.Clauses);
+        a.ShouldBe(b);
+        a.ShouldContain(" AND ");
+        a.ShouldNotContain(" OR ");
+    }
+
+    [Fact]
+    public void Value_Containing_Or_Substring_Is_Literal()
+    {
+        // "author" contains "or" but is a single token → literal value.
+        var parsed = SearchExpressionParser.Parse("@shortname:author", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain("shortname::text = @s_0");
+        combined.ShouldNotContain(" OR ");
+        parsed.Parameters[0].Value.ShouldBe("author");
+    }
+
+    [Fact]
+    public void Alternation_Composes_With_Or_Keyword()
+    {
+        // `@k:a|b or @k:c` — alternation OR inside the left selector, plus the
+        // keyword OR joining it to the right selector. Two distinct OR sources.
+        var parsed = SearchExpressionParser.Parse("@shortname:a|b or @shortname:c", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        Occurrences(combined, " OR ").ShouldBeGreaterThanOrEqualTo(2);
+        parsed.Parameters.Count.ShouldBe(3);
+    }
+
+    [Fact]
+    public void Negation_Within_An_Or_Branch_Is_Preserved()
+    {
+        var parsed = SearchExpressionParser.Parse("-@shortname:alice or @shortname:bob", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain("shortname::text != @s_0");
+        combined.ShouldContain("shortname::text = @s_1");
+        combined.ShouldContain(" OR ");
+        parsed.Parameters.Count.ShouldBe(2);
+    }
+
+    [Fact]
+    public void Payload_Selectors_Compose_With_Or_Keyword()
+    {
+        // End-to-end: real payload containment on both sides, OR'd.
+        var parsed = SearchExpressionParser.Parse("@payload.body.a:1 or @payload.body.b:2", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain("payload::jsonb @>");
+        combined.ShouldContain(" OR ");
+        // Both payload paths are present.
+        combined.ShouldContain("'a'");
+        combined.ShouldContain("'b'");
+    }
+
+    // ── Regression guards: leaf-run semantics survive the rewrite ──────────
+
+    [Fact]
+    public void Same_Field_Accumulation_Preserved_Within_Leaf_Run()
+    {
+        // `@tags:a @tags:b` (juxtaposition, same sign) accumulates into a
+        // single field with AND semantics — both tags must be present. This
+        // must NOT regress to OR or to two separate groups.
+        var parsed = SearchExpressionParser.Parse("@tags:a @tags:b", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        Occurrences(combined, "tags @>").ShouldBe(2);
+        combined.ShouldContain(" AND ");
+        // Each tags value binds two params (text + jsonb-array literal).
+        parsed.Parameters.Count.ShouldBe(4);
+    }
+
+    [Fact]
+    public void Or_Boundary_Scopes_Accumulation_Into_Separate_Groups()
+    {
+        // `@tags:a or @tags:b` is OR of two independent single-value groups,
+        // NOT accumulation — the `or` boundary starts a fresh leaf.
+        var parsed = SearchExpressionParser.Parse("@tags:a or @tags:b", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain(" OR ");
+        Occurrences(combined, "tags @>").ShouldBe(2);
+        parsed.Parameters.Count.ShouldBe(4);
+    }
+
+    [Fact]
+    public void Last_Sign_Wins_Preserved_Within_Leaf_Run()
+    {
+        // `@shortname:x -@shortname:x` — opposite signs on the same field in
+        // one run; the last sign wins → negation. Preserved across the rewrite.
+        var parsed = SearchExpressionParser.Parse("@shortname:dup -@shortname:dup", 0);
+
+        var combined = string.Join(" ", parsed.Clauses);
+        combined.ShouldContain("shortname::text != @s_0");
+        combined.ShouldNotContain("shortname::text = @s_0");
+        parsed.Parameters.Count.ShouldBe(1);
     }
 }

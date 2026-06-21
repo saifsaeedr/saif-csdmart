@@ -14,7 +14,11 @@ namespace Dmart.QueryGrammar;
 // the parameter style to named `@s_<n>` placeholders. Behaviour is
 // otherwise identical, including:
 //
-//   - parenthesised groups (AND inside, OR between),
+//   - boolean grouping: whitespace = AND, the `or` keyword = OR,
+//     parentheses for nesting; AND binds tighter than OR. (The literal
+//     `and` is an optional no-op synonym for whitespace.) NOTE: as of
+//     2026-06-20 whitespace between paren groups means AND, not OR — OR
+//     is expressed only via `or` or value-level alternation `|`.
 //   - negation (`-@field:value`),
 //   - alternation (`@k:a|b`),
 //   - ranges (`@k:[v1 v2]` / `@k:[v1,v2]`),
@@ -132,34 +136,22 @@ public static class SearchExpressionParser
 
         var ctx = new ParamCtx(startingParamIndex, style, targetTable);
 
-        var groups = ParseSearchExpression(expression);
-        var allGroupSql = new List<string>();
-        foreach (var group in groups)
-        {
-            var conditions = new List<string>();
+        // Phase 1: tokenize + recursive-descent parse into a boolean AST.
+        // At the top level (stopAtParen: false) a stray `)` is skipped as noise
+        // rather than ending the parse, so ParseOrExpr consumes the entire
+        // stream — including any `or` that follows an unbalanced `)`. No
+        // post-hoc recovery pass is needed (one would wrongly drop such an
+        // `or`, silently turning OR into AND).
+        var ts = new TokenStream(Tokenize(expression));
+        var root = ParseOrExpr(ts, stopAtParen: false);
 
-            foreach (var (field, data) in group.Fields)
-            {
-                var clause = BuildSearchFieldSql(field, data, ctx);
-                if (clause is not null) conditions.Add(clause);
-            }
-
-            foreach (var term in group.TextTerms)
-            {
-                var p = ctx.Add($"%{term}%");
-                conditions.Add(
-                    $"(shortname ILIKE {p} OR payload::text ILIKE {p} OR displayname::text ILIKE {p} OR description::text ILIKE {p} OR tags::text ILIKE {p})");
-            }
-
-            if (conditions.Count > 0)
-                allGroupSql.Add("(" + string.Join(" AND ", conditions) + ")");
-        }
+        // Phase 2: emit SQL. Parameters are bound during the walk in
+        // left-to-right token order, so $N / @s_n numbering matches reading
+        // order — identical to the previous inline builder for non-`or` input.
+        var sql = EmitNode(root, ctx);
 
         pars.AddRange(ctx.Parameters);
-        if (allGroupSql.Count == 0) return new Parsed(clauses, pars);
-        if (allGroupSql.Count == 1) clauses.Add(allGroupSql[0]);
-        else clauses.Add("(" + string.Join(" OR ", allGroupSql) + ")");
-
+        if (sql is not null) clauses.Add(sql);
         return new Parsed(clauses, pars);
     }
 
@@ -344,68 +336,207 @@ public static class SearchExpressionParser
         return false;
     }
 
-    private static List<SearchGroup> ParseSearchExpression(string search)
+    // ── Tokenize + boolean AST ─────────────────────────────────────────────
+    //
+    // Grammar (each level a method below):
+    //
+    //   orExpr  := andExpr ( OR  andExpr )*      OR  = the word "or"
+    //   andExpr := factor  ( factor )*           juxtaposition / "and" = AND
+    //   factor  := '(' orExpr ')' | leafRun
+    //   leafRun := ( selector | textTerm | "and" )+   one contiguous run
+    //
+    // AND binds tighter than OR. A maximal contiguous run of leaf tokens
+    // (selectors + free-text, with the no-op `and` skipped) is gathered into a
+    // SINGLE SearchGroup via the existing ParseSearchString, preserving
+    // same-field accumulation and last-sign-wins. `or` and `(`/`)` are the only
+    // boundaries that start a new group.
+
+    private enum TokenKind { Term, Or, And, LParen, RParen }
+
+    // `Text` (not `Value`) deliberately: a `Token?` would expose `Nullable<>.Value`,
+    // and a member also named `Value` makes `tok.Value.Kind` read ambiguously.
+    private readonly record struct Token(TokenKind Kind, string Text);
+
+    private sealed class TokenStream
     {
-        var (hasParens, normalized) = ScanGroupingParens(search);
+        private readonly IReadOnlyList<Token> _tokens;
+        private int _pos;
+        public TokenStream(IReadOnlyList<Token> tokens) => _tokens = tokens;
+        public bool Eof => _pos >= _tokens.Count;
+        public Token? Peek => _pos < _tokens.Count ? _tokens[_pos] : null;
+        public void Advance() => _pos++;
+    }
 
-        if (!hasParens)
+    private abstract class Node;
+
+    private sealed class LeafNode : Node
+    {
+        public required SearchGroup Group { get; init; }
+    }
+
+    private sealed class AndNode : Node
+    {
+        public List<Node> Children { get; }
+        public AndNode(List<Node> children) => Children = children;
+    }
+
+    private sealed class OrNode : Node
+    {
+        public List<Node> Children { get; }
+        public OrNode(List<Node> children) => Children = children;
+    }
+
+    // ScanGroupingParens space-pads structural `(`/`)` (exempting quoted
+    // `@field:"…"` values) so the regex sees them as standalone tokens. We then
+    // classify. `or`/`and` are recognized ONLY as bare whitespace-delimited
+    // tokens (case-insensitive) — never inside a value, because a value like
+    // `@x:or` matches as a single `@…:…` token.
+    private static List<Token> Tokenize(string search)
+    {
+        var (_, normalized) = ScanGroupingParens(search);
+        var matches = SearchTokenRegex.Matches(normalized);
+        var tokens = new List<Token>(matches.Count);
+        foreach (Match m in matches)
         {
-            var tokens = SearchTokenRegex.Matches(search);
-            var fieldTokens = new List<string>();
-            var textTerms = new List<string>();
-            foreach (Match t in tokens)
+            var v = m.Value;
+            var kind = v switch
             {
-                var v = t.Value;
-                if (v.Equals("and", StringComparison.OrdinalIgnoreCase)) continue;
-                if (v.StartsWith('@') || v.StartsWith("-@"))
-                    fieldTokens.Add(v);
-                else
-                    textTerms.Add(v);
-            }
-            var group = new SearchGroup();
-            ParseSearchString(fieldTokens, group.Fields);
-            group.TextTerms.AddRange(textTerms);
-            return new List<SearchGroup> { group };
+                "(" => TokenKind.LParen,
+                ")" => TokenKind.RParen,
+                _ when v.Equals("or", StringComparison.OrdinalIgnoreCase) => TokenKind.Or,
+                _ when v.Equals("and", StringComparison.OrdinalIgnoreCase) => TokenKind.And,
+                _ => TokenKind.Term,
+            };
+            tokens.Add(new Token(kind, v));
+        }
+        return tokens;
+    }
+
+    // stopAtParen: true inside a `( … )` group, where a `)` closes the group
+    // and is consumed by the enclosing ParseFactor; false at the top level,
+    // where an unmatched `)` is stray noise to be skipped (see ParseAndExpr).
+    private static Node? ParseOrExpr(TokenStream ts, bool stopAtParen)
+    {
+        var parts = new List<Node>();
+        var first = ParseAndExpr(ts, stopAtParen);
+        if (first is not null) parts.Add(first);
+
+        while (ts.Peek is { Kind: TokenKind.Or })
+        {
+            ts.Advance();                       // consume `or`
+            var next = ParseAndExpr(ts, stopAtParen);
+            if (next is not null) parts.Add(next); // drop empty operands (`a or or b`, `a or`)
         }
 
-        // `normalized` from ScanGroupingParens above has spaces around the
-        // structural parens so the tokenizer sees them as standalone tokens.
-        var allTokens = SearchTokenRegex.Matches(normalized);
-        var groups = new List<SearchGroup>();
-        var curFields = new List<string>();
-        var curText = new List<string>();
-        int depth = 0;
+        if (parts.Count == 0) return null;
+        if (parts.Count == 1) return parts[0];
+        return new OrNode(parts);
+    }
 
-        void Flush()
+    private static Node? ParseAndExpr(TokenStream ts, bool stopAtParen)
+    {
+        var parts = new List<Node>();
+        while (true)
         {
-            if (curFields.Count == 0 && curText.Count == 0) return;
-            var g = new SearchGroup();
-            ParseSearchString(curFields, g.Fields);
-            g.TextTerms.AddRange(curText);
-            groups.Add(g);
-        }
-
-        foreach (Match tok in allTokens)
-        {
-            var v = tok.Value;
-            if (v == "(")
+            while (ts.Peek is { Kind: TokenKind.And }) ts.Advance(); // no-op separator
+            var tok = ts.Peek;
+            if (tok is null || tok.Value.Kind == TokenKind.Or) break;
+            if (tok.Value.Kind == TokenKind.RParen)
             {
-                if (depth == 0) { Flush(); curFields.Clear(); curText.Clear(); }
-                depth++;
+                if (stopAtParen) break;         // let the enclosing group consume `)`
+                ts.Advance();                   // top-level stray `)` → skip as noise
                 continue;
             }
-            if (v == ")")
-            {
-                depth = Math.Max(0, depth - 1);
-                if (depth == 0) { Flush(); curFields.Clear(); curText.Clear(); }
-                continue;
-            }
-            if (v.Equals("and", StringComparison.OrdinalIgnoreCase)) continue;
-            if (v.StartsWith('@') || v.StartsWith("-@")) curFields.Add(v);
-            else curText.Add(v);
+
+            var factor = ParseFactor(ts);
+            if (factor is not null) parts.Add(factor);
+            // factor may be null (empty `()`) but ParseFactor always consumes at
+            // least one token in that case, so the loop makes progress.
         }
-        Flush();
-        return groups.Count > 0 ? groups : new List<SearchGroup> { new() };
+
+        if (parts.Count == 0) return null;
+        if (parts.Count == 1) return parts[0];
+        return new AndNode(parts);
+    }
+
+    private static Node? ParseFactor(TokenStream ts)
+    {
+        var tok = ts.Peek;
+        if (tok is null) return null;
+
+        if (tok.Value.Kind == TokenKind.LParen)
+        {
+            ts.Advance();                       // consume `(`
+            var inner = ParseOrExpr(ts, stopAtParen: true);
+            if (ts.Peek is { Kind: TokenKind.RParen }) ts.Advance(); // `)`; auto-close at EOF
+            return inner;                       // null for an empty group
+        }
+
+        // A maximal run of leaf tokens → one SearchGroup. `and` inside the run
+        // is the no-op separator; the run stops at `or`, `(`, `)`, or EOF.
+        var fieldTokens = new List<string>();
+        var textTerms = new List<string>();
+        while (ts.Peek is { } cur && cur.Kind is TokenKind.Term or TokenKind.And)
+        {
+            ts.Advance();
+            if (cur.Kind == TokenKind.And) continue;
+            if (cur.Text.StartsWith('@') || cur.Text.StartsWith("-@"))
+                fieldTokens.Add(cur.Text);
+            else
+                textTerms.Add(cur.Text);
+        }
+
+        var group = new SearchGroup();
+        ParseSearchString(fieldTokens, group.Fields);
+        group.TextTerms.AddRange(textTerms);
+        return new LeafNode { Group = group };
+    }
+
+    // ── AST → SQL ──────────────────────────────────────────────────────────
+
+    private static string? EmitNode(Node? node, ParamCtx ctx) => node switch
+    {
+        null => null,
+        LeafNode leaf => EmitLeaf(leaf.Group, ctx),
+        AndNode a => EmitJoin(a.Children, " AND ", ctx),
+        OrNode o => EmitJoin(o.Children, " OR ", ctx),
+        _ => null,
+    };
+
+    private static string? EmitJoin(List<Node> children, string op, ParamCtx ctx)
+    {
+        var parts = new List<string>();
+        foreach (var child in children)
+        {
+            var sql = EmitNode(child, ctx);
+            if (sql is not null) parts.Add(sql);
+        }
+        if (parts.Count == 0) return null;
+        if (parts.Count == 1) return parts[0];
+        return "(" + string.Join(op, parts) + ")";
+    }
+
+    // One leaf = one contiguous run: fields AND'd together, then free-text
+    // terms AND'd on. Byte-identical to the previous per-group emit.
+    private static string? EmitLeaf(SearchGroup group, ParamCtx ctx)
+    {
+        var conditions = new List<string>();
+
+        foreach (var (field, data) in group.Fields)
+        {
+            var clause = BuildSearchFieldSql(field, data, ctx);
+            if (clause is not null) conditions.Add(clause);
+        }
+
+        foreach (var term in group.TextTerms)
+        {
+            var p = ctx.Add($"%{term}%");
+            conditions.Add(
+                $"(shortname ILIKE {p} OR payload::text ILIKE {p} OR displayname::text ILIKE {p} OR description::text ILIKE {p} OR tags::text ILIKE {p})");
+        }
+
+        if (conditions.Count == 0) return null;
+        return "(" + string.Join(" AND ", conditions) + ")";
     }
 
     private static void ParseSearchString(List<string> tokens, Dictionary<string, SearchField> result)

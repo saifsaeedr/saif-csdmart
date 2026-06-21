@@ -249,6 +249,9 @@ internal static class HistoryDiffUtil
     public static Dictionary<string, object> ComputeSpaceDiff(Space oldS, Space newS)
         => DiffFromMaps(FlattenSpace(oldS), FlattenSpace(newS));
 
+    public static Dictionary<string, object> ComputeAttachmentDiff(Attachment oldA, Attachment newA)
+        => DiffFromMaps(FlattenAttachment(oldA), FlattenAttachment(newA));
+
     private static Dictionary<string, object> DiffFromMaps(
         Dictionary<string, object?> oldFlat, Dictionary<string, object?> newFlat)
     {
@@ -368,6 +371,15 @@ internal static class HistoryDiffUtil
         d["hide_folders"] = s.HideFolders ?? new();
         d["hide_space"] = s.HideSpace;
         d["ordinal"] = s.Ordinal;
+        return d;
+    }
+
+    private static Dictionary<string, object?> FlattenAttachment(Attachment a)
+    {
+        var d = FlattenMetasBase(a.IsActive, a.Slug, a.Displayname, a.Description, a.Tags, a.Payload,
+            a.OwnerShortname, a.OwnerGroupShortname);
+        d["body"] = a.Body;
+        d["state"] = a.State;
         return d;
     }
 }
