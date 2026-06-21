@@ -19,7 +19,9 @@ RediSearch-flavoured `@field:value` syntax, originally borrowed from the Python 
 | `@field:foo*` / `*foo` / `*foo*`    | wildcard (prefix / suffix / contains)               |
 | `@field:null`                       | match field-missing OR JSON null                    |
 | `@field:*`                          | existence check (IS NOT NULL)                       |
-| `(group1) (group2)`                 | parenthesised groups, AND within, OR between        |
+| `(group1) (group2)`                 | parenthesised groups; whitespace = AND between      |
+| `expr1 or expr2`                    | disjunction; AND binds tighter than OR              |
+| `expr1 and expr2`                   | no-op synonym for whitespace (AND)                  |
 | `@payload.body.x.y:value`           | JSONB path lookup                                   |
 | `@payload.body.items[].price:>100`  | array iteration with predicate                      |
 | free `word`                         | plain ILIKE across shortname/payload/displayname/…  |

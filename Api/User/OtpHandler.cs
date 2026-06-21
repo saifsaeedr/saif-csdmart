@@ -329,6 +329,8 @@ public static class OtpHandler
             {
                 Password = hasher.Hash(req.Password),
                 ForcePasswordChange = false,
+                IsEmailVerified = dest == user.Email ? true : user.IsEmailVerified,
+                IsMsisdnVerified = dest == user.Msisdn ? true : user.IsMsisdnVerified,
                 UpdatedAt = TimeUtils.Now(),
             };
             await users.UpsertAsync(updated, ct);
