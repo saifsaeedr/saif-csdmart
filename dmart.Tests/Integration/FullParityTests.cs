@@ -606,6 +606,61 @@ public class FullParityTests : IClassFixture<DmartFactory>
         await TestUserCleanup.DeleteUserAndOwnedAsync(factory.Services, result.Records![0].Shortname);
     }
 
+    // ==================== force_password_change on self-registration ====================
+
+    [FactIfPg]
+    public async Task Self_Registration_With_Password_Sets_ForcePasswordChange_False()
+    {
+        // A self-registered user who supplies a password has already chosen
+        // one, so the flag must be false — no forced change at first login.
+        var factory = _factory.WithWebHostBuilder(b => b.ConfigureServices(svcs =>
+        {
+            svcs.Configure<Dmart.Config.DmartSettings>(s => s.IsOtpForCreateRequired = false);
+        }));
+        var client = factory.CreateClient();
+        var users = factory.Services.GetRequiredService<UserRepository>();
+        var email = "fpcpwd_" + Guid.NewGuid().ToString("N")[..6] + "@x.y";
+        var body = "{\"attributes\":{\"email\":\"" + email + "\",\"password\":\"Testtest1234\"}}";
+        var resp = await client.PostAsync("/user/create",
+            new StringContent(body, Encoding.UTF8, "application/json"));
+        var result = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
+        result!.Status.ShouldBe(Status.Success);
+
+        var created = await users.GetByShortnameAsync(result.Records![0].Shortname);
+        created.ShouldNotBeNull();
+        created!.ForcePasswordChange.ShouldBeFalse(
+            "self-registration with a password must not force a change");
+
+        await TestUserCleanup.DeleteUserAndOwnedAsync(factory.Services, result.Records![0].Shortname);
+    }
+
+    [FactIfPg]
+    public async Task Self_Registration_Without_Password_Sets_ForcePasswordChange_True()
+    {
+        // A passwordless self-registration (email-only) must set the flag so
+        // the user is prompted to set a password at first login.
+        var factory = _factory.WithWebHostBuilder(b => b.ConfigureServices(svcs =>
+        {
+            svcs.Configure<Dmart.Config.DmartSettings>(s => s.IsOtpForCreateRequired = false);
+        }));
+        var client = factory.CreateClient();
+        var users = factory.Services.GetRequiredService<UserRepository>();
+        var email = "fpcnopwd_" + Guid.NewGuid().ToString("N")[..6] + "@x.y";
+        var body = "{\"attributes\":{\"email\":\"" + email + "\"}}";
+        var resp = await client.PostAsync("/user/create",
+            new StringContent(body, Encoding.UTF8, "application/json"));
+        var result = await resp.Content.ReadFromJsonAsync(DmartJsonContext.Default.Response);
+        result!.Status.ShouldBe(Status.Success);
+
+        var created = await users.GetByShortnameAsync(result.Records![0].Shortname);
+        created.ShouldNotBeNull();
+        created!.Password.ShouldBeNull("passwordless self-registration must not set a password");
+        created!.ForcePasswordChange.ShouldBeTrue(
+            "passwordless self-registration must force a password change at first login");
+
+        await TestUserCleanup.DeleteUserAndOwnedAsync(factory.Services, result.Records![0].Shortname);
+    }
+
     // ==================== bot session-inactivity exemption ====================
 
     [FactIfPg]

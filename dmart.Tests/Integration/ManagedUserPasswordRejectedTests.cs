@@ -71,6 +71,43 @@ public sealed class ManagedUserPasswordRejectedTests : IClassFixture<DmartFactor
             var created = await users.GetByShortnameAsync(shortname);
             created.ShouldNotBeNull();
             created!.Password.ShouldBeNull("managed create must not set a password");
+            created.ForcePasswordChange.ShouldBeTrue(
+                "managed-created users are always passwordless and must change it at first login");
+        }
+        finally
+        {
+            await admin.Cleanup();
+            try { await users.DeleteAsync(shortname); } catch { }
+        }
+    }
+
+    [FactIfPg]
+    public async Task ManagedRequest_Create_User_ForcePasswordChange_False_Is_Overridden()
+    {
+        // An explicit `force_password_change: false` in the create request is
+        // intentionally ignored — managed-created users are always passwordless
+        // and must set a password at first login. The attribute is still
+        // honored on the managed UPDATE path, so an admin who needs to clear
+        // it can do so immediately after create.
+        var admin = await _factory.CreateLoggedInUserAsync();
+        var users = _factory.Services.GetRequiredService<UserRepository>();
+        var shortname = $"itestpw{Guid.NewGuid():N}"[..14];
+        try
+        {
+            var body =
+                "{\"space_name\":\"management\",\"request_type\":\"create\",\"records\":[{" +
+                "\"resource_type\":\"user\",\"subpath\":\"users\",\"shortname\":\"" + shortname + "\"," +
+                "\"attributes\":{\"is_active\":true,\"email\":\"" + shortname + "@x.y\",\"force_password_change\":false}}]}";
+            var resp = await admin.Client.PostAsync("/managed/request",
+                new StringContent(body, Encoding.UTF8, "application/json"));
+            var raw = await resp.Content.ReadAsStringAsync();
+            var result = JsonSerializer.Deserialize(raw, DmartJsonContext.Default.Response);
+
+            result!.Status.ShouldBe(Status.Success, $"create must succeed; got: {raw}");
+            var created = await users.GetByShortnameAsync(shortname);
+            created.ShouldNotBeNull();
+            created!.ForcePasswordChange.ShouldBeTrue(
+                "managed create must override an explicit force_password_change:false");
         }
         finally
         {
