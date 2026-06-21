@@ -1956,14 +1956,6 @@ internal static class AttachmentMapper
     //   * media, relationships, acl, space_name are excluded from attributes
     public static Record ToEntryRecord(Attachment a)
     {
-        // Python: "/".join(subpath.split("/")[:-1])  — strip trailing shortname segment
-        var parentSubpath = a.Subpath;
-        var lastSlash = parentSubpath.LastIndexOf('/');
-        if (lastSlash > 0)
-            parentSubpath = parentSubpath[..lastSlash];
-        else
-            parentSubpath = "/";
-
         var attrs = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
             ["is_active"] = a.IsActive,
@@ -1983,7 +1975,7 @@ internal static class AttachmentMapper
         return new Record
         {
             ResourceType = a.ResourceType,
-            Subpath = parentSubpath,
+            Subpath = a.Subpath,
             Shortname = a.Shortname,
             Uuid = a.Uuid,
             Attributes = AttrHelper.StripNulls(attrs),
