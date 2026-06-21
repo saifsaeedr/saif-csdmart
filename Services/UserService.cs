@@ -169,6 +169,7 @@ public sealed class UserService(
             Email = email,
             Msisdn = msisdn,
             Password = string.IsNullOrEmpty(password) ? null : hasher.Hash(password),
+            ForcePasswordChange = string.IsNullOrEmpty(password),
             Language = language,
             Displayname = displayname,
             Description = description,

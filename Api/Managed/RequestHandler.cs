@@ -527,7 +527,7 @@ public static class RequestHandler
             IsActive = !attrs.TryGetValue("is_active", out var ia) || !IsExplicitlyFalse(ia),
             IsEmailVerified = attrs.TryGetValue("is_email_verified", out var iev) && IsTruthy(iev),
             IsMsisdnVerified = attrs.TryGetValue("is_msisdn_verified", out var imv) && IsTruthy(imv),
-            ForcePasswordChange = attrs.TryGetValue("force_password_change", out var fpc) && IsTruthy(fpc),
+            ForcePasswordChange = true,
             // Python accepts device_id / locked_to_device on user create; mirror
             // so mobile clients can set their device fingerprint in one call
             // instead of create + update.
