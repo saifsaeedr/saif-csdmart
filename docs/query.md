@@ -82,8 +82,9 @@ Accepted in `search` string. Implementation: `QueryHelper.ParseSearchExpression`
 | `@field:*` | existence — `field IS NOT NULL` |
 | `-@field:*` | absence — `field IS NULL` |
 | `@tags:x`, `@roles:x`, `@groups:x` | `@>` jsonb containment |
-| `(expr1) (expr2)` | OR between parens groups, AND within |
-| `expr1 and expr2` | `and` keyword is ignored — AND is the default when no operator |
+| `(expr1) (expr2)` | AND between paren groups, AND within |
+| `expr1 or expr2` | disjunction; AND binds tighter than OR |
+| `expr1 and expr2` | `and` keyword is a no-op synonym for whitespace (AND is the default when no operator) |
 
 Type detection on values:
 - `true`/`false` → boolean cast

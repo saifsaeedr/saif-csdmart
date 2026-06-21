@@ -268,10 +268,25 @@ public class QueryHelperTests
     // ==================== Parentheses grouping ====================
 
     [Fact]
-    public void Search_Parentheses_Creates_OR_Between_Groups()
+    public void Search_Parentheses_Creates_AND_Between_Groups()
     {
-        var where = BuildSearch("(@is_active:true) (@payload.body.k:v)");
+        // BREAKING CHANGE (2026-06-20): whitespace between paren groups now
+        // means AND. Use two boolean columns (no internal OR in their emitted
+        // SQL) so the absence of OR is a meaningful signal.
+        var where = BuildSearch("(@is_active:true) (@is_open:false)");
+        where.ShouldContain("CAST(is_active AS BOOLEAN)");
+        where.ShouldContain("CAST(is_open AS BOOLEAN)");
+        where.ShouldContain(" AND ");
+        where.ShouldNotContain(" OR ");
+    }
+
+    [Fact]
+    public void Search_Or_Keyword_Creates_OR_Between_Terms()
+    {
+        var where = BuildSearch("@is_active:true or @is_open:false");
         where.ShouldContain(" OR ");
+        where.ShouldContain("CAST(is_active AS BOOLEAN)");
+        where.ShouldContain("CAST(is_open AS BOOLEAN)");
     }
 
     [Fact]
