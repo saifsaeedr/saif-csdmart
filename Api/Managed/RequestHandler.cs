@@ -1056,6 +1056,11 @@ public static class RequestHandler
                 if (!await perms.CanUpdateAsync(actor, attLocator, PermissionService.FromAttachment(existing), attrs, ct))
                     return (Response.Fail(InternalErrorCode.NOT_ALLOWED,
                         "not allowed to update attachment", ErrorTypes.Request), rec, null);
+                var attUniq = await uniqueness.ValidateRawAsync(
+                    existing.SpaceName, existing.Subpath, existing.Shortname,
+                    rec.ResourceType, attrs, ActionType.Update, ct);
+                if (!attUniq.IsOk)
+                    return (Response.Fail(attUniq.ErrorCode!, attUniq.ErrorMessage!, attUniq.ErrorType ?? ErrorTypes.Request), rec, null);
                 var updated = existing with
                 {
                     IsActive = attrs.TryGetValue("is_active", out var ia) ? !IsExplicitlyFalse(ia) : existing.IsActive,
@@ -1066,14 +1071,20 @@ public static class RequestHandler
                     Body = attrs.TryGetValue("body", out var b) ? ConvertToString(b) : existing.Body,
                     State = attrs.TryGetValue("state", out var s) ? ConvertToString(s) : existing.State,
                     Acl = attrs.ContainsKey("acl") ? ParseAcl(attrs) : existing.Acl,
+                    Payload = attrs.ContainsKey("payload") ? ParsePayloadFromAttrs(attrs) : existing.Payload,
                     OwnerGroupShortname = attrs.TryGetValue("owner_group_shortname", out var ogs)
                         ? ConvertToString(ogs) : existing.OwnerGroupShortname,
                     UpdatedAt = TimeUtils.Now(),
                 };
                 await attachments.UpsertAsync(updated, ct);
+
+                var attDiff = HistoryDiffUtil.ComputeAttachmentDiff(existing, updated);
+                if (attDiff.Count > 0)
+                    await history.AppendAsync(updated.SpaceName, updated.Subpath, updated.Shortname, actor, null, attDiff, ct);
+
                 return (Response.Ok(),
                     WithCreatedMetaAttributes(rec, updated.Uuid, updated.CreatedAt, updated.UpdatedAt, updated.OwnerShortname),
-                    null);
+                    attDiff);
             }
             default:
             {
