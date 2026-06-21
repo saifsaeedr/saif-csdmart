@@ -1045,6 +1045,36 @@ public static class RequestHandler
                     WithCreatedMetaAttributes(rec, updated.Uuid, updated.CreatedAt, updated.UpdatedAt, updated.OwnerShortname),
                     permDiff);
             }
+            case var t when ResourceWithPayloadHandler.IsAttachmentResourceType(t):
+            {
+                var existing = await attachments.GetAsync(space, "/" + rec.Subpath.TrimStart('/'), rec.Shortname, ct);
+                if (existing is null)
+                    return (Response.Fail(InternalErrorCode.SHORTNAME_DOES_NOT_EXIST,
+                        "attachment not found", ErrorTypes.Request), rec, null);
+                var attrs = rec.Attributes ?? new();
+                var attLocator = new Locator(rec.ResourceType, space, existing.Subpath, existing.Shortname);
+                if (!await perms.CanUpdateAsync(actor, attLocator, PermissionService.FromAttachment(existing), attrs, ct))
+                    return (Response.Fail(InternalErrorCode.NOT_ALLOWED,
+                        "not allowed to update attachment", ErrorTypes.Request), rec, null);
+                var updated = existing with
+                {
+                    IsActive = attrs.TryGetValue("is_active", out var ia) ? !IsExplicitlyFalse(ia) : existing.IsActive,
+                    Slug = attrs.TryGetValue("slug", out var sl) ? ConvertToString(sl) : existing.Slug,
+                    Displayname = attrs.TryGetValue("displayname", out var dn) ? ParseTranslation(dn) : existing.Displayname,
+                    Description = attrs.TryGetValue("description", out var desc) ? ParseTranslation(desc) : existing.Description,
+                    Tags = ExtractStringList(attrs, "tags") ?? existing.Tags,
+                    Body = attrs.TryGetValue("body", out var b) ? ConvertToString(b) : existing.Body,
+                    State = attrs.TryGetValue("state", out var s) ? ConvertToString(s) : existing.State,
+                    Acl = attrs.ContainsKey("acl") ? ParseAcl(attrs) : existing.Acl,
+                    OwnerGroupShortname = attrs.TryGetValue("owner_group_shortname", out var ogs)
+                        ? ConvertToString(ogs) : existing.OwnerGroupShortname,
+                    UpdatedAt = TimeUtils.Now(),
+                };
+                await attachments.UpsertAsync(updated, ct);
+                return (Response.Ok(),
+                    WithCreatedMetaAttributes(rec, updated.Uuid, updated.CreatedAt, updated.UpdatedAt, updated.OwnerShortname),
+                    null);
+            }
             default:
             {
                 var result = await entries.UpdateAsync(locator, rec.Attributes ?? new(), actor, ct);
