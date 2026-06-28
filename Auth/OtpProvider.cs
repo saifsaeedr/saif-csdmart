@@ -79,7 +79,10 @@ public sealed class OtpProvider(
     {
         const string fallback = "Your OTP code is {code}";
         var template = languages.Get(language, "otp_message") ?? fallback;
-        return template.Replace("{code}", code, StringComparison.Ordinal);
+        var ttlMinutes = (settings.Value.OtpTokenTtl / 60).ToString();
+        return template
+            .Replace("{code}", code, StringComparison.Ordinal)
+            .Replace("{otp_ttl}", ttlMinutes, StringComparison.Ordinal);
     }
 
     // Lightweight email heuristic — good enough for dispatch routing; the OTP
