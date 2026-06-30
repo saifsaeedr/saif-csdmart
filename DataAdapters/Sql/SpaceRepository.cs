@@ -160,36 +160,45 @@ public sealed class SpaceRepository(Db db)
     // Api/Managed/RequestHandler.cs): a client deleting a just-created space
     // can race the plugin's folder-insertion transaction and PostgreSQL
     // aborts one with 40P01. Deadlocks are transient and retry-safe.
-    public Task<bool> DeleteAsync(string shortname, CancellationToken ct = default)
-        => db.ExecuteWithRetryOnDeadlockAsync(c => DeleteOnceAsync(shortname, c), ct);
+    // Returns the per-category blast radius of the cascade. When dryRun is true nothing
+    // is removed: each table's matching rows are COUNTed instead of deleted (count(*)
+    // over a predicate equals what a DELETE over the same predicate removes), so the
+    // DeleteReport is a pure, lock-free projection.
+    public Task<DeleteReport> DeleteAsync(string shortname, bool dryRun = false, CancellationToken ct = default)
+        => db.ExecuteWithRetryOnDeadlockAsync(c => DeleteOnceAsync(shortname, dryRun, c), ct);
 
     [SuppressMessage("Security", "CA2100",
-        Justification = "Audited: each `sql` value is a literal element of a compile-time string[] (DELETE FROM <table>); shortname flows through $1.")]
-    private async Task<bool> DeleteOnceAsync(string shortname, CancellationToken ct)
+        Justification = "Audited: `table`/`column` are compile-time string literals and `verb` is a const literal (DELETE / SELECT count(*)); shortname flows through $1.")]
+    private async Task<DeleteReport> DeleteOnceAsync(string shortname, bool dryRun, CancellationToken ct)
     {
         await using var conn = await db.OpenAsync(ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
+        // A real delete runs every DELETE in one transaction (atomic cascade). A dryRun
+        // only COUNTs the matching rows — no write locks, nothing to roll back.
+        await using var tx = dryRun ? null : await conn.BeginTransactionAsync(ct);
 
-        var statements = new[]
+        // A space's contents carry space_name = the space's shortname, so the same
+        // bound value matches both the children (space_name) and the space's own row
+        // (shortname). The spaces-row delete isn't an "entry" and so isn't reported.
+        async Task<long> Run(string table, string column)
         {
-            "DELETE FROM histories   WHERE space_name = $1",
-            "DELETE FROM locks       WHERE space_name = $1",
-            "DELETE FROM attachments WHERE space_name = $1",
-            "DELETE FROM entries     WHERE space_name = $1",
-            "DELETE FROM spaces      WHERE shortname  = $1",
-        };
-
-        var rowsDeletedFromSpaces = 0;
-        foreach (var sql in statements)
-        {
+            var sql = dryRun
+                ? $"SELECT count(*) FROM {table} WHERE {column} = $1"
+                : $"DELETE FROM {table} WHERE {column} = $1";
             await using var cmd = new NpgsqlCommand(sql, conn, tx);
             cmd.Parameters.Add(new() { Value = shortname });
-            var n = await cmd.ExecuteNonQueryAsync(ct);
-            if (sql.Contains("FROM spaces", StringComparison.Ordinal)) rowsDeletedFromSpaces = n;
+            return dryRun
+                ? (long)(await cmd.ExecuteScalarAsync(ct) ?? 0L)
+                : await cmd.ExecuteNonQueryAsync(ct);
         }
 
-        await tx.CommitAsync(ct);
-        return rowsDeletedFromSpaces > 0;
+        var histories   = await Run("histories",   "space_name");
+        var locks       = await Run("locks",        "space_name");
+        var attachments = await Run("attachments",  "space_name");
+        var entries     = await Run("entries",      "space_name");
+        if (!dryRun) await Run("spaces", "shortname");
+
+        if (tx is not null) await tx.CommitAsync(ct);
+        return new DeleteReport(entries, attachments, histories, locks);
     }
 
     private static void AddJsonb(NpgsqlCommand cmd, string? json)

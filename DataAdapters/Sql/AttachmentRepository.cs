@@ -233,6 +233,21 @@ public sealed class AttachmentRepository(Db db)
         return await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    // Count (don't delete) every attachment at or under `prefix` — the dryrun
+    // projection counterpart of DeleteUnderSubpathAsync, using the identical predicate.
+    public async Task<long> CountUnderSubpathAsync(string spaceName, string prefix, CancellationToken ct = default)
+    {
+        await using var conn = await db.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand("""
+            SELECT count(*) FROM attachments
+            WHERE space_name = $1
+              AND (subpath = $2 OR subpath LIKE $2 || '/%')
+            """, conn);
+        cmd.Parameters.Add(new() { Value = spaceName });
+        cmd.Parameters.Add(new() { Value = prefix });
+        return (long)(await cmd.ExecuteScalarAsync(ct) ?? 0L);
+    }
+
     // ----- query support (used by QueryService for type=attachments) -----
 
     public Task<List<Attachment>> QueryAsync(Models.Api.Query q, CancellationToken ct = default)

@@ -317,6 +317,12 @@ public static class McpTools
         var confirm = args.TryGetProperty("confirm", out var confEl)
             && confEl.ValueKind == JsonValueKind.True;
 
+        // For folders, `force` opts into cascade-deleting a non-empty folder
+        // and its contents. Without it, EntryService rejects a non-empty
+        // folder with CANNT_DELETE. No-op for non-folder resource types.
+        var force = args.TryGetProperty("force", out var forceEl)
+            && forceEl.ValueKind == JsonValueKind.True;
+
         // If the client supports elicitation and didn't pre-confirm, ask the
         // user directly over SSE. On accept we proceed; on decline/cancel we
         // return a friendly "no-op" result instead of throwing — the model
@@ -339,7 +345,7 @@ public static class McpTools
 
         var locator = new Locator(resourceType, space, subpath, shortname);
         var result = await http.RequestServices.GetRequiredService<EntryService>()
-            .DeleteAsync(locator, actor, ct);
+            .DeleteAsync(locator, actor, force, ct: ct);
         if (!result.IsOk)
             throw new InvalidOperationException(result.ErrorMessage ?? "delete failed");
 
@@ -347,7 +353,7 @@ public static class McpTools
         using (var w = new Utf8JsonWriter(ms))
         {
             w.WriteStartObject();
-            w.WriteString("status", result.Value ? "deleted" : "not-found");
+            w.WriteString("status", result.Value!.Total > 0 ? "deleted" : "not-found");
             w.WriteString("space_name", space);
             w.WriteString("subpath", subpath);
             w.WriteString("shortname", shortname);

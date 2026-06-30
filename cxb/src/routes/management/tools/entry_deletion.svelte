@@ -108,6 +108,15 @@
             ownedEntries.every((e) => selectedKeys[e.key]),
     );
 
+    let forceDelete: boolean = $state(false);
+
+    // pendingDelete is inferred as `never` inside $derived (Svelte 5/TS); cast to any.
+    const showForce = $derived(
+        ((pendingDelete as any)?.targets ?? []).some(
+            (t: any) => t.resource_type === ResourceType.folder || t.resource_type === ResourceType.user,
+        ),
+    );
+
     async function handleSearchUser() {
         if (!searchValue.trim()) {
             return;
@@ -246,6 +255,7 @@
     }
 
     function askDeleteOne(entry: OwnedEntry) {
+        forceDelete = false;
         pendingDelete = { targets: [entry], mode: "one" };
         confirmOpen = true;
     }
@@ -254,6 +264,7 @@
         if (selectedTargets.length === 0) {
             return;
         }
+        forceDelete = false;
         pendingDelete = { targets: selectedTargets, mode: "many" };
         confirmOpen = true;
     }
@@ -262,6 +273,7 @@
         if (ownedEntries.length === 0) {
             return;
         }
+        forceDelete = false;
         pendingDelete = { targets: [...ownedEntries], mode: "many" };
         confirmOpen = true;
     }
@@ -327,8 +339,9 @@
                     const response = await Dmart.request({
                         space_name,
                         request_type: RequestType.delete,
+                        force: showForce && forceDelete,
                         records,
-                    });
+                    } as any);
                     if (response?.status === "success") {
                         for (const e of items) {
                             succeededKeys.add(e.key);
@@ -488,6 +501,7 @@
         if (failedDeletes.length === 0) {
             return;
         }
+        forceDelete = false;
         pendingDelete = {
             targets: failedDeletes.map((f) => f.entry),
             mode: "retry",
@@ -509,6 +523,7 @@
         }
         confirmOpen = false;
         pendingDelete = null;
+        forceDelete = false;
     }
 
     function canDeleteEntry(entry: OwnedEntry): boolean {
@@ -894,6 +909,16 @@
                           })}
                 </p>
             {/if}
+        {/if}
+
+        {#if showForce && !isDeleting}
+            <label class="flex items-start gap-2 mt-2 mb-2 text-sm cursor-pointer justify-center">
+                <input type="checkbox" bind:checked={forceDelete} class="mt-0.5" />
+                <span>
+                    <span class="font-semibold">{$_("force_delete")}</span>
+                    <span class="block text-gray-600">{$_("force_delete_help")}</span>
+                </span>
+            </label>
         {/if}
 
         {#if isDeleting}

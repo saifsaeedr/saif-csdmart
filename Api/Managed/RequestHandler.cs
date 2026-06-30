@@ -112,6 +112,10 @@ public static class RequestHandler
                             _ => null,
                         }
                         : null;
+                    // A dryrun delete is a read-only projection — skip the before-hook
+                    // (it may have side effects or veto) just like the after-hook below.
+                    if (req.RequestType is RequestType.Delete && req.DryRun)
+                        beforeActionType = null;
                     if (beforeActionType is not null)
                     {
                         try
@@ -167,7 +171,7 @@ public static class RequestHandler
                                         entries, users, access, spaces, attachments, perms, uniqueness, folderContent, schemas, ct),
                                     r => r.Response.Error?.Code == InternalErrorCode.SHORTNAME_ALREADY_EXIST),
                             RequestType.Delete =>
-                                await DispatchDeleteAsync(rec, req.SpaceName, actor, managementSpace,
+                                await DispatchDeleteAsync(rec, req.SpaceName, actor, managementSpace, req.Force, req.DryRun,
                                     entries, users, access, spaces, attachments, perms, ct),
                             RequestType.Move =>
                                 await DispatchMoveAsync(rec, req.SpaceName, actor, entries, ct),
@@ -195,6 +199,12 @@ public static class RequestHandler
                         continue;
                     }
                     responses.Add(result.UpdatedRecord);
+                    // Delete reports (affected/report/dry_run) are attached by each
+                    // DispatchDeleteAsync branch, so no post-hoc fallback is needed here.
+
+                    // A dryrun delete changed nothing — don't fire after-action hooks.
+                    if (req.RequestType is RequestType.Delete && req.DryRun)
+                        continue;
 
                     // Fire after-action plugin hooks for non-entry CRUD types.
                     // EntryService already fires hooks for entry creates/updates/deletes,
@@ -246,14 +256,15 @@ public static class RequestHandler
 
                 if (failedRecords.Count == 0)
                 {
-                    // Update/Patch/Delete don't return records at all — clients
-                    // only need success confirmation, and echoing the request
-                    // payload (or, on Delete, a row that no longer exists) is
-                    // noise. Create/Move/Assign/UpdateAcl still emit `records`
-                    // so callers can read back the freshly assigned uuid /
-                    // created_at / updated_at via WithCreatedMetaAttributes.
-                    var omitRecords = req.RequestType is RequestType.Update
-                        or RequestType.Patch or RequestType.Delete;
+                    // Update/Patch return no records — clients only need success
+                    // confirmation and echoing the request payload is noise.
+                    // Delete now returns records: each carries `attributes.deleted`,
+                    // the list of `"$space/$subpath/$shortname"` paths actually
+                    // removed (empty for an idempotent already-gone delete).
+                    // Create/Move/Assign/UpdateAcl emit `records` so callers can read
+                    // back the freshly assigned uuid / created_at / updated_at via
+                    // WithCreatedMetaAttributes.
+                    var omitRecords = req.RequestType is RequestType.Update or RequestType.Patch;
                     return Response.Ok(omitRecords ? null : responses);
                 }
 
@@ -1113,12 +1124,25 @@ public static class RequestHandler
     // ============================================================================
 
     private static async Task<(Response Response, Record UpdatedRecord)> DispatchDeleteAsync(
-        Record rec, string space, string actor, string managementSpace,
+        Record rec, string space, string actor, string managementSpace, bool force, bool dryRun,
         EntryService entries, UserRepository users, AccessRepository access,
         SpaceRepository spaces, AttachmentRepository attachments,
         PermissionService perms, CancellationToken ct)
     {
-        var locator = new Locator(rec.ResourceType, space, rec.Subpath, rec.Shortname);
+        // Shared NOT_ALLOWED guard: returns the denial tuple when `actor` may not
+        // delete `target`, else null so the caller proceeds. `ctx` is the resource
+        // in hand for ACL evaluation (null for attachments, which pass no context).
+        async Task<(Response Response, Record UpdatedRecord)?> DenyDeleteAsync(
+            Locator target, PermissionService.ResourceContext? ctx, string label)
+        {
+            if (await perms.CanDeleteAsync(actor, target, ctx, ct)) return null;
+            return (Response.Fail(InternalErrorCode.NOT_ALLOWED,
+                $"not allowed to delete {label}", ErrorTypes.Request), rec);
+        }
+
+        // Every successful branch reports a DeleteReport: `affected` (total rows) plus a
+        // per-category `report`, and `dry_run: true` when nothing was actually removed.
+        (Response, Record) Ok(DeleteReport report) => (Response.Ok(), AttachReport(rec, report, dryRun));
 
         switch (rec.ResourceType)
         {
@@ -1126,12 +1150,32 @@ public static class RequestHandler
             {
                 var existing = await users.GetByShortnameAsync(rec.Shortname, ct);
                 if (existing is null)
-                    return (Response.Ok(), rec); // idempotent: already gone
+                    return Ok(DeleteReport.Empty); // idempotent: already gone
                 var userLocator = new Locator(ResourceType.User, existing.SpaceName, existing.Subpath, existing.Shortname);
-                if (!await perms.CanDeleteAsync(actor, userLocator, PermissionService.FromUser(existing), ct))
-                    return (Response.Fail(InternalErrorCode.NOT_ALLOWED, "not allowed to delete user", ErrorTypes.Request), rec);
-                await users.DeleteAsync(rec.Shortname, ct);
-                return (Response.Ok(), rec);
+                if (await DenyDeleteAsync(userLocator, PermissionService.FromUser(existing), "user") is { } denied)
+                    return denied;
+
+                // A plain (non-force, non-dryrun) user delete only succeeds if the user
+                // owns nothing; it removes just the user row (not an entry → empty
+                // report). A dryrun ignores force and projects the full cascade instead.
+                if (!force && !dryRun)
+                {
+                    if (await users.OwnsAnyRecordsAsync(rec.Shortname, ct))
+                        return (Response.Fail(InternalErrorCode.CANNT_DELETE,
+                            $"user '{rec.Shortname}' has created records; pass force=true to delete the user and everything they own",
+                            ErrorTypes.Request), rec);
+                    await users.DeleteAsync(rec.Shortname, ct);
+                    return Ok(DeleteReport.Empty);
+                }
+
+                // Never let a force-delete wipe the management space, even if this user
+                // owns it — it holds all users/roles/permissions. The guard also applies
+                // to a dryrun projection: an impossible delete shouldn't report a count.
+                if (await users.OwnsSpaceAsync(rec.Shortname, managementSpace, ct))
+                    return (Response.Fail(InternalErrorCode.CANNT_DELETE,
+                        $"cannot force-delete user '{rec.Shortname}': they own the management space '{managementSpace}'",
+                        ErrorTypes.Request), rec);
+                return Ok(await users.ForceDeleteAsync(rec.Shortname, dryRun, ct));
             }
             case ResourceType.Space:
             {
@@ -1142,12 +1186,11 @@ public static class RequestHandler
                         $"cannot delete the management space '{managementSpace}'", ErrorTypes.Request), rec);
                 var existing = await spaces.GetAsync(rec.Shortname, ct);
                 if (existing is null)
-                    return (Response.Ok(), rec);
+                    return Ok(DeleteReport.Empty);
                 var spaceLocator = new Locator(ResourceType.Space, existing.SpaceName, existing.Subpath, existing.Shortname);
-                if (!await perms.CanDeleteAsync(actor, spaceLocator, PermissionService.FromSpace(existing), ct))
-                    return (Response.Fail(InternalErrorCode.NOT_ALLOWED, "not allowed to delete space", ErrorTypes.Request), rec);
-                await spaces.DeleteAsync(rec.Shortname, ct);
-                return (Response.Ok(), rec);
+                if (await DenyDeleteAsync(spaceLocator, PermissionService.FromSpace(existing), "space") is { } denied)
+                    return denied;
+                return Ok(await spaces.DeleteAsync(rec.Shortname, dryRun, ct));
             }
             case ResourceType.Group:
             {
@@ -1156,10 +1199,11 @@ public static class RequestHandler
                     return (Response.Fail(InternalErrorCode.OBJECT_NOT_FOUND,
                         $"group '{rec.Shortname}' not found", ErrorTypes.Request), rec);
                 var groupLocator = new Locator(ResourceType.Group, existing.SpaceName, existing.Subpath, existing.Shortname);
-                if (!await perms.CanDeleteAsync(actor, groupLocator, PermissionService.FromGroup(existing), ct))
-                    return (Response.Fail(InternalErrorCode.NOT_ALLOWED, "not allowed to delete group", ErrorTypes.Request), rec);
-                await access.DeleteGroupAsync(rec.Shortname, ct);
-                return (Response.Ok(), rec);
+                if (await DenyDeleteAsync(groupLocator, PermissionService.FromGroup(existing), "group") is { } denied)
+                    return denied;
+                // Structural object, no cascade — empty report either way.
+                if (!dryRun) await access.DeleteGroupAsync(rec.Shortname, ct);
+                return Ok(DeleteReport.Empty);
             }
             // Role/Permission live in their own tables, not `entries` — falling
             // through to EntryService.DeleteAsync would silently no-op.
@@ -1170,11 +1214,11 @@ public static class RequestHandler
                     return (Response.Fail(InternalErrorCode.OBJECT_NOT_FOUND,
                         $"role '{rec.Shortname}' not found", ErrorTypes.Request), rec);
                 var roleLocator = new Locator(ResourceType.Role, existing.SpaceName, existing.Subpath, existing.Shortname);
-                if (!await perms.CanDeleteAsync(actor, roleLocator, PermissionService.FromRole(existing), ct))
-                    return (Response.Fail(InternalErrorCode.NOT_ALLOWED, "not allowed to delete role", ErrorTypes.Request), rec);
-                var deleted = await access.DeleteRoleAsync(rec.Shortname, ct);
-                return deleted
-                    ? (Response.Ok(), rec)
+                if (await DenyDeleteAsync(roleLocator, PermissionService.FromRole(existing), "role") is { } denied)
+                    return denied;
+                if (dryRun) return Ok(DeleteReport.Empty);
+                return await access.DeleteRoleAsync(rec.Shortname, ct)
+                    ? Ok(DeleteReport.Empty)
                     : (Response.Fail(InternalErrorCode.OBJECT_NOT_FOUND,
                         $"role '{rec.Shortname}' not found", ErrorTypes.Request), rec);
             }
@@ -1185,11 +1229,11 @@ public static class RequestHandler
                     return (Response.Fail(InternalErrorCode.OBJECT_NOT_FOUND,
                         $"permission '{rec.Shortname}' not found", ErrorTypes.Request), rec);
                 var permLocator = new Locator(ResourceType.Permission, existing.SpaceName, existing.Subpath, existing.Shortname);
-                if (!await perms.CanDeleteAsync(actor, permLocator, PermissionService.FromPermission(existing), ct))
-                    return (Response.Fail(InternalErrorCode.NOT_ALLOWED, "not allowed to delete permission", ErrorTypes.Request), rec);
-                var deleted = await access.DeletePermissionAsync(rec.Shortname, ct);
-                return deleted
-                    ? (Response.Ok(), rec)
+                if (await DenyDeleteAsync(permLocator, PermissionService.FromPermission(existing), "permission") is { } denied)
+                    return denied;
+                if (dryRun) return Ok(DeleteReport.Empty);
+                return await access.DeletePermissionAsync(rec.Shortname, ct)
+                    ? Ok(DeleteReport.Empty)
                     : (Response.Fail(InternalErrorCode.OBJECT_NOT_FOUND,
                         $"permission '{rec.Shortname}' not found", ErrorTypes.Request), rec);
             }
@@ -1203,22 +1247,23 @@ public static class RequestHandler
             case ResourceType.Alteration:
             case ResourceType.DataAsset:
             {
-                // Look up by (space, subpath, shortname) and delete by uuid
+                // Look up by (space, subpath, shortname) and delete by uuid.
                 var existing = await attachments.GetAsync(space, "/" + rec.Subpath.TrimStart('/'), rec.Shortname, ct);
-                if (existing is null) return (Response.Ok(), rec); // already gone
+                if (existing is null) return Ok(DeleteReport.Empty); // already gone
                 var attLocator = new Locator(rec.ResourceType, space, existing.Subpath, existing.Shortname);
-                if (!await perms.CanDeleteAsync(actor, attLocator, ct))
-                    return (Response.Fail(InternalErrorCode.NOT_ALLOWED, "not allowed to delete attachment", ErrorTypes.Request), rec);
-                if (Guid.TryParse(existing.Uuid, out var u))
+                if (await DenyDeleteAsync(attLocator, null, "attachment") is { } denied)
+                    return denied;
+                if (!dryRun && Guid.TryParse(existing.Uuid, out var u))
                     await attachments.DeleteAsync(u, ct);
-                return (Response.Ok(), rec);
+                return Ok(new DeleteReport(0, 1, 0, 0)); // one attachment removed / would be removed
             }
             default:
             {
-                var result = await entries.DeleteAsync(locator, actor, ct);
-                return result.IsOk
-                    ? (Response.Ok(), rec)
-                    : (Response.Fail(result.ErrorCode!, result.ErrorMessage!, ErrorTypes.Request), rec);
+                var locator = new Locator(rec.ResourceType, space, rec.Subpath, rec.Shortname);
+                var result = await entries.DeleteAsync(locator, actor, force, dryRun, ct);
+                if (!result.IsOk)
+                    return (Response.Fail(result.ErrorCode, result.ErrorMessage!, ErrorTypes.Request), rec);
+                return Ok(result.Value!);
             }
         }
     }
@@ -1699,6 +1744,20 @@ public static class RequestHandler
         if (raw is JsonElement el && el.ValueKind == JsonValueKind.Object)
             return JsonbHelpers.FromDictStringObject(el.GetRawText());
         return null;
+    }
+
+    // A delete reports its blast radius as `affected` (total rows removed) plus a
+    // per-category `report`. On a dryrun nothing was removed, so `dry_run: true` is
+    // added and the numbers are a projection of what a real delete would remove.
+    private static Record AttachReport(Record rec, DeleteReport report, bool dryRun)
+    {
+        var attrs = rec.Attributes is null
+            ? new Dictionary<string, object>()
+            : new Dictionary<string, object>(rec.Attributes);
+        attrs["affected"] = report.Total;
+        attrs["report"] = report.ToObject();
+        if (dryRun) attrs["dry_run"] = true;
+        return rec with { Attributes = attrs };
     }
 
     private static string? ConvertToString(object? v) => v switch

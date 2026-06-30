@@ -1,4 +1,4 @@
-import { Dmart, RequestType, ResourceType, type ResponseEntry } from "@edraj/tsdmart";
+import { Dmart, RequestType, ResourceType, type ResponseEntry, type ActionRequest } from "@edraj/tsdmart";
 import { removeEmpty } from "@/utils/renderer/schemaEntryRenderer";
 import { Level, showToast } from "@/utils/toast";
 import { jsonEditorContentParser } from "@/utils/jsonEditor";
@@ -129,7 +129,8 @@ export async function deleteEntry(
     entry: ResponseEntry,
     space_name: string,
     subpath: string,
-    resource_type: ResourceType
+    resource_type: ResourceType,
+    force: boolean = false
 ): Promise<{ success: boolean; errorMessage?: string }> {
     let targetSubpath: string;
     if (resource_type === ResourceType.folder) {
@@ -141,16 +142,18 @@ export async function deleteEntry(
     }
 
     try {
-        await Dmart.request({
+        const body: ActionRequest & { force?: boolean } = {
             space_name: space_name,
             request_type: RequestType.delete,
+            force,
             records: [{
                 resource_type: resource_type,
                 shortname: entry.shortname,
                 subpath: targetSubpath || '/',
                 attributes: {}
             }]
-        });
+        };
+        await Dmart.request(body);
         showToast(Level.info, `Entry deleted successfully`);
         return { success: true };
     } catch (error: any) {

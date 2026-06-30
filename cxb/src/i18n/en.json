@@ -59,6 +59,8 @@
   "back": "Back",
   "warning": "Warning",
   "delete": "Delete",
+  "force_delete": "Force delete",
+  "force_delete_help": "Permanently delete this and everything it contains/owns. Cannot be undone.",
   "delete_selected": "Delete Selected Items",
   "edit": "Edit",
   "activate": "Activate",

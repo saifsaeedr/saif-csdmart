@@ -5,8 +5,17 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
+/* Tailwind v4 only generates flowbite-svelte's utility classes (button/modal
+   padding, hover backgrounds, sr-only, sizing) if it scans the package's dist.
+   In this yarn-workspaces monorepo the deps are hoisted to the REPO ROOT, so
+   ../node_modules/* resolves to the (empty) cxb/node_modules and scans nothing —
+   leaving buttons unpadded, outline hovers turning text white with no fill, and
+   modal headers/close-buttons unstyled. List both locations so the scan works
+   whether the package is hoisted (../../) or installed locally (../). */
 @source "../node_modules/flowbite-svelte/dist";
 @source "../node_modules/flowbite-svelte-icons/dist";
+@source "../../node_modules/flowbite-svelte/dist";
+@source "../../node_modules/flowbite-svelte-icons/dist";
 
 @theme {
     --color-primary: #3C54F0;

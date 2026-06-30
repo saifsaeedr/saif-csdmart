@@ -64,6 +64,7 @@
     } from "@/utils/entryManagement";
     import { bulkBucket } from "@/stores/management/bulk_bucket";
     import { showToast, Level } from "@/utils/toast";
+    import { _ } from "svelte-i18n";
 
     const EDITOR_INIT_DELAY = 512;
     const DEFAULT_RECORDS_LIMIT = 50;
@@ -294,8 +295,13 @@
     }
 
     let openDeleteModal = $state(false);
+    let forceDelete = $state(false);
+    const showForce = $derived(
+        resource_type === ResourceType.folder || resource_type === ResourceType.user,
+    );
     function deleteCurrentEntryModal() {
         errorMessage = null;
+        forceDelete = false;
         openDeleteModal = true;
     }
     async function deleteCurrentEntry() {
@@ -306,6 +312,7 @@
             space_name,
             subpath,
             resource_type,
+            showForce && forceDelete,
         );
 
         if (result.success) {
@@ -1035,6 +1042,16 @@
         ({resource_type})?<br />
         This action cannot be undone.
     </p>
+
+    {#if showForce}
+        <label class="flex items-start gap-2 mt-4 text-sm cursor-pointer">
+            <input type="checkbox" bind:checked={forceDelete} class="mt-0.5" />
+            <span>
+                <span class="font-semibold">{$_("force_delete")}</span>
+                <span class="block text-gray-600">{$_("force_delete_help")}</span>
+            </span>
+        </label>
+    {/if}
 
     {#if errorMessage}
         <div class="mt-4">

@@ -199,7 +199,8 @@ public static class McpRegistry
                     "subpath":       { "type": "string", "description": "Defaults to '/'." },
                     "shortname":     { "type": "string" },
                     "resource_type": { "type": "string", "description": "Defaults to 'content'." },
-                    "confirm":       { "type": "boolean", "description": "MUST be true. Passing false or omitting this argument rejects the call." }
+                    "confirm":       { "type": "boolean", "description": "MUST be true. Passing false or omitting this argument rejects the call." },
+                    "force":         { "type": "boolean", "description": "For folders only: when true, cascade-delete the folder and all of its contents. A non-empty folder cannot be deleted without this. Defaults to false." }
                   },
                   "required": ["space_name","shortname","confirm"],
                   "additionalProperties": false

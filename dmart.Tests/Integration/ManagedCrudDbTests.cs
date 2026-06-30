@@ -394,12 +394,15 @@ public class ManagedCrudDbTests : IClassFixture<DmartFactory>
             (await CountWhereSubtreeAsync("attachments", $"/{rootFolder}")).ShouldBeGreaterThan(0);
             (await CountWhereSubtreeAsync("histories",   $"/{rootFolder}")).ShouldBeGreaterThan(0);
 
-            // Delete the root folder.
+            // Delete the root folder. The folder is non-empty, so the cascade
+            // requires force=true (without it the delete is refused — see
+            // ForceDeleteEndpointTests.NonEmpty_Folder_Without_Force_Fails...).
             var del = await client.PostAsJsonAsync("/managed/request",
                 new Request
                 {
                     RequestType = RequestType.Delete,
                     SpaceName = space,
+                    Force = true,
                     Records = new() { new Record { ResourceType = ResourceType.Folder, Subpath = "/", Shortname = rootFolder } },
                 }, DmartJsonContext.Default.Request);
             del.StatusCode.ShouldBe(HttpStatusCode.OK);
@@ -419,13 +422,15 @@ public class ManagedCrudDbTests : IClassFixture<DmartFactory>
         }
         finally
         {
-            // Best-effort cleanup if the test bailed mid-way.
+            // Best-effort cleanup if the test bailed mid-way. force=true so a
+            // non-empty leftover subtree is still removed.
             await CreateAsync(ResourceType.Folder, "/", rootFolder); // ignore result
             await client.PostAsJsonAsync("/managed/request",
                 new Request
                 {
                     RequestType = RequestType.Delete,
                     SpaceName = space,
+                    Force = true,
                     Records = new() { new Record { ResourceType = ResourceType.Folder, Subpath = "/", Shortname = rootFolder } },
                 }, DmartJsonContext.Default.Request);
         }

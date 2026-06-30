@@ -30,7 +30,8 @@
         subpathInManagementNoAction,
     } from "@/stores/global";
     import { bulkBucket } from "@/stores/management/bulk_bucket";
-    import { Dmart, RequestType, ResourceType } from "@edraj/tsdmart";
+    import { Dmart, RequestType, ResourceType, type ActionRequest } from "@edraj/tsdmart";
+    import { _ } from "svelte-i18n";
     import { Level, showToast } from "@/utils/toast";
     import { searchListView } from "@/stores/management/triggers";
     import { user } from "@/stores/user";
@@ -101,8 +102,15 @@
     let isActionLoading = $state(false);
     let openDeleteModal = $state(false);
     let modelError: any = $state(null);
+    let forceDelete = $state(false);
+    const showForce = $derived(
+        $bulkBucket.some(
+            (b) => b.resource_type === ResourceType.folder || b.resource_type === ResourceType.user,
+        ),
+    );
     function deleteCurrentEntry() {
         modelError = null;
+        forceDelete = false;
         openDeleteModal = true;
     }
     async function handleBulkDelete() {
@@ -117,9 +125,10 @@
                     attributes: {},
                 }));
 
-                const request_body = {
+                const request_body: ActionRequest & { force?: boolean } = {
                     space_name,
                     request_type: RequestType.delete,
+                    force: showForce && forceDelete,
                     records: records,
                 };
                 const response = await Dmart.request(request_body);
@@ -411,6 +420,16 @@
         {$bulkBucket.length === 1 ? "entry" : "entries"}?<br />
         This action cannot be undone.
     </p>
+
+    {#if showForce}
+        <label class="flex items-start gap-2 mb-4 text-sm cursor-pointer">
+            <input type="checkbox" bind:checked={forceDelete} class="mt-0.5" />
+            <span>
+                <span class="font-semibold">{$_("force_delete")}</span>
+                <span class="block text-gray-600">{$_("force_delete_help")}</span>
+            </span>
+        </label>
+    {/if}
 
     {#if modelError}
         <div class="mt-4">
